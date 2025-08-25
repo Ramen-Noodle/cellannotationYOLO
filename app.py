@@ -58,8 +58,9 @@ def batch_process_image_yolo(user_id, image_path, detection_type, threshold, mod
 
         # --- 2) Optionally scale the normalized PNG for detection ---
         scaling_factor = 1.0
-        if float(cell_diameter) != 34.0:
-            scaling_factor = 34.0 / float(cell_diameter)
+        target_diameter = 20.0 if detection_type == 'CD3' else 34.0
+        if float(cell_diameter) != target_diameter:
+            scaling_factor = target_diameter / float(cell_diameter)
             with Image.open(normalized_path) as img:
                 w, h = img.size
                 det_w = max(1, int(round(w * scaling_factor)))
@@ -79,7 +80,7 @@ def batch_process_image_yolo(user_id, image_path, detection_type, threshold, mod
         model_map = {
             'SGN': 'snapshots/SGN_best.pt',
             'MADM': 'snapshots/MADM_best.pt',
-            'CD3': 'snapshots/cd3_v2.pt'
+            'CD3': 'snapshots/cd3_v3.pt'
         }
         model_path = model_path or model_map.get(detection_type)
         if not model_path:
@@ -916,104 +917,6 @@ def train_saved_data():
         return jsonify({'error': str(e)}), 500
 
 
-
-
-@app.route('/train', methods=['POST'])
-def train_model():
-    user_id = session['user_id']
-    user_snapshot_dir = os.path.join('users', user_id, 'snapshots')
-    user_ft_upload_dir = os.path.join('users', user_id, 'ft_upload')
-
-    try:
-        # Clean and setup directories
-        shutil.rmtree('ft_upload', ignore_errors=True)
-        os.makedirs('ft_upload', exist_ok=True)
-
-        # Save CSV
-        csv_file = request.files['csv']
-        csv_path = os.path.join(user_ft_upload_dir, 'annotations.csv')  # Define csv_path
-        csv_file.save(csv_path)
-
-        # Save images
-        for img in request.files.getlist('images'):
-            img.save(os.path.join(user_ft_upload_dir, img.filename))
-
-        # Get training parameters
-        model_type = request.form.get('model_type', 'SGN')
-        epochs = request.form.get('epochs', '10')
-        classes_file = 'monochrome.csv' if model_type == 'SGN' else 'color.csv'  # Define classes_file
-        weights_file = 'snapshots/SGN_Rene.h5' if model_type == 'SGN' else 'snapshots/MADMweights.h5'
-
-        # Validate epochs
-        try:
-            epochs = int(epochs)
-            if epochs < 1:
-                return jsonify({'error': 'Epochs must be at least 1'}), 400
-        except ValueError:
-            return jsonify({'error': 'Invalid epochs value'}), 400
-
-        tb_log_dir = os.path.join(user_snapshot_dir, 'tensorboard')
-        os.makedirs(tb_log_dir, exist_ok=True)
-        # Run training
-        cmd = [
-            'python3', 'keras_retinanet/keras_retinanet/bin/train.py',
-            '--tensorboard-dir', tb_log_dir,
-            '--weights', weights_file,
-            '--lr', '1e-4',
-            '--batch-size', '8',
-            '--epochs', str(epochs),
-            '--snapshot-path', user_snapshot_dir,  # ✅ User-specific snapshots
-            'csv', 
-            csv_path,  # Now defined
-            classes_file  # Now defined
-        ]
-
-        # Run with real-time output
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-
-        # Stream output to terminal
-        while True:
-            output = process.stdout.readline()
-            if output == '' and process.poll() is not None:
-                break
-            if output:
-                print(output.strip(), flush=True)
-
-        if process.returncode != 0:
-            return jsonify({'error': 'Training failed'}), 500
-
-        # Return latest snapshot
-        # Get specific snapshot based on epochs
-        epoch_str = f"{epochs:02d}"
-        expected_filename = f'resnet50_csv_{epoch_str}.h5'
-        snapshot_path = os.path.join(user_snapshot_dir, expected_filename)
-    
-            # ===== START CRITICAL FIX =====
-        # Wait for file to finish writing
-        time.sleep(1)  # Wait 1 second
-        gc.collect()  # Clean up memory
-
-        # Copy using safe binary method
-        fixed_path = os.path.join(user_snapshot_dir, 'last_used.h5')
-        with open(snapshot_path, 'rb') as src_file, open(fixed_path, 'wb') as dest_file:
-            shutil.copyfileobj(src_file, dest_file)
-        # ===== END CRITICAL FIX =====
-
-        return send_file(
-            snapshot_path,
-            as_attachment=True,
-            download_name=expected_filename,
-            mimetype='application/octet-stream'
-        )
-
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
     
 @app.route('/detect-custom', methods=['POST'])
 def detect_custom():
@@ -1049,13 +952,11 @@ def scale_image():
     converted_dir = os.path.join('users', user_id, 'converted')
     try:
         diameter = float(request.form['diameter'])
+        target_diameter = float(request.form.get('target_diameter', 34))  # Get target diameter from request
         original_filename = request.form['original_filename']
         
-        if 'target_diameter' not in session:
-            session['target_diameter'] = 34.0
-
-        scaling_factor = session['target_diameter'] / diameter
-        session['target_diameter'] = diameter
+        # Calculate scaling factor based on target diameter
+        scaling_factor = target_diameter / diameter
 
         current_path = os.path.join(upload_dir, original_filename)
         if not os.path.exists(current_path):
