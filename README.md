@@ -4,7 +4,7 @@ The **Cell Annotation Tool (CAT)** is a web-based graphical user interface (GUI)
 
 The tool uses **YOLOv11 (Ultralytics)** for detection.
 
-![Screenshot](https://i.ibb.co/HT352zqk/Screenshot-2025-10-07-154546.png)
+![Screenshot](images/screenshot.png)
 
 ---
 
