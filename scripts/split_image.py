@@ -3,6 +3,8 @@
 import os
 import argparse
 from PIL import Image
+# Disable decompression bomb protection for large TIFF files
+Image.MAX_IMAGE_PIXELS = None
 
 def split_image(image_path, output_dir, tile_size=512):
     os.makedirs(output_dir, exist_ok=True)
