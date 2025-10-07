@@ -24,6 +24,9 @@ import tensorflow as tf
 from ultralytics import YOLO
 from scripts.normalization import normalize_image
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Gets directory where app.py is
+from PIL import Image
+# Disable decompression bomb protection for large TIFF files
+Image.MAX_IMAGE_PIXELS = None
 
 def batch_process_image_yolo(user_id, image_path, detection_type, threshold, model_path=None, cell_diameter=34):
     """
@@ -79,7 +82,7 @@ def batch_process_image_yolo(user_id, image_path, detection_type, threshold, mod
         # --- 3) Select model ---
         model_map = {
             'SGN': 'snapshots/SGN_best.pt',
-            'MADM': 'snapshots/MADM_best.pt',
+            'MADM': 'snapshots/MADM_v3.pt',
             'CD3': 'snapshots/cd3_v3.pt'
         }
         model_path = model_path or model_map.get(detection_type)
@@ -565,11 +568,16 @@ def save_training_data():
         saved_data_dir = os.path.join('users', user_id, 'saved_data')
         saved_annotations_dir = os.path.join('users', user_id, 'saved_annotations')
         
-        # Copy original image
-        src_path = os.path.join(user_upload_dir, original_filename)
+        # Copy ORIGINAL image (not the scaled version)
+        original_path = os.path.join(user_upload_dir, original_filename)
         dest_filename = f"{unique_id}_{original_filename}"
         dest_path = os.path.join(saved_data_dir, dest_filename)
-        shutil.copy2(src_path, dest_path)
+        
+        # Always use the original file, never the scaled version
+        if not os.path.exists(original_path):
+            return jsonify({'error': 'Original image file not found'}), 404
+        
+        shutil.copy2(original_path, dest_path)
         
         # Class mapping
         CLASS_MAP = {
@@ -583,7 +591,7 @@ def save_training_data():
             "CD3": 7
         }
         
-        # Create YOLO annotations with consistent formatting
+        # Create YOLO annotations with consistent formatting (already in original coordinates)
         yolo_lines = []
         for ann in annotations:
             class_id = CLASS_MAP.get(ann['class_name'], 0)
@@ -598,10 +606,18 @@ def save_training_data():
         
         # Save annotation file
         os.makedirs(saved_annotations_dir, exist_ok=True)
-        with open(os.path.join(saved_annotations_dir, f"{unique_id}.txt"), 'w') as f:
+        annotation_filename = f"{unique_id}.txt"
+        with open(os.path.join(saved_annotations_dir, annotation_filename), 'w') as f:
             f.write("\n".join(yolo_lines))
         
-        return jsonify({'message': 'Training data saved with clean formatting'})
+        print(f"Saved training data: {dest_filename} with {len(yolo_lines)} annotations in original coordinates")
+        
+        return jsonify({
+            'message': 'Training data saved with original image and coordinates',
+            'image_file': dest_filename,
+            'annotation_file': annotation_filename,
+            'annotation_count': len(yolo_lines)
+        })
         
     except Exception as e:
         print(f"Error saving training data: {str(e)}")
@@ -653,7 +669,7 @@ def detect_madm():
             return jsonify({'error': 'No image found. Upload an image first.'}), 400
 
         image_path = os.path.join(upload_dir, files[0])
-        model_path = 'snapshots/MADM_best.pt'
+        model_path = 'snapshots/MADM_v3.pt'
 
         # Step 1: Split into tiles
         subprocess.run(['python3', 'scripts/split_image.py', '--image', image_path, '--output', tiles_dir], check=True)
@@ -831,10 +847,33 @@ def train_saved_data():
                     print(f"  - {loc}")
 
         # --- 5. Write data.yaml ---
-        class_names = ["SGN"] if model_type == 'SGN' else sorted(
-            [os.path.splitext(f)[0] for f in os.listdir(labels_sub)]
-        )
-        nc = 1 if model_type in ('SGN', 'CD3') else len(class_names)
+               # --- 5. Write data.yaml ---
+        if model_type == 'SGN':
+            class_names = ["SGN"]
+        elif model_type == 'CD3':
+            # Hard-code CD3 at index 7 (with dummies at 0–6)
+            class_names = [f"dummy{i}" for i in range(7)] + ["CD3"]
+        elif model_type == 'MADM':
+            # ❗ ADDED: Explicitly define MADM class names
+            # These should match the classes your MADM model is designed to detect.
+            # This list is derived from your CLASS_MAP in the /save-training-data route.
+            class_names = [
+                "SGN", 
+                "yellow neuron", 
+                "yellow astrocyte", 
+                "green neuron", 
+                "green astrocyte", 
+                "red neuron", 
+                "red astrocyte",
+                "CD3"
+            ]
+        else:
+            # Fallback for any unexpected model type
+            return jsonify({'error': f'Unsupported model type for training: {model_type}'}), 400
+
+        # Simplified and more robust nc calculation
+        nc = len(class_names)
+        
         yaml_path = os.path.join(yolo_base, 'data.yaml')
         with open(yaml_path, 'w') as f:
             f.write(f"path: {os.path.abspath(yolo_base)}\n")
@@ -845,7 +884,7 @@ def train_saved_data():
         print(f"[DEBUG] data.yaml written with nc={nc}, names={class_names}")
 
         # --- 6. Train model ---
-        weights = 'snapshots/SGN_best.pt' if model_type == 'SGN' else 'snapshots/CD3_best.pt' if model_type == 'CD3' else 'snapshots/MADM_best.pt'
+        weights = 'snapshots/SGN_best.pt' if model_type == 'SGN' else 'snapshots/cd3_v3.pt' if model_type == 'CD3' else 'snapshots/MADM_v3.pt'
         run_name = f"run_{int(time.time())}"
         print(f"[DEBUG] Starting YOLO train, weights={weights}, run name={run_name}")
         model = YOLO(weights)
@@ -952,36 +991,51 @@ def scale_image():
     converted_dir = os.path.join('users', user_id, 'converted')
     try:
         diameter = float(request.form['diameter'])
-        target_diameter = float(request.form.get('target_diameter', 34))  # Get target diameter from request
+        target_diameter = float(request.form.get('target_diameter', 34))
         original_filename = request.form['original_filename']
         
-        # Calculate scaling factor based on target diameter
-        scaling_factor = target_diameter / diameter
+        # Always use the ORIGINAL image file, not a scaled version
+        original_path = os.path.join(upload_dir, original_filename)
+        if not os.path.exists(original_path):
+            return jsonify({'error': 'Original image not found'}), 400
 
-        current_path = os.path.join(upload_dir, original_filename)
-        if not os.path.exists(current_path):
-            return jsonify({'error': 'Current image not found'}), 400
-
-        with Image.open(current_path) as img:
-            new_width = int(img.width * scaling_factor)
-            new_height = int(img.height * scaling_factor)
+        with Image.open(original_path) as img:
+            # Get ORIGINAL dimensions from the actual file
+            original_width, original_height = img.size
+            
+            # Calculate scaling factor based on ORIGINAL dimensions
+            scaling_factor = target_diameter / diameter
+            
+            # Calculate new dimensions
+            new_width = int(original_width * scaling_factor)
+            new_height = int(original_height * scaling_factor)
+            
+            # Create scaled version (don't overwrite original)
+            base_name = os.path.splitext(original_filename)[0]
+            scaled_filename = f"{base_name}_scaled.tiff"
+            scaled_path = os.path.join(upload_dir, scaled_filename)
+            
             resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            resized_img.save(scaled_path, format='TIFF', compression='tiff_deflate')
             
-            # Save resized image
-            resized_path = os.path.join(upload_dir, original_filename)
-            resized_img.save(resized_path, format='TIFF', compression='tiff_deflate')
-            
-            # Create normalized preview
+            # Create normalized preview from SCALED image
             unique_id = str(uuid.uuid4())
             output_filename = f"{unique_id}.png"
             output_path = os.path.join(converted_dir, output_filename)
-            normalize_image(resized_path, output_path)
+            normalize_image(scaled_path, output_path)
+
+            # Store scaling info in session
+            session['current_scaling_factor'] = scaling_factor
+            session['current_scaled_filename'] = scaled_filename
+            session['original_dimensions'] = (original_width, original_height)
+            session['current_dimensions'] = (new_width, new_height)
 
             return jsonify({
                 'converted_url': f'/converted/{output_filename}',
                 'scaling_factor': scaling_factor,
                 'new_width': new_width,
-                'new_height': new_height
+                'new_height': new_height,
+                'scaled_filename': scaled_filename
             })
             
     except Exception as e:
