@@ -874,14 +874,13 @@ async function scaleImage() {
         return;
     }
 
-    // Get the model type to determine target diameter
     const modelType = document.getElementById('detection-model-select').value;
     const targetDiameter = modelType === 'CD3' ? 20 : 34;
 
     try {
         const formData = new FormData();
         formData.append('diameter', diameter);
-        formData.append('target_diameter', targetDiameter); // Add target diameter
+        formData.append('target_diameter', targetDiameter);
         formData.append('original_filename', `${state.imageName}.${state.originalExtension}`);
 
         const response = await axios.post('/scale-image', formData, {
@@ -893,17 +892,30 @@ async function scaleImage() {
             return;
         }
 
-        // Update image
+        // Load the scaled image for display
         const img = new Image();
         img.onload = () => {
             const scalingFactor = response.data.scaling_factor;
             
-            // Scale existing annotations
+            // Store the current scaling info
+            state.currentScalingFactor = scalingFactor;
+            state.scaledFilename = response.data.scaled_filename;
+            
+            // Scale annotations from ORIGINAL coordinates to NEW scaled coordinates
             state.annotations.forEach(ann => {
-                ann.x *= scalingFactor;
-                ann.y *= scalingFactor;
-                ann.width *= scalingFactor;
-                ann.height *= scalingFactor;
+                // If annotations were in previous scaled coordinates, convert them back to original first
+                if (state.currentScalingFactor !== 1) {
+                    // Convert back to original coordinates
+                    ann.x = ann.x / state.currentScalingFactor;
+                    ann.y = ann.y / state.currentScalingFactor;
+                    ann.width = ann.width / state.currentScalingFactor;
+                    ann.height = ann.height / state.currentScalingFactor;
+                }
+                // Now scale to new coordinates
+                ann.x = ann.x * scalingFactor;
+                ann.y = ann.y * scalingFactor;
+                ann.width = ann.width * scalingFactor;
+                ann.height = ann.height * scalingFactor;
             });
             
             // Update dimensions
@@ -1350,12 +1362,19 @@ async function saveTrainingData() {
     }
 
     try {
-        // Prepare YOLO format data with rounded decimals
+        // Prepare YOLO format data in ORIGINAL coordinates
         const annotations = state.annotations.map(ann => {
-            const x_center = roundTo6((ann.x + ann.width/2) / state.naturalSize.width);
-            const y_center = roundTo6((ann.y + ann.height/2) / state.naturalSize.height);
-            const width_norm = roundTo6(ann.width / state.naturalSize.width);
-            const height_norm = roundTo6(ann.height / state.naturalSize.height);
+            // Convert annotations from scaled coordinates back to ORIGINAL coordinates
+            const originalX = ann.x / state.currentScalingFactor;
+            const originalY = ann.y / state.currentScalingFactor;
+            const originalWidth = ann.width / state.currentScalingFactor;
+            const originalHeight = ann.height / state.currentScalingFactor;
+
+            // Normalize using ORIGINAL dimensions
+            const x_center = roundTo6((originalX + originalWidth/2) / state.originalNaturalSize.width);
+            const y_center = roundTo6((originalY + originalHeight/2) / state.originalNaturalSize.height);
+            const width_norm = roundTo6(originalWidth / state.originalNaturalSize.width);
+            const height_norm = roundTo6(originalHeight / state.originalNaturalSize.height);
             const class_name = CLASS_NAMES[ann.class];
             
             return {
@@ -1373,7 +1392,7 @@ async function saveTrainingData() {
         }
 
         const data = {
-            original_filename: `${state.imageName}.${state.originalExtension}`,
+            original_filename: `${state.imageName}.${state.originalExtension}`, // Original filename
             annotations: annotations,
             brightness: brightness.value,
             contrast: contrast.value
@@ -1386,7 +1405,7 @@ async function saveTrainingData() {
             withCredentials: true
         });
 
-        alert('Training data saved successfully with clean formatting!');
+        alert('Training data saved with ORIGINAL image and coordinates!');
     } catch (error) {
         console.error('Error saving training data:', error);
         alert('Error saving training data: ' + (error.response?.data?.error || error.message));
@@ -1450,14 +1469,12 @@ async function handleImageUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
 
-    // Check if the file has a .tiff or .tif extension
     if (!file.name.toLowerCase().endsWith('.tiff') && !file.name.toLowerCase().endsWith('.tif')) {
         alert('Only .tiff and .tif files are accepted.');
-        e.target.value = ''; // Clear the file input
+        e.target.value = '';
         return;
     }
 
-    // Proceed with uploading the valid file
     const formData = new FormData();
     formData.append('file', file);
 
@@ -1470,11 +1487,9 @@ async function handleImageUpload(e) {
         const data = response.data;
         document.getElementById('current-image-display').textContent = data.original_name;
 
-        // Update state with original file information
         state.imageName = data.base_name;
         state.originalExtension = data.original_extension;
 
-        // Load the converted PNG image
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.onload = () => {
@@ -1483,17 +1498,24 @@ async function handleImageUpload(e) {
                 width: img.width,
                 height: img.height
             };
+            state.originalNaturalSize = {
+                width: img.width,
+                height: img.height
+            };
+            
+            // RESET scaling state when loading new image
+            state.currentScalingFactor = 1;
+            state.scaledFilename = null;
 
             // Reset annotations and related data
-            state.annotations = [];  // Clear previous annotations
-            updateCellCounts(0);    // Reset cell count to 0
+            state.annotations = [];
+            updateCellCounts(0);
 
-            // Set canvas size to match the new image
+            // Set canvas size
             canvas.width = state.naturalSize.width;
             canvas.height = state.naturalSize.height;
 
-            // Reset all parameters to default
-            // Brightness/Contrast
+            // Reset parameters
             brightnessMin.value = -100;
             brightnessMax.value = 100;
             brightness.value = 0;
@@ -1503,18 +1525,16 @@ async function handleImageUpload(e) {
             updateBrightnessRange();
             updateContrastRange();
 
-            // Detection parameters
             document.getElementById('cell-diameter').value = 34;
             document.getElementById('detection-threshold').value = 0.5;
 
-            // Show canvas and hide placeholder
+            // Show canvas
             canvas.style.display = 'block';
             document.querySelector('.canvas-container').classList.add('has-image');
 
-            // Reset view and redraw the canvas
             resetView();
             redraw();
-            // Reset scroll position to show top-left of image
+            
             const container = document.querySelector('.canvas-container');
             container.scrollLeft = 0;
             container.scrollTop = 0;
