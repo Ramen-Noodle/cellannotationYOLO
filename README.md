@@ -47,16 +47,19 @@ Upon uploading an image, CAT performs automated detection and displays annotated
 
 ---
 
-## Installation (Linux Tested)
+## Installation and Deployment (Linux Tested)
 
 1. Ensure **YOLOv11** (Ultralytics) is installed:
    ```bash
    pip install ultralytics
+   ```
 
-## Deployment
+  Go to the root directory where the repository is cloned, and then install the required packages:
+  ```bash
+   pip install -r requirements.txt
+``` bash
 
-Go to the root directory where the repository is cloned, and then in the python environment launch the following:
-
+Open a terminal in the root directory in a python/Anaconda environment (make sure the packages are installed) and then execute the main application via:
 ``` bash
 python app.py
 ```
