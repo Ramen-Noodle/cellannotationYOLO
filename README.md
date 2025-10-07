@@ -57,6 +57,7 @@ Upon uploading an image, CAT performs automated detection and displays annotated
   Go to the root directory where the repository is cloned, and then install the required packages:
   ```bash
    pip install -r requirements.txt
+  ```
 
 
 Open a terminal in the root directory in a python/Anaconda environment (make sure the packages are installed) and then execute the main application via:
