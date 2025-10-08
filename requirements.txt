@@ -1,3 +1,8 @@
+# == Portable Requirements File ==
+# This list is ready for installation on any machine.
+# Versions were extracted where possible. For packages without a specified
+# version, pip will install the latest compatible version.
+
 absl-py==2.1.0
 APScheduler
 astunparse
@@ -31,7 +36,7 @@ hpack
 hyperframe
 idna
 imagecodecs==2025.3.30
-importlib_metadata
+importlib-metadata
 itsdangerous
 Jinja2
 joblib==1.5.1
@@ -43,13 +48,13 @@ markdown-it-py==3.0.0
 MarkupSafe
 matplotlib==3.10.3
 mdurl==0.1.2
-ml_dtypes==0.5.1
+ml-dtypes==0.5.1
 mpmath
 namex==0.0.8
 networkx
 numpy==1.26.4
 opencv-python==4.11.0.86
-opt_einsum
+opt-einsum
 optree==0.14.0
 packaging==24.2
 pandas==2.3.0
@@ -75,9 +80,9 @@ six
 sshfs
 sympy==1.13.1
 tensorboard==2.17.1
-tensorboard_data_server==0.7.0
+tensorboard-data-server==0.7.0
 tensorflow==2.17.0
-tensorflow_estimator==2.15.0
+tensorflow-estimator==2.15.0
 termcolor
 threadpoolctl==3.6.0
 tifffile==2025.5.10
@@ -87,7 +92,7 @@ torchaudio==2.5.1
 torchvision==0.20.1
 tqdm==4.67.1
 triton==3.1.0
-typing_extensions==4.12.2
+typing-extensions==4.12.2
 tzdata==2025.2
 tzlocal
 ultralytics==8.3.155
@@ -96,3 +101,4 @@ urllib3
 Werkzeug
 wrapt
 zipp
+zstandard==0.23.0
