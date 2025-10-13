@@ -1,100 +1,84 @@
-# Cell Annotation Tool (CAT 🐱)
+# **Cell Annotation Tool (CAT) 🐱**
 
-The **Cell Annotation Tool (CAT)** is a web-based graphical user interface (GUI) developed to facilitate both automated and manual cell annotation. The primary objective is to enable biologists with little to no programming experience to deploy and use machine learning models for object detection in microscopy images — specifically targeting SGN, MADM, and CD3 cell types.
+A web-based GUI for streamlined object detection and annotation in microscopy images, designed for biologists and researchers with minimal programming experience.
 
-The tool uses **YOLOv11 (Ultralytics)** for detection.
-
-![Screenshot](images/screenshot.png)
+![Screenshot of the Cell Annotation Tool interface](images/screenshot.png)
 
 ---
 
-## Overview
+## **🎯 Overview**
 
-CAT is implemented using **Flask**, a lightweight Python web framework, along with **HTML** and **JavaScript** for the front-end interface.  
-- The **front-end** handles user interaction and visualization.  
-- The **back-end** (Flask) manages model inference and data operations.
+The **Cell Annotation Tool (CAT)** simplifies the process of labeling microscopy images by combining the power of the **YOLOv11 (Ultralytics)** model with an intuitive user interface. Built with **Flask** and **JavaScript**, CAT allows users to perform automated cell detection, manually refine annotations, and export data for model fine-tuning.
 
-Upon uploading an image, CAT performs automated detection and displays annotated bounding boxes for each identified cell. Users can manually refine these annotations (add, delete, or move bounding boxes) and save the updated data for model fine-tuning.
+The tool is specifically designed for SGN, MADM, and CD3 cell types but can be adapted for other object detection tasks.
 
 ---
 
-## Features
+## **✨ Features**
 
-### 🔹 Model Integration and Testing
-- Upload and assign custom object detection models to one of the supported categories (SGN, MADM, CD3).  
-- Compare your custom models with built-in baseline models.  
-- Fine-tune models directly within the interface using previously saved annotated data.
-
-### 🔹 Multi-user Support
-- Supports **concurrent user sessions**, each with a unique session ID and isolated data directory.  
-- Prevents overlap between users’ data.  
-- Restricts training to one active session per user to manage GPU/CPU load efficiently.
-
-### 🔹 Data Export
-- Export annotated datasets as a `.zip` archive containing:
-  - Original uploaded image  
-  - Corresponding annotation files (`.txt` format for YOLO)
-
-### 🔹 Visualization and Customization
-- Adjustable **bounding box colors** for each class  
-- **Brightness** and **contrast** adjustment for image clarity  
-- **Zoom**, **crop**, and **scale** functionalities (toggle zoom with the **Esc** key)  
-- Adjustable **detection threshold** to control sensitivity during inference
-
-### 🔹 Image Conversion
-- Converts high-resolution `.tiff` images to `.png` format for easier visualization and sharing.  
-- Conversion slightly reduces resolution but improves portability and responsiveness.
+* **🧠 Model Management:** Upload, test, and compare custom YOLO models against baselines. Fine-tune models directly in the app using your newly annotated data.
+* **👥 Multi-user Support:** Concurrent user sessions are supported, with isolated data directories for each user to prevent data conflicts.
+* **📦 Data Export:** Easily export your complete annotated dataset as a `.zip` archive, perfectly formatted for YOLO training.
+* **🎨 Visualization & Customization:** Adjust bounding box colors, image brightness/contrast, and the model's detection threshold on the fly.
+* **🖼️ Image Handling:** Full support for zooming, cropping, and scaling. The tool also automatically converts high-resolution `.tiff` images to web-friendly `.png` format.
 
 ---
 
-## Installation and Deployment (Linux Tested)
+## **🚀 Getting Started**
 
-1. Ensure **YOLOv11** (Ultralytics) is installed:
-   ```bash
-   pip install ultralytics
-   ```
+Follow these instructions to get a local copy up and running.
 
-  Go to the root directory where the repository is cloned, and then install the required packages:
-  ```bash
-   pip install -r requirements.txt
-  ```
+### **Prerequisites**
 
+You must have **Conda** installed on your system. We recommend [Miniconda](https://docs.conda.io/en/latest/miniconda.html) for a lightweight installation.
 
-Open a terminal in the root directory in a python/Anaconda environment (make sure the packages are installed) and then execute the main application via:
-``` bash
-python app.py
-```
+### **Installation**
 
+1.  **Clone the repository:**
+    ```bash
+    git clone [https://github.com/your-username/your-repository.git](https://github.com/your-username/your-repository.git)
+    cd your-repository
+    ```
 
-This will launch the web application on port 5001. By default, it runs on a static IP address and can be accessed either locally or by multiple users via a VPN connection.  
-
-Access the interface using one of the following URLs:
-- **Localhost:** [http://localhost:5001/static/index.html](http://localhost:5001/static/index.html)
-- **GPU Server (internal):** [http://(your static IP):5001/static/index.html](http://10.80.24.12:5001/static/index.html)
-
-> **Note:** These links are only active while `app.py` is running on the host server.
+2.  **Create the Conda environment:**
+    The `environment.yml` file contains all the necessary dependencies. This single command sets up everything you need.
+    ```bash
+    # This will create an environment named 'cat_env'
+    conda env create -f environment.yml
+    ```
 
 ---
 
-## How to Use
+## **▶️ Usage**
 
-1. **Upload** an image.  
-2. Adjust image settings — scale, zoom, crop, or modify brightness and contrast as needed.  
-3. Run **detection** using the desired model; adjust the detection threshold if required.  
-4. **Edit annotations** by clicking and dragging to add new bounding boxes, or right-clicking to remove existing ones.  
-5. **Save training data** by clicking “Save Training Data.” This stores updated images and annotations on the backend.  
-6. Repeat the annotation and saving process for multiple images as needed.  
-7. **Fine-tune the model** by selecting “Fine-tune (Saved Data),” which retrains the base detection model using the saved dataset.  
-8. Upon completion, a **k-fold validation score** and a **.pt model file** are generated for download and further testing.  
-9. **Test the fine-tuned model** by either:  
-   - Clicking “Custom Detect” and uploading the newly generated `.pt` file, or  
-   - Selecting the model from the dropdown menu and clicking “Detect with Fine-tuned Model.”  
+### **Running the Application**
 
+1.  **Activate the environment:**
+    **Note:** You must run this command every time you open a new terminal to work on the project.
+    ```bash
+    conda activate cat_env
+    ```
 
+2.  **Launch the Flask application:**
+    ```bash
+    python app.py
+    ```
 
+The application will start on port **5001**. You can access it in your web browser at one of the following URLs:
 
-## Acknowledgements
+* **Local Machine:** `http://localhost:5001/static/index.html`
+* **Internal Server:** `http://<YOUR_SERVER_IP>:5001/static/index.html`
 
- - [COMBINe: Cell detectiOn in Mouse BraIN](https://github.com/yccc12/COMBINe/tree/main)
- - [keras-retinanet](https://github.com/fizyr/keras-retinanet)
+> **Note:** The web interface is only available while the `app.py` script is running.
 
+### **Step-by-Step Workflow**
+
+1.  **Upload** an image to begin.
+2.  **Adjust** image settings (zoom, brightness, etc.) as needed for clarity.
+3.  **Run Detection** using a pre-loaded or custom model.
+4.  **Edit Annotations:**
+    * **Add:** Click and drag to draw a new bounding box.
+    * **Remove:** Right-click an existing box.
+5.  **Save Data** to store the updated image and its annotations for later use.
+6.  **Fine-tune Model** using all the data you've saved. A new `.pt` model file will be generated for download.
+7.  **Test** your new model using the "Custom Detect" feature.
