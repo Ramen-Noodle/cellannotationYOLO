@@ -2,7 +2,7 @@
 
 A web-based GUI for streamlined object detection and annotation in microscopy images, designed for biologists and researchers with minimal programming experience.
 
-![Screenshot of the Cell Annotation Tool interface](images/screenshot.png)
+![Screenshot of the Cell Annotation Tool interface](images/image.png)
 
 ---
 
