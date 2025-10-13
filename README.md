@@ -36,14 +36,13 @@ You must have **Conda** installed on your system. We recommend [Miniconda](https
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/your-username/your-repository.git](https://github.com/your-username/your-repository.git)
-    cd your-repository
+    git clone [https://github.com/reubenrosenNCSU/cellannotationYOLO.git](https://github.com/reubenrosenNCSU/cellannotationYOLO.git)
+    cd cellannotationYOLO
     ```
 
 2.  **Create the Conda environment:**
-    The `environment.yml` file contains all the necessary dependencies. This single command sets up everything you need.
+    This command reads the `environment.yml` file to create an environment named **`cellv2`** and install all required dependencies.
     ```bash
-    # This will create an environment named 'cat_env'
     conda env create -f environment.yml
     ```
 
@@ -56,7 +55,7 @@ You must have **Conda** installed on your system. We recommend [Miniconda](https
 1.  **Activate the environment:**
     **Note:** You must run this command every time you open a new terminal to work on the project.
     ```bash
-    conda activate cat_env
+    conda activate cellv2
     ```
 
 2.  **Launch the Flask application:**
