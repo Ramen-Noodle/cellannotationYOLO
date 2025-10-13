@@ -36,7 +36,7 @@ You must have **Conda** installed on your system. We recommend [Miniconda](https
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/reubenrosenNCSU/cellannotationYOLO.git](https://github.com/reubenrosenNCSU/cellannotationYOLO.git)
+    git clone https://github.com/reubenrosenNCSU/cellannotationYOLO.git
     cd cellannotationYOLO
     ```
 
