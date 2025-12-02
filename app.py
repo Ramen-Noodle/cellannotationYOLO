@@ -1176,7 +1176,12 @@ import glob
 @app.route('/events-data', methods=['GET'])
 def events_data():
     user_id = session.get('user_id')
-    log_dir = os.path.join('users', user_id, 'snapshots', 'tensorboard', 'train')
+    base_path = os.path.join('users', user_id, 'snapshots')
+    run_directories = glob.glob(os.path.join(base_path, 'run_*'))
+    if not run_directories:
+        return jsonify({'error': f'No runs found for current session'}), 404
+    run_directories.sort()
+    log_dir = run_directories[-1]
 
     if not os.path.exists(log_dir):
         return jsonify({'error': f'Log dir not found: {log_dir}'}), 404
