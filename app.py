@@ -308,6 +308,9 @@ def clear_uploaded_images():
                 print(f"Error deleting {file_path}: {e}")
 
 
+@app.route("/api/hello")
+def hello():
+    return jsonify({"message": "Hello from Flask API"})
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
