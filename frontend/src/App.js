@@ -163,7 +163,7 @@ function App() {
             const x1 = cx - w / 2
             const y1 = cy - h / 2
 
-            handleAddBox({x: x1, y: y1, w: w, h: h})
+            handleAddBox({x: x1, y: y1, w: w, h: h, class: cls})
 
             // state.annotations.push({
             //     x: x1,
@@ -201,14 +201,6 @@ function App() {
                         <Typography variant="body1">{item.name}</Typography>
                     </MenuItem>
                   ))}
-                  {/* <MenuItem onClick={() => {popupState.close(); setCurrentClass("SGN")}}>SGN</MenuItem>
-                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Yellow Neuron")}}>Yellow Neuron</MenuItem>
-                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Yellow Astrocyte")}}>Yellow Astrocyte</MenuItem>
-                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Green Neuron")}}>Green Neuron</MenuItem>
-                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Green Astrocyte")}}>Green Astrocyte</MenuItem>
-                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Red Neuron")}}>Red Neuron</MenuItem>
-                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Ren Astrocyte")}}>Red Astrocyte</MenuItem>
-                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("CD3")}}>CD3</MenuItem> */}
                 </Menu>
               </Fragment>
             )}

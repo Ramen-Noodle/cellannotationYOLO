@@ -28,7 +28,7 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
   // draw loop
   useEffect(() => {
     draw()
-  }, [scale, offset, boxes, currentBox])
+  }, [scale, offset, boxes, currentBox, classes])
 
   const draw = () => {
     const canvas = canvasRef.current
