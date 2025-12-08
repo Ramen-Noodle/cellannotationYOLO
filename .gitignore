@@ -1,4 +1,4 @@
 snapshots/MADM_v3.pt
 snapshots/SGN_best.pt
-scripts/__pycache__
+__pycache__/
 users
