@@ -352,7 +352,8 @@ def upload_file():
             'converted_url': f'/converted/{output_filename}',
             'original_name': original_name,
             'base_name': base_name,
-            'original_extension': original_extension
+            'original_extension': original_extension,
+            'dimensions': img.size
         })
         
     except Exception as e:
