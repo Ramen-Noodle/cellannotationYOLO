@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from 'react'
 
-export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropping, onCrop }) {
+export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropping,
+    onCrop, currentClass, classes }) {
   const canvasRef = useRef(null)
   const imgRef = useRef(null)
 
@@ -45,15 +46,16 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
     ctx.drawImage(imgRef.current, 0, 0)
 
     // draw existing boxes
-    ctx.strokeStyle = 'red'
     ctx.lineWidth = 2 / scale // scale-independent line width
 
     boxes.forEach((b) => {
+      ctx.strokeStyle = classes[b.class].color
       ctx.strokeRect(b.x, b.y, b.w, b.h)
     })
 
     // draw box while dragging
     if (currentBox) {
+      ctx.strokeStyle = classes[currentClass].color
       ctx.strokeRect(currentBox.x, currentBox.y, currentBox.w, currentBox.h)
     }
 
@@ -139,6 +141,7 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
         currentBox.h = currentBox.h * -1
         currentBox.y = currentBox.y - currentBox.h
       }
+      currentBox.class = currentClass
       if (isCropping) {
         onCrop(currentBox)
         setCurrentBox(null)

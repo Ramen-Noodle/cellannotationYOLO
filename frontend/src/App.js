@@ -1,12 +1,13 @@
 import { useEffect, useState, Fragment } from 'react'
 import { Box, Button, Typography } from '@mui/material'
-import PopupState, { bindTrigger, bindMenu } from 'material-ui-popup-state';
+import PopupState, { bindTrigger, bindMenu, usePopupState } from 'material-ui-popup-state';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import SideMenu from './components/SideMenu'
 import ImageCanvas from './components/ImageCanvas'
 import TabMenu from './components/TabMenu'
+import ColorMenu from './components/ColorMenu';
 
 function App() {
   const [msg, setMsg] = useState('')
@@ -14,7 +15,17 @@ function App() {
   const [imageName, setImageName] = useState('')
   const [boxes, setBoxes] = useState([])
   const [isCropping, setIsCropping] = useState(false)
-  const [currentClass, setCurrentClass] = useState("SGN");
+  const [classes, setClasses] = useState([
+    { name: 'SGN', color: '#c600b9ff' },
+    { name: 'Yellow Neuron', color: '#FFC300' },
+    { name: 'Yellow Astrocyte', color: '#767600ff' },
+    { name: 'Green Neuron', color: '#2ECC71' },
+    { name: 'Green Astrocyte', color: '#003b1936' },
+    { name: 'Red Neuron', color: '#C0392B' },
+    { name: 'Red Astrocyte', color: '#4c0800ff' },
+    { name: 'CD3', color: '#600089ff' },
+  ]);
+  const [currentClass, setCurrentClass] = useState(0)
 
   useEffect(() => {
     fetch('/api/hello')
@@ -26,7 +37,7 @@ function App() {
     console.log(boxes)
   }
 
-  // Image Operations
+  // *----------* Image Operations *----------*
 
   async function handleUpload(e) {
     const file = e.target.files[0]
@@ -92,9 +103,12 @@ function App() {
     setIsCropping(false)
   }
 
-  // Annotation Operations
+  // *----------* Annotation Operations *----------*
 
   const handleAddBox = (box) => {
+    if (!box.class) {
+      box.class = currentClass
+    }
     if (imageURL) {
       setBoxes(prev => [...prev, box])
     }
@@ -104,7 +118,16 @@ function App() {
     setBoxes(prev => prev.filter(b => b !== box))
   }
 
-  // Detection Operations
+  const handleColorUpdate = (index, newColor) => {
+    setClasses((prevClasses) => {
+      // Create a copy of the array to maintain immutability
+      const updated = [...prevClasses];
+      updated[index] = { ...updated[index], color: newColor };
+      return updated;
+    });
+  };
+
+  // *----------* Detection Operations *----------*
 
   async function detectMADM() {
     const threshold = .5
@@ -167,40 +190,39 @@ function App() {
             {(popupState) => (
               <Fragment>
                 <Button variant="contained" {...bindTrigger(popupState)} endIcon={<KeyboardArrowDownIcon />}>
-                  {currentClass}
+                  {classes[currentClass].name}
                 </Button>
                 <Menu {...bindMenu(popupState)}>
-                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("SGN")}}>SGN</MenuItem>
+                  {classes.map((item, index) => (
+                    <MenuItem 
+                      key={index}
+                      onClick={() => {setCurrentClass(index)}}
+                    >
+                        <Typography variant="body1">{item.name}</Typography>
+                    </MenuItem>
+                  ))}
+                  {/* <MenuItem onClick={() => {popupState.close(); setCurrentClass("SGN")}}>SGN</MenuItem>
                   <MenuItem onClick={() => {popupState.close(); setCurrentClass("Yellow Neuron")}}>Yellow Neuron</MenuItem>
                   <MenuItem onClick={() => {popupState.close(); setCurrentClass("Yellow Astrocyte")}}>Yellow Astrocyte</MenuItem>
                   <MenuItem onClick={() => {popupState.close(); setCurrentClass("Green Neuron")}}>Green Neuron</MenuItem>
                   <MenuItem onClick={() => {popupState.close(); setCurrentClass("Green Astrocyte")}}>Green Astrocyte</MenuItem>
                   <MenuItem onClick={() => {popupState.close(); setCurrentClass("Red Neuron")}}>Red Neuron</MenuItem>
                   <MenuItem onClick={() => {popupState.close(); setCurrentClass("Ren Astrocyte")}}>Red Astrocyte</MenuItem>
-                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("CD3")}}>CD3</MenuItem>
+                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("CD3")}}>CD3</MenuItem> */}
                 </Menu>
               </Fragment>
             )}
           </PopupState>
-          <PopupState variant="popover" popupId="demo-popup-menu">
-            {(popupState) => (
-              <Fragment>
-                <Button variant="contained" {...bindTrigger(popupState)}>
-                  Class Colors
-                </Button>
-                <Menu {...bindMenu(popupState)}>
-                  <MenuItem onClick={popupState.close}>SGN</MenuItem>
-                  <MenuItem onClick={popupState.close}>Yellow Neuron</MenuItem>
-                  <MenuItem onClick={popupState.close}>Yellow Astrocyte</MenuItem>
-                  <MenuItem onClick={popupState.close}>Green Neuron</MenuItem>
-                  <MenuItem onClick={popupState.close}>Green Astrocyte</MenuItem>
-                  <MenuItem onClick={popupState.close}>Red Neuron</MenuItem>
-                  <MenuItem onClick={popupState.close}>Red Astrocyte</MenuItem>
-                  <MenuItem onClick={popupState.close}>CD3</MenuItem>
-                </Menu>
-              </Fragment>
-            )}
-          </PopupState>
+          <ColorMenu 
+            items={classes} 
+            onChange={handleColorUpdate} 
+          />
+          <div style={{ marginTop: '20px' }}>
+            Current Active Color for {classes[0].name}: 
+            <span style={{ color: classes[0].color, fontWeight: 'bold' }}>
+              {classes[0].color}
+            </span>
+          </div>
         </Box>
 			),
 		},
@@ -241,7 +263,8 @@ function App() {
 				}}
 			>
         <ImageCanvas src={imageURL} boxes={boxes} onAddBox={handleAddBox} 
-          onRemoveBox={handleRemoveBox} isCropping={isCropping} onCrop={handleCrop}/>
+          onRemoveBox={handleRemoveBox} isCropping={isCropping} onCrop={handleCrop}
+          currentClass={currentClass} classes={classes}/>
       </Box>
     </Box>
   )
