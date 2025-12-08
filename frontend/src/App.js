@@ -1,6 +1,6 @@
-import { useEffect, useState, Fragment } from 'react'
+import { useState, Fragment } from 'react'
 import { Box, Button, Typography } from '@mui/material'
-import PopupState, { bindTrigger, bindMenu, usePopupState } from 'material-ui-popup-state';
+import PopupState, { bindTrigger, bindMenu } from 'material-ui-popup-state';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
@@ -10,7 +10,6 @@ import TabMenu from './components/TabMenu'
 import ColorMenu from './components/ColorMenu';
 
 function App() {
-  const [msg, setMsg] = useState('')
   const [imageURL, setImageURL] = useState('')
   const [imageName, setImageName] = useState('')
   const [boxes, setBoxes] = useState([])
@@ -26,16 +25,6 @@ function App() {
     { name: 'CD3', color: '#600089ff' },
   ]);
   const [currentClass, setCurrentClass] = useState(0)
-
-  useEffect(() => {
-    fetch('/api/hello')
-      .then(res => res.json())
-      .then(data => setMsg(data.message))
-  }, [])
-
-  function showMeTheBoxes() {
-    console.log(boxes)
-  }
 
   // *----------* Image Operations *----------*
 
@@ -239,9 +228,6 @@ function App() {
         </Button>
         <Button variant='contained' component='label' onClick={toggleCrop} color={isCropping ? 'secondary' : 'primary'}>
           Crop Image
-        </Button>
-        <Button variant='contained' component='label' onClick={showMeTheBoxes}>
-          Show me the boxes
         </Button>
         <TabMenu items={tabs}></TabMenu>
       </SideMenu>
