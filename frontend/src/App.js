@@ -86,7 +86,7 @@ function App() {
         setImageURL(data.converted_url)
         
     } catch {
-
+      //TODO add error message
     }
 
     setIsCropping(false)
@@ -102,6 +102,59 @@ function App() {
 
   const handleRemoveBox = (box) => {
     setBoxes(prev => prev.filter(b => b !== box))
+  }
+
+  // Detection Operations
+
+  async function detectMADM() {
+    const threshold = .5
+
+    try {
+        const res = await fetch('/detect-madm', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ threshold }),
+          credentials: 'include',
+        })
+
+        if (!res.ok) throw new Error('MADM detection failed')
+        const data = await res.json()
+        
+        const yoloTxt = data.annotations
+        const imgWidth = data.image_width
+        const imgHeight = data.image_height
+
+        setBoxes([])
+        let importedCount = 0
+
+        yoloTxt.split('\n').forEach(line => {
+            if (!line.trim()) return
+            const [clsStr, cxStr, cyStr, wStr, hStr] = line.trim().split(' ')
+            const cls = parseInt(clsStr)
+            const cx = parseFloat(cxStr) * imgWidth
+            const cy = parseFloat(cyStr) * imgHeight
+            const w = parseFloat(wStr) * imgWidth
+            const h = parseFloat(hStr) * imgHeight
+            const x1 = cx - w / 2
+            const y1 = cy - h / 2
+
+            handleAddBox({x: x1, y: y1, w: w, h: h})
+
+            // state.annotations.push({
+            //     x: x1,
+            //     y: y1,
+            //     width: w,
+            //     height: h,
+            //     class: cls,
+            //     isDetected: true
+            // });
+            importedCount++
+        });
+    } catch {
+
+    }
   }
 
   // Tab Menu contents
@@ -153,7 +206,13 @@ function App() {
 		},
 		{
 			label: "Detect",
-			content: <Typography>Buttons coming soon!</Typography>,
+			content: (
+        <Box>
+          <Button variant='contained' component='label' onClick={detectMADM}>
+            Detect
+          </Button>
+        </Box>
+      )
 		}
 	];
 
