@@ -25,6 +25,7 @@ from ultralytics import YOLO
 from scripts.normalization import normalize_image
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Gets directory where app.py is
 from PIL import Image
+import tifffile
 # Disable decompression bomb protection for large TIFF files
 Image.MAX_IMAGE_PIXELS = None
 
@@ -409,28 +410,22 @@ def upload_cropped_file():
 
         # Path to original TIFF
         upload_path = os.path.join(user_upload_dir, original_name)
-        
-        # Open and crop original image
-        with Image.open(upload_path) as img:
-            # Perform crop on original TIFF
-            cropped_img = img.crop((x, y, x + width, y + height))
-            
-            # Overwrite original file with cropped version
-            cropped_img.save(upload_path, format='TIFF', compression='tiff_deflate')
-            # 🔄 Update original and current dimensions to CROPPED size
-            session['original_dimensions'] = cropped_img.size  # (new_width, new_height)
-            session['current_dimensions'] = cropped_img.size
 
+        # Load original image, crop, and overwrite
+        img = tifffile.imread(upload_path)
+        cropped_img = img[y:y+height, x:x+width]
+        tifffile.imwrite(upload_path, cropped_img)
 
-        # Generate new PNG preview from updated TIFF
+        # Create and normalize png conversion of cropped image
         unique_id = str(uuid.uuid4())
         output_filename = f"{unique_id}.png"
         output_path = os.path.join(user_convert_dir, output_filename)
-        cropped_img.save(output_path, "PNG")
+        
+        normalize_image(upload_path, output_path)
 
         return jsonify({
             'converted_url': f'/converted/{output_filename}',
-            'original_name': original_name,  # Keep original filename
+            'original_name': original_name,
             'base_name': os.path.splitext(original_name)[0],
             'original_extension': 'tiff'
         })
