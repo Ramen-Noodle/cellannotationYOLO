@@ -1,7 +1,12 @@
-import { useEffect, useState } from 'react'
-import { Box, Button } from '@mui/material'
+import { useEffect, useState, Fragment } from 'react'
+import { Box, Button, Typography } from '@mui/material'
+import PopupState, { bindTrigger, bindMenu } from 'material-ui-popup-state';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
+import Menu from '@mui/material/Menu';
+import MenuItem from '@mui/material/MenuItem';
 import SideMenu from './components/SideMenu'
 import ImageCanvas from './components/ImageCanvas'
+import TabMenu from './components/TabMenu'
 
 function App() {
   const [msg, setMsg] = useState('')
@@ -9,6 +14,7 @@ function App() {
   const [imageName, setImageName] = useState('')
   const [boxes, setBoxes] = useState([])
   const [isCropping, setIsCropping] = useState(false)
+  const [currentClass, setCurrentClass] = useState("SGN");
 
   useEffect(() => {
     fetch('/api/hello')
@@ -20,13 +26,7 @@ function App() {
     console.log(boxes)
   }
 
-  function toggleCrop() {
-    if (isCropping) {
-      setIsCropping(false)
-    } else {
-      setIsCropping(true)
-    }
-  }
+  // Image Operations
 
   async function handleUpload(e) {
     const file = e.target.files[0]
@@ -53,19 +53,17 @@ function App() {
         const data = await res.json()
         setImageURL(data.converted_url)
         setBoxes([])
-    } catch {
-      // TODO: Add catch error message
+    } catch(e) {
+      alert('Upload failed: ' + (e.response?.data?.error || e.message));
     }
   }
 
-  const handleAddBox = (box) => {
-    if (imageURL) {
-      setBoxes(prev => [...prev, box])
+  function toggleCrop() {
+    if (isCropping) {
+      setIsCropping(false)
+    } else {
+      setIsCropping(true)
     }
-  }
-
-  const handleRemoveBox = (box) => {
-    setBoxes(prev => prev.filter(b => b !== box))
   }
 
   async function handleCrop(box) {
@@ -94,6 +92,71 @@ function App() {
     setIsCropping(false)
   }
 
+  // Annotation Operations
+
+  const handleAddBox = (box) => {
+    if (imageURL) {
+      setBoxes(prev => [...prev, box])
+    }
+  }
+
+  const handleRemoveBox = (box) => {
+    setBoxes(prev => prev.filter(b => b !== box))
+  }
+
+  // Tab Menu contents
+  const tabs = [
+		{
+			label: "Annotate",
+			content: (
+        <Box>
+          <PopupState variant="popover" popupId="demo-popup-menu">
+            {(popupState) => (
+              <Fragment>
+                <Button variant="contained" {...bindTrigger(popupState)} endIcon={<KeyboardArrowDownIcon />}>
+                  {currentClass}
+                </Button>
+                <Menu {...bindMenu(popupState)}>
+                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("SGN")}}>SGN</MenuItem>
+                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Yellow Neuron")}}>Yellow Neuron</MenuItem>
+                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Yellow Astrocyte")}}>Yellow Astrocyte</MenuItem>
+                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Green Neuron")}}>Green Neuron</MenuItem>
+                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Green Astrocyte")}}>Green Astrocyte</MenuItem>
+                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Red Neuron")}}>Red Neuron</MenuItem>
+                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("Ren Astrocyte")}}>Red Astrocyte</MenuItem>
+                  <MenuItem onClick={() => {popupState.close(); setCurrentClass("CD3")}}>CD3</MenuItem>
+                </Menu>
+              </Fragment>
+            )}
+          </PopupState>
+          <PopupState variant="popover" popupId="demo-popup-menu">
+            {(popupState) => (
+              <Fragment>
+                <Button variant="contained" {...bindTrigger(popupState)}>
+                  Class Colors
+                </Button>
+                <Menu {...bindMenu(popupState)}>
+                  <MenuItem onClick={popupState.close}>SGN</MenuItem>
+                  <MenuItem onClick={popupState.close}>Yellow Neuron</MenuItem>
+                  <MenuItem onClick={popupState.close}>Yellow Astrocyte</MenuItem>
+                  <MenuItem onClick={popupState.close}>Green Neuron</MenuItem>
+                  <MenuItem onClick={popupState.close}>Green Astrocyte</MenuItem>
+                  <MenuItem onClick={popupState.close}>Red Neuron</MenuItem>
+                  <MenuItem onClick={popupState.close}>Red Astrocyte</MenuItem>
+                  <MenuItem onClick={popupState.close}>CD3</MenuItem>
+                </Menu>
+              </Fragment>
+            )}
+          </PopupState>
+        </Box>
+			),
+		},
+		{
+			label: "Detect",
+			content: <Typography>Buttons coming soon!</Typography>,
+		}
+	];
+
   return (
     <Box sx={{ display: 'flex', height: '100vh', width: '100vw' }}>
       <SideMenu>
@@ -107,6 +170,7 @@ function App() {
         <Button variant='contained' component='label' onClick={showMeTheBoxes}>
           Show me the boxes
         </Button>
+        <TabMenu items={tabs}></TabMenu>
       </SideMenu>
 
       <Box
