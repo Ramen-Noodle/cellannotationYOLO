@@ -87,8 +87,8 @@ function App() {
         const data = await res.json()
         setImageURL(data.converted_url)
         
-    } catch {
-      //TODO add error message
+    } catch(e) {
+      alert('Crop failed: ' + (e.response?.data?.error || e.message));
     }
 
     setIsCropping(false)
@@ -255,8 +255,10 @@ function App() {
             // });
             importedCount++
         });
-    } catch {
 
+        alert(`Detected ${importedCount} MADM objects!`);
+    } catch (e) {
+      alert('Detection failed: ' + (e.response?.data?.error || e.message));
     }
   }
 
@@ -292,7 +294,7 @@ function App() {
           <Button variant='contained' component='label' onClick={clearAnnotations} color={'warning'}>
             Clear Annotations
           </Button>
-          <Button variant='contained' component='label' onClick={exportAnnotations} color={'warning'}>
+          <Button variant='contained' component='label' onClick={exportAnnotations}>
             Export Annotations
           </Button>
         </Box>
