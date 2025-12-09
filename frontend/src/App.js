@@ -31,6 +31,7 @@ function App() {
 
   async function handleUpload(e) {
     const file = e.target.files[0]
+    e.target.value = null;
     if (!file) return
 
     if (!file.name.toLowerCase().endsWith('.tiff') && !file.name.toLowerCase().endsWith('.tif')) {
@@ -178,33 +179,58 @@ function App() {
         console.error('Export error:', error);
         alert(`Export failed: ${error.message}`);
       });
-    // Send data to backend to create ZIP
-    // axios.post('/export-annotations', {
-    //   yolo_data: yoloData,  // Changed from csv_data
-    //   original_filename: filename,
-    //   withCredentials: true 
-    // }, {
-    //   responseType: 'blob' // Important for binary response
-    // })
-    // .then(response => {
-    //   // Create download link for ZIP
-    //   const blob = new Blob([response.data], { type: 'application/zip' })
-    //   const downloadUrl = window.URL.createObjectURL(blob)
-    //   const link = document.createElement('a')
+  }
+
+  function importAnnotations(e) {
+    const file = e.target.files[0]
+    e.target.value = null;
+    console.log(file)
+    if (!file) return
+
+    if (!file.name.toLowerCase().endsWith('.txt')) {
+      alert('Only .txt files are accepted.')
+      e.target.value = ''
+      return
+    }
+
+    const reader = new FileReader();
+    
+    reader.onload = e => {
+
+      const yoloData = e.target.result;
+      const lines = yoloData.split('\n');
+
+      setAnnotations([])
+      let importedCount = 0;
+      const imageWidth = imageSize.width;
+      const imageHeight = imageSize.height;
+
+      lines.forEach(line => {
+        if (!line.trim()) return;
+        const parts = line.trim().split(/\s+/);
         
-    //   link.href = downloadUrl;
-    //   link.setAttribute('download', `${state.imageName}_export.zip`)
-    //   document.body.appendChild(link);
-    //   link.click();
+        // Handle both formats: with and without confidence score
+        if (parts.length !== 5 && parts.length !== 6) return;
         
-    //   // Cleanup
-    //   window.URL.revokeObjectURL(downloadUrl)
-    //   link.remove();
-    // })
-    // .catch(error => {
-    //   console.error('Export error:', error)
-    //   alert(`Export failed: ${error.response?.data?.error || error.message}`)
-    // });
+        const classId = parseInt(parts[0]);
+        const centerX = parseFloat(parts[1]) * imageWidth;
+        const centerY = parseFloat(parts[2]) * imageHeight;
+        const width = parseFloat(parts[3]) * imageWidth;
+        const height = parseFloat(parts[4]) * imageHeight;
+        
+        // Convert to top-left coordinates
+        const x = centerX - width / 2;
+        const y = centerY - height / 2;
+
+        handleAddBox({x: x, y: y, w: width, h: height, class: classId}) //TODO add isDetected
+
+        importedCount++;
+      });
+
+      alert(`Imported ${importedCount} annotations!`);
+    }
+
+    reader.readAsText(file);
   }
 
   // *----------* Detection Operations *----------* \\
@@ -233,34 +259,26 @@ function App() {
         let importedCount = 0
 
         yoloTxt.split('\n').forEach(line => {
-            if (!line.trim()) return
-            const [clsStr, cxStr, cyStr, wStr, hStr] = line.trim().split(' ')
-            const cls = parseInt(clsStr)
-            const cx = parseFloat(cxStr) * imgWidth
-            const cy = parseFloat(cyStr) * imgHeight
-            const w = parseFloat(wStr) * imgWidth
-            const h = parseFloat(hStr) * imgHeight
-            const x1 = cx - w / 2
-            const y1 = cy - h / 2
+          if (!line.trim()) return
+          const [clsStr, cxStr, cyStr, wStr, hStr] = line.trim().split(' ')
+          const cls = parseInt(clsStr)
+          const cx = parseFloat(cxStr) * imgWidth
+          const cy = parseFloat(cyStr) * imgHeight
+          const w = parseFloat(wStr) * imgWidth
+          const h = parseFloat(hStr) * imgHeight
+          const x1 = cx - w / 2
+          const y1 = cy - h / 2
 
-            handleAddBox({x: x1, y: y1, w: w, h: h, class: cls})
+          handleAddBox({x: x1, y: y1, w: w, h: h, class: cls}) //TODO add isDetected
 
-            // state.annotations.push({
-            //     x: x1,
-            //     y: y1,
-            //     width: w,
-            //     height: h,
-            //     class: cls,
-            //     isDetected: true
-            // });
-            importedCount++
+          importedCount++
         });
 
         alert(`Detected ${importedCount} MADM objects!`);
-    } catch (e) {
-      alert('Detection failed: ' + (e.response?.data?.error || e.message));
+      } catch (e) {
+        alert('Detection failed: ' + (e.response?.data?.error || e.message));
+      }
     }
-  }
 
   // Tab Menu contents
   const tabs = [
@@ -296,6 +314,10 @@ function App() {
           </Button>
           <Button variant='contained' component='label' onClick={exportAnnotations}>
             Export Annotations
+          </Button>
+          <Button variant='contained' component='label'>
+            Import Annotations
+            <input hidden type='file' accept='txt' onChange={importAnnotations} />
           </Button>
         </Box>
 			),
