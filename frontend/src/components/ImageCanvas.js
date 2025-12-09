@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from 'react'
 
 export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropping,
-    onCrop, currentClass, classes }) {
+    onCrop, currentClass, classes, imageSize }) {
   const canvasRef = useRef(null)
   const imgRef = useRef(null)
 
@@ -10,6 +10,7 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const [isPanning, setIsPanning] = useState(false)
   const [lastPan, setLastPan] = useState({ x: 0, y: 0 })
+  const [canDraw, setCanDraw] = useState(false)
 
   // box drawing state
   
@@ -85,6 +86,8 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
       e.clientY - rect.top
     )
 
+    if (!canDraw) return
+
 		if (e.shiftKey) {
 			const hit = boxes.find(b =>
    			x >= b.x &&
@@ -112,12 +115,32 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
       return
     }
 
+    const rect = canvasRef.current.getBoundingClientRect()
+    let x, y
+    ({ x, y } = screenToImage(
+      e.clientX - rect.left,
+      e.clientY - rect.top
+    ));
+
+    if (x < 0 || x > imageSize.width || y < 0 || y > imageSize.height) {
+      setCanDraw(false)
+    } else {
+      setCanDraw(true)
+    }
+
     if (currentBox) {
-      const rect = canvasRef.current.getBoundingClientRect()
-      const { x, y } = screenToImage(
-        e.clientX - rect.left,
-        e.clientY - rect.top
-      )
+      // Don't allow user to draw outside of the image
+      if (x < 0) {
+        x = 0
+      } else if (x > imageSize.width) {
+        x = imageSize.width
+      }
+
+      if (y < 0) {
+        y = 0
+      } else if (y > imageSize.height) {
+        y = imageSize.height
+      }
 
       setCurrentBox((b) => ({
         ...b,
@@ -178,8 +201,7 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
       width={window.innerWidth}
       height={window.innerHeight}
       style={{
-        border: '1px solid #ccc',
-        cursor: isPanning ? 'grabbing' : 'crosshair',
+        cursor: isPanning ? 'grabbing': canDraw ? 'crosshair': 'not-allowed',
       }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}

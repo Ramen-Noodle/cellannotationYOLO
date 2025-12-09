@@ -357,7 +357,7 @@ function App() {
 			>
         <ImageCanvas src={imageURL} boxes={annotations} onAddBox={handleAddBox} 
           onRemoveBox={handleRemoveBox} isCropping={isCropping} onCrop={handleCrop}
-          currentClass={currentClass} classes={classes}/>
+          currentClass={currentClass} classes={classes} imageSize={imageSize}/>
       </Box>
     </Box>
   )
