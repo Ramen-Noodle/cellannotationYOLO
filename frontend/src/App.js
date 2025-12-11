@@ -28,6 +28,8 @@ function App() {
     { name: 'CD3', color: '#600089ff' },
   ])
   const [currentClass, setCurrentClass] = useState(0)
+  const [models, setModels] = useState(['SGN', 'CD3', 'MADM'])
+  const [currentModel, setCurrentModel] = useState(0)
 
   const [brightness, setBrightness] = useState(0)
   const [bMin, setBMin] = useState(-100)
@@ -252,6 +254,65 @@ function App() {
 
   // *----------* Detection Operations *----------* \\
 
+  async function detect() {
+    const threshold = .5
+
+    console.log(currentModel)
+
+    let endpoint = ''
+
+    if (currentModel === 0) {
+      endpoint = '/detect-sgn'
+    } else if (currentModel === 1) {
+      endpoint = '/detect-cd3'
+    } else if (currentModel === 2) {
+      endpoint = '/detect-madm'
+    } else {
+      console.log('Invalid Model Selection')
+    }
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ threshold }),
+        credentials: 'include',
+      })
+
+      if (!res.ok) throw new Error(`${models[currentModel]} detection failed`)
+      const data = await res.json()
+      
+      const yoloTxt = data.annotations
+      const imgWidth = data.image_width
+      const imgHeight = data.image_height
+
+      setAnnotations([])
+      let importedCount = 0
+
+      yoloTxt.split('\n').forEach(line => {
+        if (!line.trim()) return
+        const [clsStr, cxStr, cyStr, wStr, hStr] = line.trim().split(' ')
+        const cls = parseInt(clsStr)
+        const cx = parseFloat(cxStr) * imgWidth
+        const cy = parseFloat(cyStr) * imgHeight
+        const w = parseFloat(wStr) * imgWidth
+        const h = parseFloat(hStr) * imgHeight
+        const x1 = cx - w / 2
+        const y1 = cy - h / 2
+
+        handleAddBox({x: x1, y: y1, w: w, h: h, class: cls}) //TODO add isDetected
+
+        importedCount++
+      })
+
+      alert(`Detected ${importedCount} ${models[currentModel]} objects!`)
+    } catch (e) {
+      alert('Detection failed: ' + (e.response?.data?.error || e.message))
+    }
+  }
+
   async function detectMADM() {
     const threshold = .5
 
@@ -303,7 +364,7 @@ function App() {
 			label: "Annotate",
 			content: (
         <Box>
-          <PopupState variant="popover" popupId="demo-popup-menu">
+          <PopupState variant="popover" popupId="class-popup-menu">
             {(popupState) => (
               <Fragment>
                 <Button variant="contained" {...bindTrigger(popupState)} endIcon={<KeyboardArrowDownIcon />}>
@@ -343,7 +404,26 @@ function App() {
 			label: "Detect",
 			content: (
         <Box>
-          <Button variant='contained' component='label' onClick={detectMADM}>
+          <PopupState variant="popover" popupId="model-popup-menu">
+            {(popupState) => (
+              <Fragment>
+                <Button variant="contained" {...bindTrigger(popupState)} endIcon={<KeyboardArrowDownIcon />}>
+                  {models[currentModel]}
+                </Button>
+                <Menu {...bindMenu(popupState)}>
+                  {models.map((item, index) => (
+                    <MenuItem 
+                      key={index}
+                      onClick={() => {setCurrentModel(index)}}
+                    >
+                        <Typography variant="body1">{item}</Typography>
+                    </MenuItem>
+                  ))}
+                </Menu>
+              </Fragment>
+            )}
+          </PopupState>
+          <Button variant='contained' component='label' onClick={detect}>
             Detect
           </Button>
         </Box>
@@ -363,7 +443,6 @@ function App() {
         </Button>
 
         <Stack spacing={2} sx={{ width: '100%' }}>
-          
           <AdjustableSlider
             label="Brightness"
             value={brightness}
@@ -373,7 +452,6 @@ function App() {
             max={bMax}
             setMax={setBMax}
           />
-
           <AdjustableSlider
             label="Contrast"
             value={contrast}
@@ -383,7 +461,6 @@ function App() {
             max={cMax}
             setMax={setCMax}
           />
-
         </Stack>
 
         <TabMenu items={tabs}></TabMenu>
