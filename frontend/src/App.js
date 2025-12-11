@@ -1,13 +1,15 @@
 import { useState, Fragment } from 'react'
 import { Box, Button, Typography } from '@mui/material'
-import PopupState, { bindTrigger, bindMenu } from 'material-ui-popup-state';
-import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
-import Menu from '@mui/material/Menu';
-import MenuItem from '@mui/material/MenuItem';
+import PopupState, { bindTrigger, bindMenu } from 'material-ui-popup-state'
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
+import Menu from '@mui/material/Menu'
+import MenuItem from '@mui/material/MenuItem'
+import Stack from '@mui/material/Stack'
 import SideMenu from './components/SideMenu'
 import ImageCanvas from './components/ImageCanvas'
 import TabMenu from './components/TabMenu'
-import ColorMenu from './components/ColorMenu';
+import ColorMenu from './components/ColorMenu'
+import AdjustableSlider from './components/AdjustableSlider'
 
 function App() {
   const [imageURL, setImageURL] = useState('')
@@ -24,14 +26,21 @@ function App() {
     { name: 'Red Neuron', color: '#C0392B' },
     { name: 'Red Astrocyte', color: '#4c0800ff' },
     { name: 'CD3', color: '#600089ff' },
-  ]);
+  ])
   const [currentClass, setCurrentClass] = useState(0)
+
+  const [brightness, setBrightness] = useState(0)
+  const [bMin, setBMin] = useState(-100)
+  const [bMax, setBMax] = useState(100)
+  const [contrast, setContrast] = useState(0)
+  const [cMin, setCMin] = useState(-100)
+  const [cMax, setCMax] = useState(100)
 
   // *----------* Image Operations *----------* \\
 
   async function handleUpload(e) {
     const file = e.target.files[0]
-    e.target.value = null;
+    e.target.value = null
     if (!file) return
 
     if (!file.name.toLowerCase().endsWith('.tiff') && !file.name.toLowerCase().endsWith('.tif')) {
@@ -57,7 +66,7 @@ function App() {
         setImageSize({width: data.dimensions[0], height: data.dimensions[1]})
         setAnnotations([])
     } catch(e) {
-      alert('Upload failed: ' + (e.response?.data?.error || e.message));
+      alert('Upload failed: ' + (e.response?.data?.error || e.message))
     }
   }
 
@@ -89,11 +98,19 @@ function App() {
         setImageURL(data.converted_url)
         
     } catch(e) {
-      alert('Crop failed: ' + (e.response?.data?.error || e.message));
+      alert('Crop failed: ' + (e.response?.data?.error || e.message))
     }
 
     setIsCropping(false)
   }
+
+  // const handleBrightnessChange = (event, newValue) => {
+  //   setBrightness(newValue)
+  // }
+
+  // const handleContrastChange = (event, newValue) => {
+  //   setContrast(newValue)
+  // }
 
   // *----------* Annotation Operations *----------* \\
 
@@ -113,11 +130,11 @@ function App() {
   const handleColorUpdate = (index, newColor) => {
     setClasses((prevClasses) => {
       // Create a copy of the array to maintain immutability
-      const updated = [...prevClasses];
-      updated[index] = { ...updated[index], color: newColor };
-      return updated;
-    });
-  };
+      const updated = [...prevClasses]
+      updated[index] = { ...updated[index], color: newColor }
+      return updated
+    })
+  }
 
   function clearAnnotations() {
     setAnnotations([])
@@ -134,8 +151,8 @@ function App() {
       const width = ann.w / imageWidth
       const height = ann.h / imageHeight
         
-      return `${ann.class} ${centerX.toFixed(6)} ${centerY.toFixed(6)} ${width.toFixed(6)} ${height.toFixed(6)}`;
-    }).join('\n');
+      return `${ann.class} ${centerX.toFixed(6)} ${centerY.toFixed(6)} ${width.toFixed(6)} ${height.toFixed(6)}`
+    }).join('\n')
 
     fetch('/export-annotations', {
       method: 'POST',
@@ -153,37 +170,37 @@ function App() {
         // Fetch does not throw on HTTP errors automatically
         if (!response.ok) {
           // Try to parse JSON error response, fallback to generic status text
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(errorData.error || `HTTP error! status: ${response.status}`)
         }
-        return response.blob(); // Convert the response stream to a Blob
+        return response.blob() // Convert the response stream to a Blob
       })
       .then((blob) => {
         // Ensure the blob has the correct type
-        const zipBlob = new Blob([blob], { type: 'application/zip' });
+        const zipBlob = new Blob([blob], { type: 'application/zip' })
         
         // Create download link
-        const downloadUrl = window.URL.createObjectURL(zipBlob);
-        const link = document.createElement('a');
+        const downloadUrl = window.URL.createObjectURL(zipBlob)
+        const link = document.createElement('a')
 
-        link.href = downloadUrl;
-        link.setAttribute('download', `${imageName}_export.zip`);
-        document.body.appendChild(link);
-        link.click();
+        link.href = downloadUrl
+        link.setAttribute('download', `${imageName}_export.zip`)
+        document.body.appendChild(link)
+        link.click()
 
         // Cleanup
-        window.URL.revokeObjectURL(downloadUrl);
-        link.remove();
+        window.URL.revokeObjectURL(downloadUrl)
+        link.remove()
       })
       .catch((error) => {
-        console.error('Export error:', error);
-        alert(`Export failed: ${error.message}`);
-      });
+        console.error('Export error:', error)
+        alert(`Export failed: ${error.message}`)
+      })
   }
 
   function importAnnotations(e) {
     const file = e.target.files[0]
-    e.target.value = null;
+    e.target.value = null
     console.log(file)
     if (!file) return
 
@@ -193,44 +210,44 @@ function App() {
       return
     }
 
-    const reader = new FileReader();
+    const reader = new FileReader()
     
     reader.onload = e => {
 
-      const yoloData = e.target.result;
-      const lines = yoloData.split('\n');
+      const yoloData = e.target.result
+      const lines = yoloData.split('\n')
 
       setAnnotations([])
-      let importedCount = 0;
-      const imageWidth = imageSize.width;
-      const imageHeight = imageSize.height;
+      let importedCount = 0
+      const imageWidth = imageSize.width
+      const imageHeight = imageSize.height
 
       lines.forEach(line => {
-        if (!line.trim()) return;
-        const parts = line.trim().split(/\s+/);
+        if (!line.trim()) return
+        const parts = line.trim().split(/\s+/)
         
         // Handle both formats: with and without confidence score
-        if (parts.length !== 5 && parts.length !== 6) return;
+        if (parts.length !== 5 && parts.length !== 6) return
         
-        const classId = parseInt(parts[0]);
-        const centerX = parseFloat(parts[1]) * imageWidth;
-        const centerY = parseFloat(parts[2]) * imageHeight;
-        const width = parseFloat(parts[3]) * imageWidth;
-        const height = parseFloat(parts[4]) * imageHeight;
+        const classId = parseInt(parts[0])
+        const centerX = parseFloat(parts[1]) * imageWidth
+        const centerY = parseFloat(parts[2]) * imageHeight
+        const width = parseFloat(parts[3]) * imageWidth
+        const height = parseFloat(parts[4]) * imageHeight
         
         // Convert to top-left coordinates
-        const x = centerX - width / 2;
-        const y = centerY - height / 2;
+        const x = centerX - width / 2
+        const y = centerY - height / 2
 
         handleAddBox({x: x, y: y, w: width, h: height, class: classId}) //TODO add isDetected
 
-        importedCount++;
-      });
+        importedCount++
+      })
 
-      alert(`Imported ${importedCount} annotations!`);
+      alert(`Imported ${importedCount} annotations!`)
     }
 
-    reader.readAsText(file);
+    reader.readAsText(file)
   }
 
   // *----------* Detection Operations *----------* \\
@@ -272,11 +289,11 @@ function App() {
           handleAddBox({x: x1, y: y1, w: w, h: h, class: cls}) //TODO add isDetected
 
           importedCount++
-        });
+        })
 
-        alert(`Detected ${importedCount} MADM objects!`);
+        alert(`Detected ${importedCount} MADM objects!`)
       } catch (e) {
-        alert('Detection failed: ' + (e.response?.data?.error || e.message));
+        alert('Detection failed: ' + (e.response?.data?.error || e.message))
       }
     }
 
@@ -332,7 +349,7 @@ function App() {
         </Box>
       )
 		}
-	];
+	]
 
   return (
     <Box sx={{ display: 'flex', height: '100vh', width: '100vw' }}>
@@ -344,6 +361,31 @@ function App() {
         <Button variant='contained' component='label' onClick={toggleCrop} color={isCropping ? 'secondary' : 'primary'}>
           Crop Image
         </Button>
+
+        <Stack spacing={2} sx={{ width: '100%' }}>
+          
+          <AdjustableSlider
+            label="Brightness"
+            value={brightness}
+            onChange={(e, val) => setBrightness(val)}
+            min={bMin}
+            setMin={setBMin}
+            max={bMax}
+            setMax={setBMax}
+          />
+
+          <AdjustableSlider
+            label="Contrast"
+            value={contrast}
+            onChange={(e, val) => setContrast(val)}
+            min={cMin}
+            setMin={setCMin}
+            max={cMax}
+            setMax={setCMax}
+          />
+
+        </Stack>
+
         <TabMenu items={tabs}></TabMenu>
       </SideMenu>
 
@@ -357,7 +399,8 @@ function App() {
 			>
         <ImageCanvas src={imageURL} boxes={annotations} onAddBox={handleAddBox} 
           onRemoveBox={handleRemoveBox} isCropping={isCropping} onCrop={handleCrop}
-          currentClass={currentClass} classes={classes} imageSize={imageSize}/>
+          currentClass={currentClass} classes={classes} imageSize={imageSize}
+          brightness={brightness} contrast={contrast}/>
       </Box>
     </Box>
   )

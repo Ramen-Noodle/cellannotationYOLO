@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from 'react'
 
 export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropping,
-    onCrop, currentClass, classes, imageSize }) {
+    onCrop, currentClass, classes, imageSize, brightness, contrast }) {
   const canvasRef = useRef(null)
   const imgRef = useRef(null)
 
@@ -29,7 +29,7 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
   // draw loop
   useEffect(() => {
     draw()
-  }, [scale, offset, boxes, currentBox, classes])
+  }, [scale, offset, boxes, currentBox, classes, brightness, contrast])
 
   const draw = () => {
     const canvas = canvasRef.current
@@ -43,9 +43,13 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
     ctx.translate(offset.x, offset.y)
     ctx.scale(scale, scale)
 
+    // apply filters
+    ctx.filter = `brightness(${100 + +brightness}%) contrast(${100 + +contrast}%)`
+
     // draw image
     ctx.drawImage(imgRef.current, 0, 0)
 
+    console.log(brightness)
     // draw existing boxes
     ctx.lineWidth = 2 / scale // scale-independent line width
 
