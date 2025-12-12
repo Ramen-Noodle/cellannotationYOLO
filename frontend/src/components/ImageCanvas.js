@@ -10,11 +10,15 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const [isPanning, setIsPanning] = useState(false)
   const [lastPan, setLastPan] = useState({ x: 0, y: 0 })
-  const [canDraw, setCanDraw] = useState(false)
+
+  const [windowSize, setWindowSize] = useState({
+    width: window.innerWidth,
+    height: window.innerHeight
+  })
 
   // box drawing state
-  
   const [currentBox, setCurrentBox] = useState(null)
+  const [canDraw, setCanDraw] = useState(false)
 
   // load image
   useEffect(() => {
@@ -26,10 +30,23 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
     }
   }, [src])
 
+  // Track window size for rendering
+  useEffect(() => {
+    const handleResize = () => {
+      setWindowSize({
+        width: window.innerWidth,
+        height: window.innerHeight
+      })
+    }
+    
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
   // draw loop
   useEffect(() => {
     draw()
-  }, [scale, offset, boxes, currentBox, classes, brightness, contrast])
+  }, [scale, offset, boxes, currentBox, classes, brightness, contrast, windowSize])
 
   const draw = () => {
     const canvas = canvasRef.current
@@ -49,7 +66,6 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
     // draw image
     ctx.drawImage(imgRef.current, 0, 0)
 
-    console.log(brightness)
     // draw existing boxes
     ctx.lineWidth = 2 / scale // scale-independent line width
 
@@ -180,7 +196,6 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
   }
 
   const handleWheel = (e) => {
-    
     const delta = e.deltaY < 0 ? 1.1 : 0.9
 
     const mouseX = e.clientX - canvasRef.current.getBoundingClientRect().left
