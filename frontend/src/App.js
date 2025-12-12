@@ -5,6 +5,8 @@ import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Stack from '@mui/material/Stack'
+import TextField from '@mui/material/TextField';
+
 import SideMenu from './components/SideMenu'
 import ImageCanvas from './components/ImageCanvas'
 import TabMenu from './components/TabMenu'
@@ -12,11 +14,20 @@ import ColorMenu from './components/ColorMenu'
 import AdjustableSlider from './components/AdjustableSlider'
 
 function App() {
+  // State for image operations
   const [imageURL, setImageURL] = useState('')
   const [imageName, setImageName] = useState('')
   const [imageSize, setImageSize] = useState({width: 0, height: 0})
-  const [annotations, setAnnotations] = useState([])
   const [isCropping, setIsCropping] = useState(false)
+  const [brightness, setBrightness] = useState(0)
+  const [bMin, setBMin] = useState(-100)
+  const [bMax, setBMax] = useState(100)
+  const [contrast, setContrast] = useState(0)
+  const [cMin, setCMin] = useState(-100)
+  const [cMax, setCMax] = useState(100)
+
+  // Steate for annotations
+  const [annotations, setAnnotations] = useState([])
   const [classes, setClasses] = useState([
     { name: 'SGN', color: '#c600b9ff' },
     { name: 'Yellow Neuron', color: '#FFC300' },
@@ -28,16 +39,13 @@ function App() {
     { name: 'CD3', color: '#600089ff' },
   ])
   const [currentClass, setCurrentClass] = useState(0)
+
+  // State for model detection
   const [models, setModels] = useState(['SGN', 'CD3', 'MADM'])
   const [currentModel, setCurrentModel] = useState(0)
+  const [threshold, setThreshold] = useState(.5)
 
-  const [brightness, setBrightness] = useState(0)
-  const [bMin, setBMin] = useState(-100)
-  const [bMax, setBMax] = useState(100)
-  const [contrast, setContrast] = useState(0)
-  const [cMin, setCMin] = useState(-100)
-  const [cMax, setCMax] = useState(100)
-
+  
   // *----------* Image Operations *----------* \\
 
   async function handleUpload(e) {
@@ -255,7 +263,6 @@ function App() {
   // *----------* Detection Operations *----------* \\
 
   async function detect() {
-    const threshold = .5
 
     console.log(currentModel)
 
@@ -312,51 +319,6 @@ function App() {
       alert('Detection failed: ' + (e.response?.data?.error || e.message))
     }
   }
-
-  async function detectMADM() {
-    const threshold = .5
-
-    try {
-        const res = await fetch('/detect-madm', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ threshold }),
-          credentials: 'include',
-        })
-
-        if (!res.ok) throw new Error('MADM detection failed')
-        const data = await res.json()
-        
-        const yoloTxt = data.annotations
-        const imgWidth = data.image_width
-        const imgHeight = data.image_height
-
-        setAnnotations([])
-        let importedCount = 0
-
-        yoloTxt.split('\n').forEach(line => {
-          if (!line.trim()) return
-          const [clsStr, cxStr, cyStr, wStr, hStr] = line.trim().split(' ')
-          const cls = parseInt(clsStr)
-          const cx = parseFloat(cxStr) * imgWidth
-          const cy = parseFloat(cyStr) * imgHeight
-          const w = parseFloat(wStr) * imgWidth
-          const h = parseFloat(hStr) * imgHeight
-          const x1 = cx - w / 2
-          const y1 = cy - h / 2
-
-          handleAddBox({x: x1, y: y1, w: w, h: h, class: cls}) //TODO add isDetected
-
-          importedCount++
-        })
-
-        alert(`Detected ${importedCount} MADM objects!`)
-      } catch (e) {
-        alert('Detection failed: ' + (e.response?.data?.error || e.message))
-      }
-    }
 
   // Tab Menu contents
   const tabs = [
@@ -426,6 +388,18 @@ function App() {
           <Button variant='contained' component='label' onClick={detect}>
             Detect
           </Button>
+          <TextField
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value))}
+            type="number"
+            variant="outlined"
+            size="small"
+            slotProps={{ 
+              htmlInput: {
+                step: 0.1
+              }
+            }}
+          />
         </Box>
       )
 		}
