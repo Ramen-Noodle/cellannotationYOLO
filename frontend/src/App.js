@@ -80,6 +80,35 @@ function App() {
     }
   }
 
+  function handleSave() {
+    const img = new Image()
+    img.src = imageURL
+
+    img.onload = () => {
+      const tempCanvas = document.createElement('canvas');
+      const ctx = tempCanvas.getContext('2d');
+
+      tempCanvas.width = imageSize.width
+      tempCanvas.height = imageSize.height
+
+      ctx.filter = `brightness(${100 + +brightness}%) contrast(${100 + +contrast}%)`
+
+      ctx.drawImage(img, 0, 0)
+
+      ctx.lineWidth = 2
+
+      annotations.forEach((a) => {
+        ctx.strokeStyle = classes[a.class].color
+        ctx.strokeRect(a.x, a.y, a.w, a.h)
+      })
+
+      const link = document.createElement('a');
+      link.download = `annotated_${imageName.substring(0, imageName.lastIndexOf('.')) || imageName}.png`;
+      link.href = tempCanvas.toDataURL('image/png');
+      link.click();
+    }
+  }
+
   function toggleCrop() {
     if (isCropping) {
       setIsCropping(false)
@@ -396,7 +425,9 @@ function App() {
             size="small"
             slotProps={{ 
               htmlInput: {
-                step: 0.1
+                step: 0.1,
+                min: 0,
+                max: 1
               }
             }}
           />
@@ -411,6 +442,9 @@ function App() {
         <Button variant='contained' component='label'>
           Load Image
           <input hidden type='file' accept='image/tiff' onChange={handleUpload} />
+        </Button>
+        <Button variant='contained' component='label' onClick={handleSave}>
+          Save Image
         </Button>
         <Button variant='contained' component='label' onClick={toggleCrop} color={isCropping ? 'secondary' : 'primary'}>
           Crop Image
