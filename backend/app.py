@@ -2,6 +2,7 @@ import sys
 from werkzeug.utils import secure_filename  # ADD THIS AT TOP OF FILE
 from flask import Flask, request, jsonify, send_from_directory, send_file, g
 import os
+os.environ.setdefault('XLA_FLAGS', '--xla_gpu_cuda_data_dir=/home/cdlee3/miniconda3/envs/cellv2')
 from PIL import Image
 import uuid
 from flask_cors import CORS
@@ -573,80 +574,81 @@ def upload_custom_model():
 def save_annotations():
     if not g.user:
         return jsonify({"error": "No active session"}), 401
-    full_path = ''
     try:
         data = request.get_json()
         image_id = data['image_id']
-        weights = data['model']
-        annotations_detected = data['annotations_detected']
-        annotations_drawn = data['annotations_drawn']
+        annotation_groups = data['annotations']
         annotation_dir = g.user.get_path('annotations')
 
-        existing_annotation = Annotation.query.filter_by(
-            image_id=image_id, 
-            weights_id=weights['id'], 
-            user_id=g.user.id
-        ).first()
+        id_map = {}
 
-        if existing_annotation:
-            unique_id = existing_annotation.id
-            full_path = existing_annotation.file_path
-            existing_annotation.annotations_detected = list(annotations_detected)
-            existing_annotation.count_detected = len(annotations_detected)
-            existing_annotation.annotations_drawn = list(annotations_drawn)
-            existing_annotation.count_drawn = len(annotations_drawn)
-            
-            flag_modified(existing_annotation, "annotations")
-        else:
-            unique_id = str(uuid.uuid4())
-            annotation_filename = f'{unique_id}.txt'
-            full_path = os.path.join('data', annotation_dir, annotation_filename)
-            
-            new_annotation = Annotation(
-                id=unique_id,
-                user_id=g.user.id,
-                file_path=full_path,
-                image_id=image_id,
-                weights_id=weights['id'],
-                annotations_detected=annotations_detected,
-                count_detected=len(annotations_detected),
-                annotations_drawn=annotations_drawn,
-                count_drawn=len(annotations_drawn)
-            )
-            db.session.add(new_annotation)
+        for group in annotation_groups:
+            client_id = group.get('id')
+            weights_id = group['weights_id']
+            annotations_detected = group.get('annotations_detected', [])
+            annotations_drawn = group.get('annotations_drawn', [])
 
-        db.session.commit()
+            if not annotations_detected and not annotations_drawn:
+                continue
 
-        yolo_lines = []
-        for ann in annotations_detected:
-            line = "{0} {1:.6f} {2:.6f} {3:.6f} {4:.6f}".format(
-                ann['class'],
-                ann['x'],
-                ann['y'],
-                ann['w'],
-                ann['h']
-            )
-            yolo_lines.append(line)
-        for ann in annotations_drawn:
-            line = "{0} {1:.6f} {2:.6f} {3:.6f} {4:.6f}".format(
-                ann['class'],
-                ann['x'],
-                ann['y'],
-                ann['w'],
-                ann['h']
-            )
-            yolo_lines.append(line)
-        
-        # Save annotation file
-        with open(full_path, 'w') as f:
-            f.write("\n".join(yolo_lines))
+            existing_annotation = None
+            if client_id:
+                existing_annotation = Annotation.query.filter_by(
+                    id=client_id,
+                    user_id=g.user.id
+                ).first()
 
-        return jsonify({'message': 'Success'}), 200
+            if existing_annotation:
+                target = existing_annotation
+                target.annotations_detected = list(annotations_detected)
+                target.count_detected = len(annotations_detected)
+                target.annotations_drawn = list(annotations_drawn)
+                target.count_drawn = len(annotations_drawn)
+                flag_modified(target, "annotations_detected")
+                flag_modified(target, "annotations_drawn")
+                full_path = target.file_path
+            else:
+                real_id = str(uuid.uuid4())
+                annotation_filename = f'{real_id}.txt'
+                full_path = os.path.join('data', annotation_dir, annotation_filename)
+
+                target = Annotation(
+                    id=real_id,
+                    user_id=g.user.id,
+                    file_path=full_path,
+                    image_id=image_id,
+                    weights_id=weights_id,
+                    annotations_detected=annotations_detected,
+                    count_detected=len(annotations_detected),
+                    annotations_drawn=annotations_drawn,
+                    count_drawn=len(annotations_drawn)
+                )
+                db.session.add(target)
+
+                if client_id and client_id != real_id:
+                    id_map[client_id] = real_id
+
+            db.session.commit()
+
+            yolo_lines = []
+            for ann in list(annotations_detected) + list(annotations_drawn):
+                line = "{0} {1:.6f} {2:.6f} {3:.6f} {4:.6f}".format(
+                    ann['class'],
+                    ann['x'],
+                    ann['y'],
+                    ann['w'],
+                    ann['h']
+                )
+                yolo_lines.append(line)
+
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w') as f:
+                f.write("\n".join(yolo_lines))
+
+        return jsonify({'message': 'Success', 'id_map': id_map}), 200
 
     except Exception as e:
         db.session.rollback()
-        if os.path.exists(full_path):
-            os.remove(full_path)
         print(f"Error saving annotations: {str(e)}")
         return jsonify({'error': str(e)}), 500
     
@@ -2089,4 +2091,4 @@ if __name__ == '__main__':
         db.create_all()
         #seed_database(app)
         print("Database initialized")
-    app.run(host='0.0.0.0', port=5002, debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)
