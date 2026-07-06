@@ -41,7 +41,7 @@ import RowMenu from '../components/RowMenu'
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5001'
+  const API_BASE_URL = 'http://10.80.24.12:5002'
 
   const [isLoading, setIsLoading] = useState(false)
 
@@ -915,7 +915,9 @@ export default function CellAnnotationTool() {
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = 'annotations.zip'
+      const dotIndex = imageName.lastIndexOf('.')
+      const baseName = dotIndex > 0 ? imageName.substring(0, dotIndex) : imageName
+      a.download = `${baseName}.txt`
       document.body.appendChild(a)
       a.click()
 

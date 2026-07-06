@@ -713,27 +713,44 @@ def export_annotations():
         if not annotation_records:
             return jsonify({'error': 'No annotations found for this image'}), 404
 
-        zip_buffer = io.BytesIO()
-        files_added = 0
+        image_record = db.session.get(ImageRecord, image_id)
+        base_name = os.path.splitext(image_record.original_filename)[0] if image_record and image_record.original_filename else image_id
 
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for record in annotation_records:
-                if record.file_path and os.path.exists(record.file_path):
-                    # Get the raw filename (e.g., "annotation_v1.txt") to use inside the zip
-                    filename_in_zip = os.path.basename(record.file_path)
-                    zipf.write(record.file_path, filename_in_zip)
-                    files_added += 1
+        merged_lines = []
+        for record in annotation_records:
+            if not (record.file_path and os.path.exists(record.file_path)):
+                continue
 
-        if files_added == 0:
+            model = db.session.get(Weights, record.weights_id)
+            labels = model.label_set.labels if model and model.label_set else []
+
+            with open(record.file_path, 'r') as f:
+                content = f.read().strip()
+            if not content:
+                continue
+
+            for line in content.split('\n'):
+                if not line.strip():
+                    continue
+                parts = line.strip().split(' ')
+                class_idx = int(parts[0])
+                coords = parts[1:5]
+
+                class_name = labels[class_idx]['name'] if class_idx < len(labels) else f'class{class_idx}'
+                label = f"{class_name}_{record.sublabel}" if record.sublabel else class_name
+
+                merged_lines.append(f"{label} {' '.join(coords)}")
+
+        if not merged_lines:
             return jsonify({'error': 'Annotation files were missing from server storage'}), 404
 
-        zip_buffer.seek(0)
+        merged_buffer = io.BytesIO("\n".join(merged_lines).encode('utf-8'))
 
         return send_file(
-            zip_buffer,
-            mimetype='application/zip',
+            merged_buffer,
+            mimetype='text/plain',
             as_attachment=True,
-            download_name='annotations.zip'
+            download_name=f'{base_name}.txt'
         )
 
     except Exception as e:
@@ -1174,6 +1191,10 @@ def detect():
         if existing_annotation:
             full_path = existing_annotation.file_path
             target_record = existing_annotation
+
+            target_record.threshold = threshold
+            target_record.cell_diameter = cell_diameter
+            target_record.sublabel = sublabel
         else:
             unique_id = str(uuid.uuid4())
             annotation_dir = g.user.get_path('annotations')
@@ -2068,4 +2089,4 @@ if __name__ == '__main__':
         db.create_all()
         #seed_database(app)
         print("Database initialized")
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(host='0.0.0.0', port=5002, debug=True)
