@@ -41,7 +41,7 @@ import RowMenu from '../components/RowMenu'
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5002'
+  const API_BASE_URL = 'http://10.80.24.12:5001'
 
   const [isLoading, setIsLoading] = useState(false)
 
@@ -859,36 +859,59 @@ export default function CellAnnotationTool() {
     setIsLoading(true)
 
     try {
-      for (const modelObj of annotations) {
-        const annotationsDetected = modelObj.annotations_detected || []
-        const annotationsDrawn = modelObj.annotations_drawn || []
+      const payload = annotations
+        .map(modelObj => {
+          const rowId = modelObj.id ?? modelObj.annotation_id
+          const annotationsDetected = modelObj.annotations_detected || []
+          const annotationsDrawn = modelObj.annotations_drawn || []
 
-        if (annotationsDetected.length === 0 && annotationsDrawn.length === 0) continue
+          if (annotationsDetected.length === 0 && annotationsDrawn.length === 0) return null
 
-        const modelId = modelObj.id ?? modelObj.annotation_id
-        const model = models.find(m => m.id === modelId) // look up by id, not index
+          const row = detectionSettings.find(r => r.id === rowId)
+          if (!row) {
+            console.warn(`No detection row found for annotation group ${rowId}, skipping`)
+            return null
+          }
 
-        if (!model) {
-          console.warn(`No model found for annotation group ${modelId}, skipping`)
-          continue
-        }
-
-        const res = await fetch(`${API_BASE_URL}/save-annotations`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            image_id: imageID,
+          return {
+            id: rowId,
+            weights_id: row.selectedModelId,
             annotations_detected: annotationsDetected,
             annotations_drawn: annotationsDrawn,
-            model: model,
-          }),
-          credentials: 'include',
+          }
         })
+        .filter(Boolean)
 
-        if (!res.ok) throw new Error(`Save failed for annotation group ${modelId}`)
+      if (payload.length === 0) return
 
-        console.log(`Saved annotation group ${modelId} successfully`)
+      const res = await fetch(`${API_BASE_URL}/save-annotations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_id: imageID,
+          annotations: payload,
+        }),
+        credentials: 'include',
+      })
+
+      if (!res.ok) throw new Error('Save failed')
+
+      const data = await res.json()
+      const idMap = data.id_map || {}
+
+      // Replace temp client-generated ids with the real ids the server assigned
+      if (Object.keys(idMap).length > 0) {
+        setDetectionSettings(prev => prev.map(r => idMap[r.id] ? { ...r, id: idMap[r.id] } : r))
+        setAnnotations(prev => prev.map(modelObj => {
+          const rowId = modelObj.id ?? modelObj.annotation_id
+          return idMap[rowId] ? { ...modelObj, id: idMap[rowId], annotation_id: idMap[rowId] } : modelObj
+        }))
+        setBoxes(prev => prev.map(box => idMap[box.annotation_id] ? { ...box, annotation_id: idMap[box.annotation_id] } : box))
+        setActiveRowIds(prev => prev.map(id => idMap[id] || id))
+        setSelectedRowId(prev => idMap[prev] || prev)
       }
+
+      console.log('Saved annotations successfully')
     } catch(e) {
       alert('Save failed: ' + (e.response?.data?.error || e.message))
     } finally {
@@ -900,6 +923,7 @@ export default function CellAnnotationTool() {
     setIsLoading(true)
 
     try {
+      await saveAnnotations()
       const res = await fetch(`${API_BASE_URL}/export-annotations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
