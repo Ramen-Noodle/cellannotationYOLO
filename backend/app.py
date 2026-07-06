@@ -2,6 +2,7 @@ import sys
 from werkzeug.utils import secure_filename  # ADD THIS AT TOP OF FILE
 from flask import Flask, request, jsonify, send_from_directory, send_file, g
 import os
+os.environ.setdefault('XLA_FLAGS', '--xla_gpu_cuda_data_dir=/home/cdlee3/miniconda3/envs/cellv2')
 from PIL import Image
 import uuid
 from flask_cors import CORS
