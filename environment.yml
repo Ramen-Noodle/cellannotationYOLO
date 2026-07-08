@@ -226,6 +226,7 @@ dependencies:
       - contourpy==1.3.2
       - cycler==0.12.1
       - fonttools==4.58.4
+      - Flask-Migrate
       - fsspec==2025.5.1
       - imagecodecs==2025.3.30
       - joblib==1.5.1
