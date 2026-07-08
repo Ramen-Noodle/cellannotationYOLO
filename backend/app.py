@@ -50,8 +50,10 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # Session expire
 
 from database import db
 from models import User, ImageRecord, ImageSet, Annotation, LabelSet, Weights
+from flask_migrate import Migrate
 
 db.init_app(app)
+migrate = Migrate(app, db)
 
 @app.before_request
 def ensure_user_session():
@@ -2087,8 +2089,4 @@ atexit.register(lambda: scheduler.shutdown())
 
 if __name__ == '__main__':
     print('starting application')
-    with app.app_context():
-        db.create_all()
-        #seed_database(app)
-        print("Database initialized")
     app.run(host='0.0.0.0', port=5001, debug=True)

@@ -22,6 +22,7 @@ decorator
 filelock
 Flask
 flask-cors
+Flask-Migrate
 flatbuffers
 fonttools==4.58.4
 fsspec==2025.5.1

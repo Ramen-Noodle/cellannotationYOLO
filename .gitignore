@@ -8,3 +8,4 @@ remap.py
 backend/instance
 backend/snapshots
 backend/data
+backend/backups
