@@ -41,7 +41,7 @@ import RowMenu from '../components/RowMenu'
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5001'
+  const API_BASE_URL = 'http://10.80.24.12:5002'
 
   const [isLoading, setIsLoading] = useState(false)
 
@@ -557,7 +557,7 @@ export default function CellAnnotationTool() {
 
       const annoList = data.annotations || []
       const boxList = annoList.flatMap((modelObj) => {
-        const annotationId = modelObj.id
+        const annotationId = modelObj.detection_setting_id
         const labels = modelObj.labels.labels
 
         const detectedBoxes = (modelObj.annotations_detected || []).map((box) => ({
@@ -585,10 +585,10 @@ export default function CellAnnotationTool() {
 
       if (annoList.length > 0) {
         const loadedRows = annoList.map((modelObj) => {
-          const annotationId = modelObj.id
+          const annotationId = modelObj.detection_setting_id
           const labels = modelObj.labels?.labels || []
           return {
-            id: annotationId,  // real annotation id as row id
+            id: annotationId,  // detection setting id as row id
             selectedModelId: modelObj.weights_id,
             selectedClasses: labels.map(l => l.name),
             rowThreshold: modelObj.threshold ?? 0.5,
@@ -874,8 +874,12 @@ export default function CellAnnotationTool() {
           }
 
           return {
-            id: rowId,
+            detection_setting_id: rowId,
             weights_id: row.selectedModelId,
+            threshold: row.rowThreshold,
+            cell_diameter: row.rowDiameter,
+            sublabel: row.rowSublabel,
+            selected_classes: row.selectedClasses,
             annotations_detected: annotationsDetected,
             annotations_drawn: annotationsDrawn,
           }
@@ -1036,7 +1040,7 @@ export default function CellAnnotationTool() {
       const payload = {
         image_id: imageID,
         model_id: row.selectedModelId,
-        annotation_id: tempRowId,
+        detection_setting_id: tempRowId,
         threshold: row.rowThreshold,
         cell_diameter: row.rowDiameter,
         sublabel: row.rowSublabel,
@@ -1058,7 +1062,7 @@ export default function CellAnnotationTool() {
         
         const newAnnotations = data.annotations
         console.log(data)
-        const targetId = data.annotation_id
+        const targetId = data.detection_setting_id
         const newBoxes = newAnnotations.map(box => ({
           ...box,
           annotation_id: targetId,
@@ -1125,6 +1129,7 @@ export default function CellAnnotationTool() {
         const payload = {
           image_set_id: batchImageSetId,
           model_id: row.selectedModelId,
+          detection_setting_id: row.id,
           threshold: row.rowThreshold,
           cell_diameter: row.rowDiameter,
           sublabel: row.rowSublabel,
@@ -1141,6 +1146,13 @@ export default function CellAnnotationTool() {
         if (!res.ok) throw new Error(`Batch detection failed for model ${row.selectedModelId}`)
         const data = await res.json()
         batchResults.push(data)
+
+        if (data.detection_setting_id && data.detection_setting_id !== row.id) {
+          const resolvedId = data.detection_setting_id
+          setDetectionSettings(prev => prev.map(r => r.id === row.id ? { ...r, id: resolvedId } : r))
+          setBatchSelectedRowIds(prev => prev.map(id => id === row.id ? resolvedId : id))
+          setActiveRowIds(prev => prev.map(id => id === row.id ? resolvedId : id))
+        }
       }
 
       const total = batchResults.reduce((sum, r) => sum + (r.total || 0), 0)

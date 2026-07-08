@@ -49,7 +49,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # Session expires after 24 hours
 
 from database import db
-from models import User, ImageRecord, ImageSet, Annotation, LabelSet, Weights
+from models import User, ImageRecord, ImageSet, Annotation, LabelSet, Weights, DetectionSetting
 from flask_migrate import Migrate
 
 db.init_app(app)
@@ -135,6 +135,53 @@ def run_stardist_subprocess(image_path, model_path, image_width, image_height,
     os.unlink(output_path)
 
     return yolo_output
+
+def resolve_annotation_record(user_id, image_id, weights_id, params, detection_setting_id):
+    """
+    Finds or creates the Annotation record that a detect/batch-detect call
+    should write its results to, given a row's detection_setting_id (which
+    may be a real id, a stale id, or a frontend temp id) plus the settings
+    to use for this run.
+    """
+    try:
+        setting = None
+        if detection_setting_id:
+            setting = DetectionSetting.query.filter_by(id=detection_setting_id, user_id=user_id).first()
+
+        if setting:
+            # Row already has a real settings record - update it if the values changed.
+            if setting.weights_id != weights_id or setting.params != params:
+                setting.weights_id = weights_id
+                setting.params = params
+                flag_modified(setting, "params")
+        else:
+            # No record for this id - look for an existing duplicate before creating one.
+            candidates = DetectionSetting.query.filter_by(user_id=user_id, weights_id=weights_id).all()
+            setting = next((d for d in candidates if d.params == params), None)
+
+            if not setting:
+                setting = DetectionSetting(
+                    id=str(uuid.uuid4()), user_id=user_id, weights_id=weights_id, params=params
+                )
+                db.session.add(setting)
+                db.session.flush()
+
+        annotation = Annotation.query.filter_by(
+            user_id=user_id, image_id=image_id, detection_setting_id=setting.id
+        ).first()
+
+        if not annotation:
+            annotation = Annotation(
+                id=str(uuid.uuid4()), user_id=user_id, image_id=image_id, detection_setting_id=setting.id
+            )
+            db.session.add(annotation)
+            db.session.flush()
+
+        return annotation
+    except Exception:
+        db.session.rollback()
+        raise
+
 
 def execute_detection(image_record, model_record, threshold, cell_diameter, sublabel, selected_classes=None):
     """
@@ -901,16 +948,19 @@ def load_annotations():
 
     results = []
     for ann in annotations:
+        setting = ann.detection_setting
         annotation_weights = Weights.query.filter_by(
-            id=ann.weights_id, 
-            user_id=g.user.id 
+            id=setting.weights_id,
+            user_id=g.user.id
         ).first()
+        params = setting.params or {}
         results.append({
             "id": ann.id,
-            "weights_id": ann.weights_id,
-            "threshold": ann.threshold,
-            "cell_diameter": ann.cell_diameter,
-            "sublabel": ann.sublabel,
+            "detection_setting_id": setting.id,
+            "weights_id": setting.weights_id,
+            "threshold": params.get("threshold"),
+            "cell_diameter": params.get("cell_diameter"),
+            "sublabel": params.get("sublabel"),
             "annotations_detected": ann.annotations_detected,  # SQLAlchemy parses JSON columns automatically
             "annotations_drawn": ann.annotations_drawn,
             "count_detected": ann.count_detected,
@@ -1174,7 +1224,7 @@ def detect():
 
     image_id = data['image_id']
     model_id = data['model_id']
-    annotation_id = data['annotation_id']
+    detection_setting_id = data.get('detection_setting_id')
     threshold = float(data.get('threshold', 0.5))
     cell_diameter = float(data.get('cell_diameter', 34))
     sublabel = data.get('sublabel', '')
@@ -1191,29 +1241,21 @@ def detect():
             image_record, model_record, threshold, cell_diameter, sublabel, selected_classes
         )
 
-        existing_annotation = Annotation.query.filter_by(id=annotation_id).first()
-        if existing_annotation:
-            full_path = existing_annotation.file_path
-            target_record = existing_annotation
+        params = {
+            "threshold": threshold,
+            "cell_diameter": cell_diameter,
+            "sublabel": sublabel,
+            "selected_classes": selected_classes,
+        }
+        target_record = resolve_annotation_record(g.user.id, image_id, model_id, params, detection_setting_id)
 
-            target_record.threshold = threshold
-            target_record.cell_diameter = cell_diameter
-            target_record.sublabel = sublabel
-        else:
-            unique_id = str(uuid.uuid4())
+        if not target_record.file_path:
             annotation_dir = g.user.get_path('annotations')
-            full_path = os.path.join('data', annotation_dir, f'{unique_id}.txt')
-            
-            target_record = Annotation(
-                id=unique_id, user_id=g.user.id, file_path=full_path, image_id=image_id,
-                weights_id=model_id, threshold=threshold, cell_diameter=cell_diameter, sublabel=sublabel
-            )
-            db.session.add(target_record)
-            annotation_id = unique_id
+            target_record.file_path = os.path.join('data', annotation_dir, f'{target_record.id}.txt')
 
         # Save the layout flat-file
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, 'w') as f:
+        os.makedirs(os.path.dirname(target_record.file_path), exist_ok=True)
+        with open(target_record.file_path, 'w') as f:
             f.write(yolo_string)
 
         target_record.annotations_detected = converted_annotations
@@ -1223,7 +1265,7 @@ def detect():
 
         return jsonify({
             "annotations": converted_annotations,
-            "annotation_id": annotation_id,
+            "detection_setting_id": target_record.detection_setting_id,
             "labels": model_record.label_set.to_dict()
         })
 
@@ -1243,6 +1285,7 @@ def batch_detect():
 
     image_set_id = data['image_set_id']
     model_id = data['model_id']
+    detection_setting_id = data.get('detection_setting_id')
     threshold = float(data.get('threshold', 0.5))
     cell_diameter = float(data.get('cell_diameter', 34))
     sublabel = data.get('sublabel', '')
@@ -1255,9 +1298,15 @@ def batch_detect():
         if not image_set or not model_record:
             return jsonify({"error": "Records not found or unauthorized"}), 404
 
-        annotation_dir = g.user.get_path('annotations')
-        os.makedirs(os.path.join('data', annotation_dir), exist_ok=True)
+        params = {
+            "threshold": threshold,
+            "cell_diameter": cell_diameter,
+            "sublabel": sublabel,
+            "selected_classes": selected_classes,
+        }
+
         results = []
+        resolved_setting_id = None
 
         for image_record in image_set.images:
             try:
@@ -1265,26 +1314,17 @@ def batch_detect():
                     image_record, model_record, threshold, cell_diameter, sublabel, selected_classes
                 )
 
-                existing_annotation = Annotation.query.filter_by(
-                    image_id=image_record.id, weights_id=model_id, user_id=g.user.id,
-                    threshold=threshold, cell_diameter=cell_diameter, sublabel=sublabel
-                ).first()
+                target_record = resolve_annotation_record(
+                    g.user.id, image_record.id, model_id, params, resolved_setting_id or detection_setting_id
+                )
+                resolved_setting_id = target_record.detection_setting_id
 
-                if existing_annotation:
-                    full_path = existing_annotation.file_path
-                    target_record = existing_annotation
-                    current_annotation_id = target_record.id
-                else:
-                    unique_id = str(uuid.uuid4())
-                    full_path = os.path.join('data', annotation_dir, f'{unique_id}.txt')
-                    target_record = Annotation(
-                        id=unique_id, user_id=g.user.id, file_path=full_path, image_id=image_record.id,
-                        weights_id=model_id, threshold=threshold, cell_diameter=cell_diameter, sublabel=sublabel
-                    )
-                    db.session.add(target_record)
-                    current_annotation_id = unique_id
+                if not target_record.file_path:
+                    annotation_dir = g.user.get_path('annotations')
+                    target_record.file_path = os.path.join('data', annotation_dir, f'{target_record.id}.txt')
 
-                with open(full_path, 'w') as f:
+                os.makedirs(os.path.dirname(target_record.file_path), exist_ok=True)
+                with open(target_record.file_path, 'w') as f:
                     f.write(yolo_string)
 
                 target_record.annotations_detected = converted_annotations
@@ -1294,7 +1334,7 @@ def batch_detect():
 
                 results.append({
                     "image_id": image_record.id,
-                    "annotation_id": current_annotation_id,
+                    "annotation_id": target_record.id,
                     "count_detected": len(converted_annotations),
                     "success": True
                 })
@@ -1310,6 +1350,7 @@ def batch_detect():
         return jsonify({
             "status": "complete",
             "image_set_id": image_set_id,
+            "detection_setting_id": resolved_setting_id,
             "total": len(results),
             "succeeded": sum(1 for r in results if r["success"]),
             "failed": sum(1 for r in results if not r["success"]),
@@ -2089,4 +2130,6 @@ atexit.register(lambda: scheduler.shutdown())
 
 if __name__ == '__main__':
     print('starting application')
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
+    # starting the app to create/update tables instead of db.create_all().
+    app.run(host='0.0.0.0', port=5002, debug=True)
