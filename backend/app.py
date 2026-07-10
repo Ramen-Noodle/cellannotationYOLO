@@ -40,7 +40,7 @@ Image.MAX_IMAGE_PIXELS = None
 
 data_folder = os.path.join(os.getcwd(), 'data')
 app = Flask(__name__, static_folder=data_folder, static_url_path='/static')
-CORS(app, supports_credentials=True)  # This will allow all domains to access your API
+CORS(app, supports_credentials=True, expose_headers=['Content-Disposition'])  # This will allow all domains to access your API
 
 app.secret_key = 'test'  # Replace with a real secret key
 
@@ -632,7 +632,7 @@ def save_annotations():
         id_map = {}
 
         for group in annotation_groups:
-            client_id = group.get('id')
+            client_id = group.get('detection_setting_id')
             weights_id = group['weights_id']
             annotations_detected = group.get('annotations_detected', [])
             annotations_drawn = group.get('annotations_drawn', [])
@@ -640,53 +640,46 @@ def save_annotations():
             if not annotations_detected and not annotations_drawn:
                 continue
 
-            existing_annotation = None
-            if client_id:
-                existing_annotation = Annotation.query.filter_by(
-                    id=client_id,
-                    user_id=g.user.id
-                ).first()
+            params = {
+                "threshold": group.get('threshold'),
+                "cell_diameter": group.get('cell_diameter'),
+                "sublabel": group.get('sublabel'),
+                "selected_classes": group.get('selected_classes'),
+            }
 
-            if existing_annotation:
-                target = existing_annotation
-                target.annotations_detected = list(annotations_detected)
-                target.count_detected = len(annotations_detected)
-                target.annotations_drawn = list(annotations_drawn)
-                target.count_drawn = len(annotations_drawn)
-                flag_modified(target, "annotations_detected")
-                flag_modified(target, "annotations_drawn")
-                full_path = target.file_path
-            else:
-                real_id = str(uuid.uuid4())
-                annotation_filename = f'{real_id}.txt'
-                full_path = os.path.join('data', annotation_dir, annotation_filename)
+            # Frontend rows are keyed by detection_setting_id, so the id_map
+            # (used to reconcile client temp ids) maps onto the resolved
+            # DetectionSetting id rather than the Annotation id.
+            target = resolve_annotation_record(g.user.id, image_id, weights_id, params, client_id)
 
-                target = Annotation(
-                    id=real_id,
-                    user_id=g.user.id,
-                    file_path=full_path,
-                    image_id=image_id,
-                    weights_id=weights_id,
-                    annotations_detected=annotations_detected,
-                    count_detected=len(annotations_detected),
-                    annotations_drawn=annotations_drawn,
-                    count_drawn=len(annotations_drawn)
-                )
-                db.session.add(target)
+            target.annotations_detected = list(annotations_detected)
+            target.count_detected = len(annotations_detected)
+            target.annotations_drawn = list(annotations_drawn)
+            target.count_drawn = len(annotations_drawn)
+            flag_modified(target, "annotations_detected")
+            flag_modified(target, "annotations_drawn")
 
-                if client_id and client_id != real_id:
-                    id_map[client_id] = real_id
+            if not target.file_path:
+                target.file_path = os.path.join('data', annotation_dir, f'{target.id}.txt')
+            full_path = target.file_path
+
+            if client_id and client_id != target.detection_setting_id:
+                id_map[client_id] = target.detection_setting_id
 
             db.session.commit()
 
             yolo_lines = []
             for ann in list(annotations_detected) + list(annotations_drawn):
-                line = "{0} {1:.6f} {2:.6f} {3:.6f} {4:.6f}".format(
+                confidence = ann.get('confidence')
+                if confidence is None:
+                    confidence = 100
+                line = "{0} {1:.6f} {2:.6f} {3:.6f} {4:.6f} {5:.6f}".format(
                     ann['class'],
                     ann['x'],
                     ann['y'],
                     ann['w'],
-                    ann['h']
+                    ann['h'],
+                    confidence
                 )
                 yolo_lines.append(line)
 
@@ -743,6 +736,95 @@ def save_color():
 
 # *----------* Data Download Endpoints *----------* #
     
+def _parse_annotation_file(file_path):
+    """Reads a flat annotation .txt file into (class_idx, coords[4], confidence) rows."""
+    if not (file_path and os.path.exists(file_path)):
+        return []
+
+    with open(file_path, 'r') as f:
+        content = f.read().strip()
+    if not content:
+        return []
+
+    rows = []
+    for line in content.split('\n'):
+        if not line.strip():
+            continue
+        parts = line.strip().split(' ')
+        class_idx = int(parts[0])
+        coords = parts[1:5]
+        confidence = parts[5] if len(parts) > 5 else '100.000000'
+        rows.append((class_idx, coords, confidence))
+    return rows
+
+
+def merge_annotations(image_id, user_id, include_confidence=False):
+    """Merges all Annotation records for a single image into one set of class-name YOLO label lines."""
+    annotation_records = db.session.query(Annotation).filter_by(
+        image_id=image_id,
+        user_id=user_id
+    ).all()
+
+    if not annotation_records:
+        return None
+
+    merged_lines = []
+    for record in annotation_records:
+        rows = _parse_annotation_file(record.file_path)
+        if not rows:
+            continue
+
+        model = db.session.get(Weights, record.detection_setting.weights_id) if record.detection_setting else None
+        labels = model.label_set.labels if model and model.label_set else []
+        sublabel = record.detection_setting.params.get('sublabel') if record.detection_setting else None
+
+        for class_idx, coords, confidence in rows:
+            class_name = labels[class_idx]['name'] if class_idx < len(labels) else f'class{class_idx}'
+            label = f"{class_name}_{sublabel}" if sublabel else class_name
+
+            line_parts = [label] + coords
+            if include_confidence:
+                line_parts.append(confidence)
+            merged_lines.append(' '.join(line_parts))
+
+    return merged_lines
+
+
+def split_annotations_by_setting(image_id, user_id, include_confidence=False):
+    """
+    Builds one class-number YOLO file per detection setting run on this image.
+    Raw class indices only mean something within a single model's label set, so
+    (unlike merge_annotations) these can't be combined across detection settings.
+    Returns a list of (filename_suffix, lines) tuples.
+    """
+    annotation_records = db.session.query(Annotation).filter_by(
+        image_id=image_id,
+        user_id=user_id
+    ).all()
+
+    files = []
+    for record in annotation_records:
+        rows = _parse_annotation_file(record.file_path)
+        if not rows:
+            continue
+
+        model = db.session.get(Weights, record.detection_setting.weights_id) if record.detection_setting else None
+        model_name = model.name if model else 'model'
+        sublabel = record.detection_setting.params.get('sublabel') if record.detection_setting else None
+        suffix = f"{model_name}_{sublabel}" if sublabel else model_name
+
+        lines = []
+        for class_idx, coords, confidence in rows:
+            line_parts = [str(class_idx)] + coords
+            if include_confidence:
+                line_parts.append(confidence)
+            lines.append(' '.join(line_parts))
+
+        files.append((suffix, lines))
+
+    return files
+
+
 @app.route('/export-annotations', methods=['POST'])
 def export_annotations():
     if not g.user:
@@ -751,47 +833,77 @@ def export_annotations():
     try:
         data = request.json or {}
         image_id = data.get('image_id')
+        image_set_id = data.get('image_set_id')
+        label_format = data.get('label_format', 'name')  # 'name' | 'number'
+        include_confidence = bool(data.get('include_confidence', False))
 
-        if not image_id:
-            return jsonify({"error": "Missing image_id"}), 400
+        if not image_id and not image_set_id:
+            return jsonify({"error": "Missing image_id or image_set_id"}), 400
 
-        # Fetch the annotation record
-        annotation_records = db.session.query(Annotation).filter_by(
-            image_id=image_id, 
-            user_id=g.user.id
-        ).all()
+        if label_format not in ('name', 'number'):
+            return jsonify({"error": "Invalid label_format"}), 400
 
-        if not annotation_records:
-            return jsonify({'error': 'No annotations found for this image'}), 404
+        if image_set_id:
+            image_set = ImageSet.query.filter_by(id=image_set_id, user_id=g.user.id).first()
+            if not image_set:
+                return jsonify({"error": "Image set not found"}), 404
+            if not image_set.images:
+                return jsonify({"error": "Image set has no images"}), 404
+
+            zip_buffer = io.BytesIO()
+            exported_any = False
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for image_record in image_set.images:
+                    base_name = image_record.original_filename if image_record.original_filename else image_record.id
+
+                    if label_format == 'number':
+                        for suffix, lines in split_annotations_by_setting(image_record.id, g.user.id, include_confidence):
+                            if not lines:
+                                continue
+                            zf.writestr(f'{base_name}_{suffix}.txt', "\n".join(lines))
+                            exported_any = True
+                    else:
+                        merged_lines = merge_annotations(image_record.id, g.user.id, include_confidence)
+                        if not merged_lines:
+                            continue
+                        zf.writestr(f'{base_name}.txt', "\n".join(merged_lines))
+                        exported_any = True
+
+            if not exported_any:
+                return jsonify({'error': 'No annotations found for any image in this set'}), 404
+
+            zip_buffer.seek(0)
+            return send_file(
+                zip_buffer,
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name=f'{image_set.name}.zip'
+            )
 
         image_record = db.session.get(ImageRecord, image_id)
-        base_name = os.path.splitext(image_record.original_filename)[0] if image_record and image_record.original_filename else image_id
+        base_name = image_record.original_filename if image_record and image_record.original_filename else image_id
 
-        merged_lines = []
-        for record in annotation_records:
-            if not (record.file_path and os.path.exists(record.file_path)):
-                continue
+        if label_format == 'number':
+            files = [(suffix, lines) for suffix, lines in split_annotations_by_setting(image_id, g.user.id, include_confidence) if lines]
+            if not files:
+                return jsonify({'error': 'No annotations found for this image'}), 404
 
-            model = db.session.get(Weights, record.weights_id)
-            labels = model.label_set.labels if model and model.label_set else []
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for suffix, lines in files:
+                    zf.writestr(f'{base_name}_{suffix}.txt', "\n".join(lines))
+            zip_buffer.seek(0)
 
-            with open(record.file_path, 'r') as f:
-                content = f.read().strip()
-            if not content:
-                continue
+            return send_file(
+                zip_buffer,
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name=f'{base_name}.zip'
+            )
 
-            for line in content.split('\n'):
-                if not line.strip():
-                    continue
-                parts = line.strip().split(' ')
-                class_idx = int(parts[0])
-                coords = parts[1:5]
-
-                class_name = labels[class_idx]['name'] if class_idx < len(labels) else f'class{class_idx}'
-                label = f"{class_name}_{record.sublabel}" if record.sublabel else class_name
-
-                merged_lines.append(f"{label} {' '.join(coords)}")
-
+        merged_lines = merge_annotations(image_id, g.user.id, include_confidence)
+        if merged_lines is None:
+            return jsonify({'error': 'No annotations found for this image'}), 404
         if not merged_lines:
             return jsonify({'error': 'Annotation files were missing from server storage'}), 404
 
@@ -2132,4 +2244,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5002, debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)
