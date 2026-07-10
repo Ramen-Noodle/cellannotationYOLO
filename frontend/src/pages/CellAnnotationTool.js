@@ -1,5 +1,5 @@
 import { useState, useEffect, Fragment } from 'react'
-import { Box, Button, Typography, Divider, Modal, IconButton, FormControlLabel, Checkbox, Popover, Paper, Select, FormControl, InputLabel, OutlinedInput, Chip } from '@mui/material'
+import { Box, Button, Typography, Divider, Modal, IconButton, FormControlLabel, Checkbox, Popover, Paper, Select, FormControl, InputLabel, OutlinedInput, Chip, RadioGroup, Radio } from '@mui/material'
 import PopupState, { bindTrigger, bindMenu } from 'material-ui-popup-state'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import Menu from '@mui/material/Menu'
@@ -41,7 +41,7 @@ import RowMenu from '../components/RowMenu'
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5002'
+  const API_BASE_URL = 'http://10.80.24.12:5001'
 
   const [isLoading, setIsLoading] = useState(false)
 
@@ -211,21 +211,6 @@ export default function CellAnnotationTool() {
       setClasses(allLabels)
       setCurrentClass(0)
       setAnnotations([])
-      const defaultLabels = data[0]?.label_set?.labels
-      ? data[0].label_set.labels.map(label => label.name) // Extracts ['neuron', 'glia']
-      : []
-
-      const tempId = generateId()
-      setDetectionSettings([
-        {
-          id: tempId,
-          selectedModelId: data[0]?.id,
-          selectedClasses: defaultLabels,
-          rowThreshold: 0.5,
-          rowDiameter: 34
-        }
-      ])
-      setActiveRowIds([tempId])
     })
   }
 
@@ -600,6 +585,7 @@ export default function CellAnnotationTool() {
         setSelectedRowId(loadedRows[0].id)
         setActiveRowIds(loadedRows.map(row => row.id))
       } else {
+        setDetectionSettings([])
         setActiveRowIds([])
       }
 
@@ -923,16 +909,34 @@ export default function CellAnnotationTool() {
     }
   }
 
-  async function exportAnnotations() { //TODO: Update
+  async function exportAnnotations() {
     setIsLoading(true)
 
     try {
-      await saveAnnotations()
+      const isImageSet = exportImageSetId !== null
+
+      if (isImageSet && !exportImageSetId) {
+        alert('Please select an image set to export.')
+        return
+      }
+      if (!isImageSet && !exportImageId) {
+        alert('Please select an image to export.')
+        return
+      }
+
+      // Only the currently active image can have unsaved edits sitting in the
+      // canvas, so flush those before export to avoid downloading a stale file.
+      if (!isImageSet && exportImageId === imageID) {
+        await saveAnnotations()
+      }
+
       const res = await fetch(`${API_BASE_URL}/export-annotations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          image_id: imageID,
+          ...(isImageSet ? { image_set_id: exportImageSetId } : { image_id: exportImageId }),
+          label_format: exportLabelFormat,
+          include_confidence: exportIncludeConfidence,
         }),
         credentials: 'include',
       })
@@ -943,15 +947,24 @@ export default function CellAnnotationTool() {
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      const dotIndex = imageName.lastIndexOf('.')
-      const baseName = dotIndex > 0 ? imageName.substring(0, dotIndex) : imageName
-      a.download = `${baseName}.txt`
+
+      // Class-number exports can produce multiple files even for a single image,
+      // so the server decides .txt vs .zip per request; read the name it picked
+      // back off the response instead of re-deriving it here.
+      const disposition = res.headers.get('Content-Disposition') || ''
+      const filenameMatch = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/)
+      const baseName = isImageSet
+        ? (imageSets.find(s => s.id === exportImageSetId)?.name || 'image_set')
+        : (imageList.find(img => img.id === exportImageId)?.name || imageName).replace(/\.[^.]+$/, '')
+      // Class-number format always zips (one file per detection setting), even for a single image
+      const fallbackExtension = isImageSet || exportLabelFormat === 'number' ? 'zip' : 'txt'
+      a.download = filenameMatch ? decodeURIComponent(filenameMatch[1]) : `${baseName}.${fallbackExtension}`
+
       document.body.appendChild(a)
       a.click()
 
       document.body.removeChild(a)
       window.URL.revokeObjectURL(url)
-      //const data = await res.json()
     } catch(e) {
       alert('Export failed: ' + (e.res?.data?.error || e.message))
     } finally {
@@ -1672,6 +1685,12 @@ export default function CellAnnotationTool() {
   const [annotationModalOpen, setAnnotationModalOpen] = useState(false)
 
   const [exportModalOpen, setExportModalOpen] = useState(false)
+  // Mutually exclusive: exactly one of these is non-null at a time.
+  // Whichever one is set determines the export scope ("image" vs "image set").
+  const [exportImageId, setExportImageId] = useState('')
+  const [exportImageSetId, setExportImageSetId] = useState(null)
+  const [exportLabelFormat, setExportLabelFormat] = useState('name') // 'name' | 'number'
+  const [exportIncludeConfidence, setExportIncludeConfidence] = useState(false)
   const [clearModalOpen, setClearModalOpen] = useState(false)
   const [batchDetectModalOpen, setBatchDetectModalOpen] = useState(false)
   function handleOpenBatchDetectModal() {
@@ -1718,10 +1737,11 @@ export default function CellAnnotationTool() {
 
   const createEmptyRow = () => {
     const defaultModel = models[0]
+    const defaultClasses = defaultModel?.label_set?.labels?.map(label => label.name) || []
     return {
       id: generateId(),
       selectedModelId: defaultModel ? defaultModel.id : '',
-      selectedClasses: [],
+      selectedClasses: defaultClasses,
       rowThreshold: 0.5,
       rowDiameter: 34,
       rowSublabel: ''
@@ -1785,14 +1805,42 @@ export default function CellAnnotationTool() {
     setDetectionSettings((prevRows) => [...prevRows, newRow])
     setActiveRowIds((prevActive) => [...prevActive, newRow.id]) // Default new row to visible
   }
-  const handleDeleteRow = (targetIndex) => {
+  const handleDeleteRow = async (targetIndex) => {
     const targetRow = detectionSettings[targetIndex]
-    setDetectionSettings((prevRows) => prevRows.filter((_, i) => i !== targetIndex))
-    if (targetRow) {
-      setActiveRowIds((prevActive) => prevActive.filter(id => id !== targetRow.id))
-      setAnnotations(prevAnnos => prevAnnos.filter(ann => ann.id !== targetRow.id))
-      setBoxes(prevBoxes => prevBoxes.filter(box => box.annotation_id !== targetRow.id))
+    if (!targetRow) return
+
+    // A row only exists in the backend once it has a matching entry in `annotations`
+    // (set by load-annotations or detect()). Rows added locally via "Add" but never
+    // detected/saved yet only carry a client-generated temp id — nothing to delete server-side.
+    const isPersisted = annotations.some(ann =>
+      ann.detection_setting_id === targetRow.id ||
+      ann.id === targetRow.id ||
+      ann.annotation_id === targetRow.id
+    )
+
+    if (isPersisted) {
+      try {
+        const res = await fetch(`${API_BASE_URL}/delete-annotations`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image_id: imageID, detection_setting_id: targetRow.id }),
+          credentials: 'include',
+        })
+        if (!res.ok) throw new Error('Delete failed')
+      } catch (e) {
+        alert('Delete failed: ' + (e.response?.data?.error || e.message))
+        return
+      }
     }
+
+    setDetectionSettings((prevRows) => prevRows.filter((_, i) => i !== targetIndex))
+    setActiveRowIds((prevActive) => prevActive.filter(id => id !== targetRow.id))
+    setAnnotations(prevAnnos => prevAnnos.filter(ann =>
+      ann.detection_setting_id !== targetRow.id &&
+      ann.id !== targetRow.id &&
+      ann.annotation_id !== targetRow.id
+    ))
+    setBoxes(prevBoxes => prevBoxes.filter(box => box.annotation_id !== targetRow.id))
   }
   const handleSelectRow = (id) => {
     setSelectedRowId(id)
@@ -2130,14 +2178,31 @@ export default function CellAnnotationTool() {
               </IconButton>
             </Tooltip>
 
-            {/* 2. EXPORT ANNOTATIONS (Triggers new Configuration Modal) */}
-            <Tooltip title="Export Options" arrow>
+            {/* 3. IMPORT ANNOTATIONS */}
+            <Tooltip title="Upload Annotations" arrow>
               <IconButton 
+                component="label"
                 color="primary" 
-                onClick={() => setExportModalOpen(true)}
                 sx={{ p: 1.5 }}
               >
                 <FileUploadIcon />
+                <input hidden type="file" accept=".txt" onChange={importAnnotations}/>
+              </IconButton>
+            </Tooltip>
+
+            {/* 2. EXPORT ANNOTATIONS (Triggers new Configuration Modal) */}
+            <Tooltip title="Download Options" arrow>
+              <IconButton
+                color="primary"
+                onClick={() => {
+                  // Default to the currently active image on open
+                  setExportImageId(imageID)
+                  setExportImageSetId(null)
+                  setExportModalOpen(true)
+                }}
+                sx={{ p: 1.5 }}
+              >
+                <FileDownloadIcon />
               </IconButton>
             </Tooltip>
             <Modal
@@ -2169,10 +2234,74 @@ export default function CellAnnotationTool() {
                 <Divider sx={{ mb: 2 }} />
 
                 <Stack spacing={2.5}>
-                  {/* Scope Settings toggles */}
+                  {/* Export target: exactly one of an image or an image set */}
+                  <FormControl>
+                    <Typography variant="body2" sx={{ fontWeight: 500, mb: 0.5 }}>
+                      Export
+                    </Typography>
+                    <RadioGroup
+                      row
+                      value={exportImageSetId !== null ? 'imageSet' : 'image'}
+                      onChange={(e) => {
+                        if (e.target.value === 'imageSet') {
+                          setExportImageId(null)
+                          setExportImageSetId('')
+                        } else {
+                          setExportImageSetId(null)
+                          setExportImageId(imageID)
+                        }
+                      }}
+                    >
+                      <FormControlLabel value="image" control={<Radio size="small" />} label="Image" />
+                      <FormControlLabel value="imageSet" control={<Radio size="small" />} label="Image Set" />
+                    </RadioGroup>
+                  </FormControl>
+
+                  {exportImageSetId !== null ? (
+                    <FormControl fullWidth size="small">
+                      <InputLabel id="export-image-set-label">Image Set</InputLabel>
+                      <Select
+                        labelId="export-image-set-label"
+                        label="Image Set"
+                        value={exportImageSetId}
+                        displayEmpty
+                        onChange={(e) => setExportImageSetId(e.target.value)}
+                      >
+                        {imageSets.length === 0 ? (
+                          <MenuItem value="" disabled>No image sets available</MenuItem>
+                        ) : (
+                          imageSets.map((set) => (
+                            <MenuItem key={set.id} value={set.id}>{set.name}</MenuItem>
+                          ))
+                        )}
+                      </Select>
+                    </FormControl>
+                  ) : (
+                    <FormControl fullWidth size="small">
+                      <InputLabel id="export-image-label">Image</InputLabel>
+                      <Select
+                        labelId="export-image-label"
+                        label="Image"
+                        value={exportImageId}
+                        displayEmpty
+                        onChange={(e) => setExportImageId(e.target.value)}
+                      >
+                        {imageList.length === 0 ? (
+                          <MenuItem value="" disabled>No images available</MenuItem>
+                        ) : (
+                          imageList.map((img) => (
+                            <MenuItem key={img.id} value={img.id}>{img.name}</MenuItem>
+                          ))
+                        )}
+                      </Select>
+                    </FormControl>
+                  )}
+
+                  <Divider />
+
                   <FormControlLabel
                     control={
-                      <Checkbox 
+                      <Checkbox
                         checked={annotationsOnly}
                         onChange={(e) => setAnnotationsOnly(e.target.checked)}
                       />
@@ -2187,6 +2316,45 @@ export default function CellAnnotationTool() {
                     }
                   />
 
+                  <Divider />
+
+                  {/* Label format: class name (merged per image) vs class number (split per detection setting) */}
+                  <FormControl>
+                    <Typography variant="body2" sx={{ fontWeight: 500, mb: 0.5 }}>
+                      Label format
+                    </Typography>
+                    <RadioGroup
+                      row
+                      value={exportLabelFormat}
+                      onChange={(e) => setExportLabelFormat(e.target.value)}
+                    >
+                      <FormControlLabel value="name" control={<Radio size="small" />} label="Class name" />
+                      <FormControlLabel value="number" control={<Radio size="small" />} label="Class number" />
+                    </RadioGroup>
+                    <Typography variant="caption" color="text.secondary">
+                      {exportLabelFormat === 'name'
+                        ? 'One merged file per image, labeled by class name'
+                        : 'One file per detection setting, labeled by raw class index'}
+                    </Typography>
+                  </FormControl>
+
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        checked={exportIncludeConfidence}
+                        onChange={(e) => setExportIncludeConfidence(e.target.checked)}
+                      />
+                    }
+                    label={
+                      <Box>
+                        <Typography variant="body1" sx={{ fontWeight: 500 }}>Include confidence</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          Appends a confidence score to each line (100 if unavailable)
+                        </Typography>
+                      </Box>
+                    }
+                  />
+
                   {/* Action Buttons */}
                   <Box display="flex" gap={1.5} justifyContent="flex-end" sx={{ mt: 1 }}>
                     <Button 
@@ -2195,12 +2363,13 @@ export default function CellAnnotationTool() {
                     >
                       Cancel
                     </Button>
-                    <Button 
-                      variant="contained" 
+                    <Button
+                      variant="contained"
                       startIcon={<FileDownloadIcon />}
+                      disabled={exportImageSetId !== null ? !exportImageSetId : !exportImageId}
                       onClick={() => {
-                        exportAnnotations() // Fires your standard download workflow logic
-                        setExportModalOpen(false) // Close modal smoothly
+                        exportAnnotations()
+                        setExportModalOpen(false)
                       }}
                     >
                       Download Package
@@ -2209,18 +2378,6 @@ export default function CellAnnotationTool() {
                 </Stack>
               </Box>
             </Modal>
-
-            {/* 3. IMPORT ANNOTATIONS */}
-            <Tooltip title="Import Annotations" arrow>
-              <IconButton 
-                component="label"
-                color="primary" 
-                sx={{ p: 1.5 }}
-              >
-                <FileDownloadIcon />
-                <input hidden type="file" accept=".txt" onChange={importAnnotations}/>
-              </IconButton>
-            </Tooltip>
 
             {/* 4. CLEAR ANNOTATIONS */}
             <Tooltip title="Clear Canvas Annotations" arrow>
