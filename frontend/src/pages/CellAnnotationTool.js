@@ -785,17 +785,23 @@ export default function CellAnnotationTool() {
     setAnnotations((prevAnnotations) => {
       return prevAnnotations.map((modelObj) => {
         const modelId = modelObj.id || modelObj.annotation_id
-        
-        if (modelId === targetBox.annotation_id) {
-          const innerBoxes = modelObj.annotations || [];
-          return {
-            ...modelObj,
-            annotations: innerBoxes.filter(
-              (b) => !(b.x === targetBox.x && b.y === targetBox.y && b.w === targetBox.w && b.h === targetBox.h)
-            )
-          };
-        }
-        return modelObj
+
+        if (modelId !== targetBox.annotation_id) return modelObj
+
+        const isTargetBox = (b) =>
+          b.x === targetBox.x && b.y === targetBox.y && b.w === targetBox.w && b.h === targetBox.h
+
+        // Boxes live in annotations_detected or annotations_drawn depending on
+        // their origin — filter out of whichever one this box came from.
+        return targetBox.is_detected
+          ? {
+              ...modelObj,
+              annotations_detected: (modelObj.annotations_detected || []).filter((b) => !isTargetBox(b))
+            }
+          : {
+              ...modelObj,
+              annotations_drawn: (modelObj.annotations_drawn || []).filter((b) => !isTargetBox(b))
+            }
       })
     })
 
@@ -1820,7 +1826,7 @@ export default function CellAnnotationTool() {
 
     if (isPersisted) {
       try {
-        const res = await fetch(`${API_BASE_URL}/delete-annotations`, {
+        const res = await fetch(`${API_BASE_URL}/delete-annotation`, {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ image_id: imageID, detection_setting_id: targetRow.id }),
