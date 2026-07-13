@@ -26,12 +26,12 @@ def run_detection(
     model_path: str,
     prob_thresh: float = 0.479071463157368,
     nms_thresh: float = 0.3,
-    n_tiles: tuple = (2, 2),
+    n_tiles: tuple = (4, 4),  # Bumped up from (2, 2) for 45MP images
     norm_low: float = 1,
     norm_high: float = 99.8,
-) -> list:
+) -> np.ndarray:
     """
-    Runs StarDist prediction and returns a list of regionprops objects.
+    Runs StarDist prediction and returns the raw labels array.
     """
     if isinstance(image_source, Image.Image):
         img = image_source.convert('L') if image_source.mode != 'L' else image_source
@@ -51,30 +51,28 @@ def run_detection(
         prob_thresh=prob_thresh,
         nms_thresh=nms_thresh,
     )
-    print(f'[DEBUG] predict_instances returned: {labels.max()} instances, details keys={list(details.keys())}')
+    print(f'[DEBUG] predict_instances returned: {labels.max()} instances')
     return labels
 
 
-def filter_labels(labels, min_diam: float = 7, max_diam: float = 17):
+def predictions_to_yolo(
+    labels, 
+    image_width: int, 
+    image_height: int, 
+    min_diam: float = 0, 
+    max_diam: float = float('inf')
+) -> str:
     """
-    Filters labels by equivalent diameter to remove false positives.
-    """
-    new_labels = np.zeros_like(labels)
-    current_id = 1
-    for prop in regionprops(labels):
-        if min_diam <= prop.equivalent_diameter <= max_diam:
-            new_labels[labels == prop.label] = current_id
-            current_id += 1
-    return new_labels
-
-
-def predictions_to_yolo(labels, image_width: int, image_height: int) -> str:
-    """
-    Converts StarDist labels to YOLO-format annotation string,
-    matching the output format of sahi_detect.predictions_to_yolo().
+    Converts StarDist labels to YOLO format, filtering by diameter inline 
+    to completely avoid heavy array-masking bottlenecks.
     """
     lines = []
+    # regionprops calculates properties efficiently in one pass
     for prop in regionprops(labels):
+        # Filter inline here instead of rewriting the entire image array
+        if not (min_diam <= prop.equivalent_diameter <= max_diam):
+            continue
+            
         min_r, min_c, max_r, max_c = prop.bbox
         x_center = ((min_c + max_c) / 2) / image_width
         y_center = ((min_r + max_r) / 2) / image_height
@@ -93,7 +91,7 @@ def stardist_detect_to_yolo(
     image_height: int,
     prob_thresh: float = 0.479071463157368,
     nms_thresh: float = 0.3,
-    n_tiles: tuple = (2, 2),
+    n_tiles: tuple = (4, 4),  # Recommended (4, 4) or (8, 8) for 10000x4500
     nucleus_diam_min: float = 7,
     nucleus_diam_max: float = 17,
     norm_low: float = 1,
@@ -101,12 +99,11 @@ def stardist_detect_to_yolo(
 ) -> str:
     """
     Convenience wrapper — runs detection and returns a YOLO annotation string.
-    Drop-in equivalent of sahi_detect.detect_to_yolo().
     """
     labels = run_detection(image_source, model_path, prob_thresh, nms_thresh, n_tiles, norm_low, norm_high)
     print(f'[DEBUG] raw labels: {labels.max()} instances')
-    filtered = filter_labels(labels, nucleus_diam_min, nucleus_diam_max)
-    print(f'[DEBUG] filtered labels: {filtered.max()} instances (min_diam={nucleus_diam_min}, max_diam={nucleus_diam_max})')
-    result = predictions_to_yolo(filtered, image_width, image_height)
+    
+    # Combined step: Converts and filters at the exact same time
+    result = predictions_to_yolo(labels, image_width, image_height, nucleus_diam_min, nucleus_diam_max)
     print(f'[DEBUG] yolo_output lines: {len(result.splitlines()) if result else 0}')
     return result
