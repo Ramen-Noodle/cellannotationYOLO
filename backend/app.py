@@ -1134,6 +1134,49 @@ def delete_image():
         return jsonify({"error": "Internal server error occurred during deletion structural sweep"}), 500
 
 
+@app.route('/delete-annotation', methods=['DELETE'])
+def delete_annotations():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+
+    data = request.get_json()
+    if not data or 'image_id' not in data or 'detection_setting_id' not in data:
+        return jsonify({"error": "Missing image_id or detection_setting_id in request body"}), 400
+
+    image_id = data['image_id']
+    detection_setting_id = data['detection_setting_id']
+
+    try:
+        # Exactly one annotation should match this (image, detection_setting) pair
+        # per the uq_annotation_image_detection_setting constraint on Annotation.
+        annotation = Annotation.query.filter_by(
+            user_id=g.user.id,
+            image_id=image_id,
+            detection_setting_id=detection_setting_id
+        ).first()
+
+        if not annotation:
+            return jsonify({"error": "No matching annotation found"}), 404
+
+        annotation_path = annotation.file_path
+
+        db.session.delete(annotation)
+        db.session.commit()
+
+        if annotation_path and os.path.exists(annotation_path):
+            os.remove(annotation_path)
+
+        return jsonify({
+            "success": True,
+            "message": "Annotation successfully deleted"
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"CRITICAL: Failed to delete annotation for image {image_id}: {e}")
+        return jsonify({"error": "Internal server error occurred during annotation deletion"}), 500
+
+
 @app.route('/clear-annotations', methods=['DELETE'])
 def clear_annotations():
     if not g.user:
