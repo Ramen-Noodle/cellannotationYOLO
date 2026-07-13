@@ -102,7 +102,7 @@ import subprocess
 import tempfile
 
 def run_stardist_subprocess(image_path, model_path, image_width, image_height,
-                             nucleus_diam_min=7, nucleus_diam_max=17):
+                             nucleus_diam_min=7, nucleus_diam_max=17, prob_thresh=None):
     """
     Runs StarDist detection in an isolated subprocess so TensorFlow never
     shares a process with torch/ultralytics (cuDNN version conflict).
@@ -123,6 +123,8 @@ def run_stardist_subprocess(image_path, model_path, image_width, image_height,
         '--nucleus_diam_max', str(nucleus_diam_max),
         '--output_path', output_path,
     ]
+    if prob_thresh is not None:
+        cmd += ['--prob_thresh', str(prob_thresh)]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
@@ -183,7 +185,8 @@ def resolve_annotation_record(user_id, image_id, weights_id, params, detection_s
         raise
 
 
-def execute_detection(image_record, model_record, threshold, cell_diameter, sublabel, selected_classes=None):
+def execute_detection(image_record, model_record, threshold, cell_diameter, sublabel, selected_classes=None,
+                       min_cell_diameter=None, max_cell_diameter=None):
     """
     Shared pipeline that handles preprocessing, model routing (StarDist vs. SAHI),
     and coordinate space translation from YOLO to UI-pixels.
@@ -210,8 +213,9 @@ def execute_detection(image_record, model_record, threshold, cell_diameter, subl
             model_path=abs_model_path,
             image_width=image_record.width,
             image_height=image_record.height,
-            nucleus_diam_min=7,
-            nucleus_diam_max=17,
+            nucleus_diam_min=min_cell_diameter if min_cell_diameter is not None else 7,
+            nucleus_diam_max=max_cell_diameter if max_cell_diameter is not None else 17,
+            prob_thresh=threshold,
         )
         print(f'[DEBUG] yolo_output repr (first 300 chars): {repr(yolo_output[:300])}')
     else:
@@ -643,6 +647,8 @@ def save_annotations():
             params = {
                 "threshold": group.get('threshold'),
                 "cell_diameter": group.get('cell_diameter'),
+                "min_cell_diameter": group.get('min_cell_diameter'),
+                "max_cell_diameter": group.get('max_cell_diameter'),
                 "sublabel": group.get('sublabel'),
                 "selected_classes": group.get('selected_classes'),
             }
@@ -1072,6 +1078,8 @@ def load_annotations():
             "weights_id": setting.weights_id,
             "threshold": params.get("threshold"),
             "cell_diameter": params.get("cell_diameter"),
+            "min_cell_diameter": params.get("min_cell_diameter"),
+            "max_cell_diameter": params.get("max_cell_diameter"),
             "sublabel": params.get("sublabel"),
             "annotations_detected": ann.annotations_detected,  # SQLAlchemy parses JSON columns automatically
             "annotations_drawn": ann.annotations_drawn,
@@ -1382,6 +1390,8 @@ def detect():
     detection_setting_id = data.get('detection_setting_id')
     threshold = float(data.get('threshold', 0.5))
     cell_diameter = float(data.get('cell_diameter', 34))
+    min_cell_diameter = float(data.get('min_cell_diameter', 7))
+    max_cell_diameter = float(data.get('max_cell_diameter', 17))
     sublabel = data.get('sublabel', '')
     selected_classes = data.get('selected_classes', None)
 
@@ -1393,12 +1403,15 @@ def detect():
             return jsonify({"error": "Data records not found or unauthorized"}), 404
 
         yolo_string, converted_annotations = execute_detection(
-            image_record, model_record, threshold, cell_diameter, sublabel, selected_classes
+            image_record, model_record, threshold, cell_diameter, sublabel, selected_classes,
+            min_cell_diameter=min_cell_diameter, max_cell_diameter=max_cell_diameter
         )
 
         params = {
             "threshold": threshold,
             "cell_diameter": cell_diameter,
+            "min_cell_diameter": min_cell_diameter,
+            "max_cell_diameter": max_cell_diameter,
             "sublabel": sublabel,
             "selected_classes": selected_classes,
         }
@@ -1443,6 +1456,8 @@ def batch_detect():
     detection_setting_id = data.get('detection_setting_id')
     threshold = float(data.get('threshold', 0.5))
     cell_diameter = float(data.get('cell_diameter', 34))
+    min_cell_diameter = float(data.get('min_cell_diameter', 7))
+    max_cell_diameter = float(data.get('max_cell_diameter', 17))
     sublabel = data.get('sublabel', '')
     selected_classes = data.get('selected_classes', None)
 
@@ -1456,6 +1471,8 @@ def batch_detect():
         params = {
             "threshold": threshold,
             "cell_diameter": cell_diameter,
+            "min_cell_diameter": min_cell_diameter,
+            "max_cell_diameter": max_cell_diameter,
             "sublabel": sublabel,
             "selected_classes": selected_classes,
         }
@@ -1466,7 +1483,8 @@ def batch_detect():
         for image_record in image_set.images:
             try:
                 yolo_string, converted_annotations = execute_detection(
-                    image_record, model_record, threshold, cell_diameter, sublabel, selected_classes
+                    image_record, model_record, threshold, cell_diameter, sublabel, selected_classes,
+                    min_cell_diameter=min_cell_diameter, max_cell_diameter=max_cell_diameter
                 )
 
                 target_record = resolve_annotation_record(
@@ -2287,4 +2305,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(host='0.0.0.0', port=5002, debug=True)

@@ -41,7 +41,7 @@ import RowMenu from '../components/RowMenu'
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5001'
+  const API_BASE_URL = 'http://10.80.24.12:5002'
 
   const [isLoading, setIsLoading] = useState(false)
 
@@ -578,6 +578,8 @@ export default function CellAnnotationTool() {
             selectedClasses: labels.map(l => l.name),
             rowThreshold: modelObj.threshold ?? 0.5,
             rowDiameter: modelObj.cell_diameter ?? 34,
+            rowMinDiameter: modelObj.min_cell_diameter ?? 7,
+            rowMaxDiameter: modelObj.max_cell_diameter ?? 17,
             rowSublabel: modelObj.sublabel ?? ''
           }
         })
@@ -870,6 +872,8 @@ export default function CellAnnotationTool() {
             weights_id: row.selectedModelId,
             threshold: row.rowThreshold,
             cell_diameter: row.rowDiameter,
+            min_cell_diameter: row.rowMinDiameter,
+            max_cell_diameter: row.rowMaxDiameter,
             sublabel: row.rowSublabel,
             selected_classes: row.selectedClasses,
             annotations_detected: annotationsDetected,
@@ -1062,6 +1066,8 @@ export default function CellAnnotationTool() {
         detection_setting_id: tempRowId,
         threshold: row.rowThreshold,
         cell_diameter: row.rowDiameter,
+        min_cell_diameter: row.rowMinDiameter,
+        max_cell_diameter: row.rowMaxDiameter,
         sublabel: row.rowSublabel,
         selected_classes: row.selectedClasses
       }
@@ -1151,6 +1157,8 @@ export default function CellAnnotationTool() {
           detection_setting_id: row.id,
           threshold: row.rowThreshold,
           cell_diameter: row.rowDiameter,
+          min_cell_diameter: row.rowMinDiameter,
+          max_cell_diameter: row.rowMaxDiameter,
           sublabel: row.rowSublabel,
           selected_classes: row.selectedClasses,
         }
@@ -1750,6 +1758,8 @@ export default function CellAnnotationTool() {
       selectedClasses: defaultClasses,
       rowThreshold: 0.5,
       rowDiameter: 34,
+      rowMinDiameter: 7,
+      rowMaxDiameter: 17,
       rowSublabel: ''
     }
   }
@@ -2510,6 +2520,7 @@ export default function CellAnnotationTool() {
               onSelect={handleSelectRow}
               renderRowTemplate={(row, index, handleFieldChange) => {
                 const currentModelData = models.find(m => m.id === row.selectedModelId)
+                const isStardistRow = currentModelData?.name?.toLowerCase().includes('stardist') ?? false
                 const availableLabels = currentModelData?.label_set?.labels || []
                 const isVisible = activeRowIds.includes(row.id)
 
@@ -2698,17 +2709,44 @@ export default function CellAnnotationTool() {
                               handleFieldChange('rowThreshold', isNaN(val) ? '' : val)
                             }}
                           />
-                          <TextField
-                            label="Cell Diameter"
-                            type="number"
-                            size="small"
-                            inputProps={{ step: '1' }}
-                            value={row.rowDiameter}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value, 10)
-                              handleFieldChange('rowDiameter', isNaN(val) ? '' : val)
-                            }}
-                          />
+                          {isStardistRow ? (
+                            <>
+                              <TextField
+                                label="Minimum Cell Diameter"
+                                type="number"
+                                size="small"
+                                inputProps={{ step: '1' }}
+                                value={row.rowMinDiameter}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value, 10)
+                                  handleFieldChange('rowMinDiameter', isNaN(val) ? '' : val)
+                                }}
+                              />
+                              <TextField
+                                label="Maximum Cell Diameter"
+                                type="number"
+                                size="small"
+                                inputProps={{ step: '1' }}
+                                value={row.rowMaxDiameter}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value, 10)
+                                  handleFieldChange('rowMaxDiameter', isNaN(val) ? '' : val)
+                                }}
+                              />
+                            </>
+                          ) : (
+                            <TextField
+                              label="Cell Diameter"
+                              type="number"
+                              size="small"
+                              inputProps={{ step: '1' }}
+                              value={row.rowDiameter}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value, 10)
+                                handleFieldChange('rowDiameter', isNaN(val) ? '' : val)
+                              }}
+                            />
+                          )}
                         </Box>
                       </Popover>
                     )}
@@ -2790,6 +2828,7 @@ export default function CellAnnotationTool() {
                       {detectionSettings.map((row) => {
                         const rowModel = models.find(m => m.id === row.selectedModelId)
                         const isChecked = batchSelectedRowIds.includes(row.id)
+                        const isStardist = rowModel?.name?.toLowerCase().includes('stardist') ?? false
                         return (
                           <Box
                             key={row.id}
@@ -2829,7 +2868,7 @@ export default function CellAnnotationTool() {
                                 {row.rowSublabel ? ` · ${row.rowSublabel}` : ''}
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                Threshold {row.rowThreshold} · Ø {row.rowDiameter}px
+                                Threshold {row.rowThreshold} · Ø {isStardist ? `${row.rowMinDiameter}-${row.rowMaxDiameter}` : row.rowDiameter}px
                                 {row.selectedClasses?.length > 0 ? ` · ${row.selectedClasses.join(', ')}` : ''}
                               </Typography>
                             </Box>
