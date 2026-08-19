@@ -26,8 +26,8 @@ import glob
 import tensorflow as tf
 from ultralytics import YOLO
 from scripts.normalization import normalize_image
-from scripts.sahi_detect import detect_to_yolo
 from scripts.stardist_detect import stardist_detect_to_yolo
+from scripts import sahi_worker
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Gets directory where app.py is
 os.chdir(BASE_DIR)
 from PIL import Image
@@ -66,35 +66,26 @@ def ensure_user_session():
         g.user = db.session.get(User, user_id)
 
 
-def preprocess_image(image_path, detection_type, cell_diameter):
-    # Open source image
-    img = Image.open(image_path)
-    orig_w, orig_h = img.size
-
-    # Calculate Scaling
+def preprocess_image(orig_w, orig_h, detection_type, cell_diameter):
+    """
+    Computes the detection-space dimensions and cell-diameter scaling factor
+    purely from already-known image dimensions (DB values) — no file IO here.
+    The actual resize happens inside the SAHI worker process, right before
+    detection, so the parent Flask process never has to open the file.
+    """
     target_diameter = 20.0 if detection_type == 'CD3' else 34.0
     scaling_factor = target_diameter / float(cell_diameter)
-    
+
     if scaling_factor != 1.0:
         det_w = max(1, int(round(orig_w * scaling_factor)))
         det_h = max(1, int(round(orig_h * scaling_factor)))
-        
-        # Resize image in memory
-        scaled_img = img.resize((det_w, det_h), Image.Resampling.LANCZOS)
-        
-        return {
-            "image_source": scaled_img,  # In-memory PIL Image object
-            "is_temp_file": False,
-            "det_w": det_w,
-            "det_h": det_h,
-            "scaling_factor": scaling_factor
-        }
-    
+    else:
+        det_w = orig_w
+        det_h = orig_h
+
     return {
-        "image_source": image_path,  # Fallback directly to the file path to save memory/IO
-        "is_temp_file": False,
-        "det_w": orig_w,
-        "det_h": orig_h,
+        "det_w": det_w,
+        "det_h": det_h,
         "scaling_factor": scaling_factor
     }
 
@@ -221,19 +212,23 @@ def execute_detection(image_record, model_record, threshold, cell_diameter, subl
     else:
         # Default SAHI / Standard Object Detection Path
         base_image_path = os.path.join('data', image_record.normalized_path)
+        abs_image_path = os.path.abspath(base_image_path)
         prep_data = preprocess_image(
-            image_path=base_image_path,
+            orig_w=image_record.width,
+            orig_h=image_record.height,
             detection_type=detection_type,
             cell_diameter=cell_diameter,
         )
 
-        # FIX: Restored exact parameter names matching your old endpoint
-        # Your old route passed image_path=prep_data['image_source']
-        yolo_output = detect_to_yolo(
-            image_path=prep_data['image_source'], 
+        # Runs in the persistent SAHI worker process (see scripts/sahi_worker.py) so
+        # a stuck or crashed detection can be killed/retried without taking down the
+        # Flask server, without paying a model-reload cost on every call.
+        yolo_output = sahi_worker.run_job(
+            image_path=abs_image_path,
+            det_w=prep_data['det_w'],
+            det_h=prep_data['det_h'],
+            scaling_factor=prep_data['scaling_factor'],
             model_path=model_path,
-            image_width=prep_data['det_w'],
-            image_height=prep_data['det_h'],
             threshold=threshold,
         )
 
@@ -2299,10 +2294,11 @@ scheduler.start()
 
 # Shut down the scheduler when exiting the app
 atexit.register(lambda: scheduler.shutdown())
+atexit.register(sahi_worker.shutdown)
 
 
 if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)

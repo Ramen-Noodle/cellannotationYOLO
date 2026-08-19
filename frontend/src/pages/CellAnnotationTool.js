@@ -41,9 +41,10 @@ import RowMenu from '../components/RowMenu'
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5001'
+  const API_BASE_URL = 'http://10.80.24.12:5002'
 
   const [isLoading, setIsLoading] = useState(false)
+  const [loadingMessage, setLoadingMessage] = useState('Processing...')
 
   // User state
   const [user, setUser] = useState(null)
@@ -1056,85 +1057,97 @@ export default function CellAnnotationTool() {
       return
     }
 
+    if (detectionSettings.length == 0) {
+      alert('Please set detection settings before running detection.')
+      return
+    }
+
     setIsLoading(true)
+    setLoadingMessage('Detecting cells — large images can take several minutes...')
 
-    for (const row of detectionSettings) {
-      const tempRowId = row.id  
-      const payload = {
-        image_id: imageID,
-        model_id: row.selectedModelId,
-        detection_setting_id: tempRowId,
-        threshold: row.rowThreshold,
-        cell_diameter: row.rowDiameter,
-        min_cell_diameter: row.rowMinDiameter,
-        max_cell_diameter: row.rowMaxDiameter,
-        sublabel: row.rowSublabel,
-        selected_classes: row.selectedClasses
-      }
+    try {
+      for (const row of detectionSettings) {
+        const tempRowId = row.id
+        const payload = {
+          image_id: imageID,
+          model_id: row.selectedModelId,
+          detection_setting_id: tempRowId,
+          threshold: row.rowThreshold,
+          cell_diameter: row.rowDiameter,
+          min_cell_diameter: row.rowMinDiameter,
+          max_cell_diameter: row.rowMaxDiameter,
+          sublabel: row.rowSublabel,
+          selected_classes: row.selectedClasses
+        }
 
-      try {
-        const res = await fetch(`${API_BASE_URL}/detect`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(payload),
-          credentials: 'include',
-        })
+        try {
+          const res = await fetch(`${API_BASE_URL}/detect`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload),
+            credentials: 'include',
+          })
 
-        if (!res.ok) throw new Error(`${models[currentModel].name} detection failed`)
-        const data = await res.json()
-        
-        const newAnnotations = data.annotations
-        console.log(data)
-        const targetId = data.detection_setting_id
-        const newBoxes = newAnnotations.map(box => ({
-          ...box,
-          annotation_id: targetId,
-          is_detected: true,
-          name: data.labels.labels[box.class].name,
-          color: data.labels.labels[box.class].color,
-          renderStyle: 'dashed'
-        }))
-        setAnnotations((prevAnnotations) => {
-          const exists = prevAnnotations.some(
-            (modelObj) => modelObj.id === targetId || modelObj.annotation_id === targetId
-          )
-
-          if (exists) {
-            return prevAnnotations.map((modelObj) => {
-              const id = modelObj.id || modelObj.annotation_id
-              return id === targetId
-                ? { ...modelObj, annotations_detected: newAnnotations }
-                : modelObj
-            })
-          } else {
-            // First detection for this model — append a new entry
-            return [
-              ...prevAnnotations,
-              {
-                annotation_id: targetId,
-                annotations_detected: newAnnotations,
-                labels: data.labels,
-              }
-            ]
+          if (!res.ok) {
+            const errorBody = await res.json().catch(() => null)
+            throw new Error(errorBody?.error || `${models[currentModel].name} detection failed`)
           }
-        })
-        setBoxes((prevBoxes) => {
-          const filteredBoxes = prevBoxes.filter(box => box.annotation_id != targetId)
-          return [...filteredBoxes, ...newBoxes]
-        })
-        setDetectionSettings((prevRows) =>
-          prevRows.map((r) => r.id === tempRowId ? { ...r, id: targetId } : r)
-        )
-        setActiveRowIds((prevActive) => 
-          prevActive.map((id) => id === tempRowId ? targetId : id)
-        )
-      } catch (e) {
-        alert('Detection failed: ' + (e.response?.data?.error || e.message))
-      } finally {
-        setIsLoading(false)
+          const data = await res.json()
+
+          const newAnnotations = data.annotations
+          console.log(data)
+          const targetId = data.detection_setting_id
+          const newBoxes = newAnnotations.map(box => ({
+            ...box,
+            annotation_id: targetId,
+            is_detected: true,
+            name: data.labels.labels[box.class].name,
+            color: data.labels.labels[box.class].color,
+            renderStyle: 'dashed'
+          }))
+          setAnnotations((prevAnnotations) => {
+            const exists = prevAnnotations.some(
+              (modelObj) => modelObj.id === targetId || modelObj.annotation_id === targetId
+            )
+
+            if (exists) {
+              return prevAnnotations.map((modelObj) => {
+                const id = modelObj.id || modelObj.annotation_id
+                return id === targetId
+                  ? { ...modelObj, annotations_detected: newAnnotations }
+                  : modelObj
+              })
+            } else {
+              // First detection for this model — append a new entry
+              return [
+                ...prevAnnotations,
+                {
+                  annotation_id: targetId,
+                  annotations_detected: newAnnotations,
+                  labels: data.labels,
+                }
+              ]
+            }
+          })
+          setBoxes((prevBoxes) => {
+            const filteredBoxes = prevBoxes.filter(box => box.annotation_id != targetId)
+            return [...filteredBoxes, ...newBoxes]
+          })
+          setDetectionSettings((prevRows) =>
+            prevRows.map((r) => r.id === tempRowId ? { ...r, id: targetId } : r)
+          )
+          setActiveRowIds((prevActive) =>
+            prevActive.map((id) => id === tempRowId ? targetId : id)
+          )
+        } catch (e) {
+          alert('Detection failed: ' + e.message)
+        }
       }
+    } finally {
+      setIsLoading(false)
+      setLoadingMessage('Processing...')
     }
   }
 
@@ -1146,6 +1159,7 @@ export default function CellAnnotationTool() {
 
     setBatchDetectModalOpen(false)
     setIsLoading(true)
+    setLoadingMessage('Running batch detection — large images can take several minutes each...')
 
     try {
       const batchResults = []
@@ -1170,7 +1184,10 @@ export default function CellAnnotationTool() {
           credentials: 'include',
         })
 
-        if (!res.ok) throw new Error(`Batch detection failed for model ${row.selectedModelId}`)
+        if (!res.ok) {
+          const errorBody = await res.json().catch(() => null)
+          throw new Error(errorBody?.error || `Batch detection failed for model ${row.selectedModelId}`)
+        }
         const data = await res.json()
         batchResults.push(data)
 
@@ -1192,6 +1209,7 @@ export default function CellAnnotationTool() {
       alert(`Batch detection error: ${err.message}`)
     } finally {
       setIsLoading(false)
+      setLoadingMessage('Processing...')
     }
   }
 
@@ -1888,7 +1906,7 @@ export default function CellAnnotationTool() {
           zIndex: 9999,
         }}>
           <CircularProgress size={52} thickness={4} sx={{ color: 'white' }} />
-          <p style={{ color: 'white', marginTop: 12, fontSize: 14 }}>Processing...</p>
+          <p style={{ color: 'white', marginTop: 12, fontSize: 14 }}>{loadingMessage}</p>
         </div>
       )}
 
