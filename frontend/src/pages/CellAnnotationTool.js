@@ -519,26 +519,20 @@ export default function CellAnnotationTool() {
     setIsCropping(false)
   }
 
-  // Handler for clicking a specific image
-  async function handleLoadImage(image)  {
-    setImageURL(image.url)
-    setImageID(image.id)
-    setImageName(image.name)
-    setImageSize({width: image.dimensions[0], height: image.dimensions[1]})
-
+  // Helper that renders annotations onto the canvas
+  async function renderAnnotations(imgId) {
     try {
       const res = await fetch(`${API_BASE_URL}/load-annotations`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ image_id: image.id }),
-        credentials: 'include', // Updates the browser cookie to the existing user's UUID
+        body: JSON.stringify({ image_id: imgId }),
+        credentials: 'include',
       })
 
       if (!res.ok) throw new Error('Load failed')
       const data = await res.json()
-      console.log(data)
       setAnnotations(data.annotations)
 
       const annoList = data.annotations || []
@@ -574,7 +568,7 @@ export default function CellAnnotationTool() {
           const annotationId = modelObj.detection_setting_id
           const labels = modelObj.labels?.labels || []
           return {
-            id: annotationId,  // detection setting id as row id
+            id: annotationId,
             selectedModelId: modelObj.weights_id,
             selectedClasses: labels.map(l => l.name),
             rowThreshold: modelObj.threshold ?? 0.5,
@@ -591,11 +585,19 @@ export default function CellAnnotationTool() {
         setDetectionSettings([])
         setActiveRowIds([])
       }
-
     } catch (e) {
       console.error('Annotation load failed:', e.message)
     }
-    // TODO: Handle annotations
+  }
+
+  // Handler for clicking a specific image
+  async function handleLoadImage(image) {
+    setImageURL(image.url)
+    setImageID(image.id)
+    setImageName(image.name)
+    setImageSize({width: image.dimensions[0], height: image.dimensions[1]})
+
+    await renderAnnotations(image.id)
 
     if (openImageMenuOpen) {
       setOpenImageMenuOpen(false)
@@ -1204,6 +1206,9 @@ export default function CellAnnotationTool() {
       const failed = batchResults.reduce((sum, r) => sum + (r.failed || 0), 0)
       alert(`Batch complete: ${succeeded}/${total} images succeeded${failed > 0 ? `, ${failed} failed` : ''}.`)
 
+      if (imageID) {
+        await renderAnnotations(imageID)
+      }
     } catch (err) {
       console.error(err)
       alert(`Batch detection error: ${err.message}`)
