@@ -1791,10 +1791,12 @@ export default function CellAnnotationTool() {
       // Special Case: If the model changes, reset the selected classes 
       // because the old classes won't exist in the new model.
       if (fieldName === 'selectedModelId') {
+        const targetModel = models.find(model => model.id === value)
+        const targetModelClasses = targetModel?.label_set?.labels?.map(label => label.name) || []
         updatedRows[index] = {
           ...updatedRows[index],
           [fieldName]: value,
-          selectedClasses: [] 
+          selectedClasses: targetModelClasses
         }
       } else {
         updatedRows[index] = {
