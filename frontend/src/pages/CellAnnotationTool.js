@@ -14,6 +14,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import FolderOpenIcon from '@mui/icons-material/FolderOpen'
 import ImageSearch from '@mui/icons-material/ImageSearch'
 import ScreenSearchDesktop from '@mui/icons-material/ScreenSearchDesktop'
+import ModelTrainingIcon from '@mui/icons-material/ModelTraining'
 import CollectionsIcon from '@mui/icons-material/Collections'
 import SaveAsIcon from '@mui/icons-material/SaveAs'
 import FileDownloadIcon from '@mui/icons-material/FileDownload'
@@ -41,7 +42,7 @@ import RowMenu from '../components/RowMenu'
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5001'
+  const API_BASE_URL = 'http://10.80.24.12:5002'
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('Processing...')
@@ -110,16 +111,8 @@ export default function CellAnnotationTool() {
 
   const fileKey = (file) => `${file.name}-${file.size}-${file.lastModified}`
   // State for fine tuning
-  const [fineTuneModels] = useState(['SGN', 'MADM'])
-  const [currentFineTuneModel, setCurrentFineTuneModel] = useState(0)
-  const [preTrainImages, setPreTrainImages] = useState(0)
-  const [maxImages, setMaxImages] = useState(7)
   const [epochs, setEpochs] = useState(10)
-  const [kFoldResults, setKFoldResults] = useState()
-  const [fineTuneModelURL, setFineTuneModelURL] = useState()
   const [metricsData, setMetricsData] = useState()
-  const [trainingData, setTrainingData] = useState([])
-  const [savedAnnotationCount, setSavedAnnotationCount] = useState(0)
 
   useEffect(() => {
     initializeSession()
@@ -132,18 +125,6 @@ export default function CellAnnotationTool() {
     loadModels()
     loadImageSets()
   }, [isAuthReady])
-
-  useEffect(() => {
-    if (!isAuthReady) return
-
-    fetch(`${API_BASE_URL}/get-all-training-data`, { credentials: 'include' })
-      .then(res => res.json())
-      .then(data => {
-        // data is the array of objects from Python
-        setTrainingData(data);
-      })
-      .catch(err => console.error("Error loading gallery:", err))
-  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -207,6 +188,7 @@ export default function CellAnnotationTool() {
     fetch(`${API_BASE_URL}/user-weights`, { credentials: 'include' })
     .then(res => res.json())
     .then(data => {
+      console.log(data)
       setModels(data)
       setCurrentModel(0)
       const allLabels = data.map(item => item.label_set.labels)
@@ -1283,183 +1265,48 @@ export default function CellAnnotationTool() {
     handleCloseCustomUploadModal()
   }
 
-  async function handleFineTuneDetect() { //TODO: Phase Out
-    setIsLoading(true)
-    try {
-      const res = await fetch(`${API_BASE_URL}/detect-finetuned`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include', 
-        body: JSON.stringify({
-          model_type: fineTuneModels[currentFineTuneModel],
-          threshold: threshold
-        })
-      })
-
-      if (!res.ok) throw new Error(`${fineTuneModels[currentFineTuneModel]} detection failed`)
-
-      const data = await res.json()
-
-      const yoloTxt = data.annotations
-      const imgWidth = data.image_width
-      const imgHeight = data.image_height
-
-      setAnnotations_old([])
-      let importedCount = 0
-
-      yoloTxt.split('\n').forEach(line => {
-        if (!line.trim()) return
-        const parts = line.trim().split(' ')
-        const cls = parseInt(parts[0])
-        const cx = parseFloat(parts[1]) * imgWidth
-        const cy = parseFloat(parts[2]) * imgHeight
-        const w = parseFloat(parts[3]) * imgWidth
-        const h = parseFloat(parts[4]) * imgHeight
-        const x1 = cx - w / 2
-        const y1 = cy - h / 2
-        const confidence = parts[5] ? parseFloat(parts[5]) : null
-
-        handleAddBox({x: x1, y: y1, w: w, h: h, class: cls, confidence})
-
-        importedCount++
-      })
-
-      alert(`Detected ${importedCount} ${models_old[currentModel_old]} objects!`)
-    } catch (e) {
-      alert('Fine tuned detection failed: ' + (e.response?.data?.error || e.message))
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
   // *----------* Training Operations *----------* \\
 
-  async function saveTrainingData() { //TODO: Rework
-    // Normalize annotations
-    console.log(imageSize)
-    const normalizedAnnotations = annotations_old.map(ann => {
-      const x_center = parseFloat(((ann.x + ann.w / 2) / imageSize.width).toFixed(6));
-      const y_center = parseFloat(((ann.y + ann.h / 2) / imageSize.height).toFixed(6));
-      const width_norm = parseFloat((ann.w / imageSize.width).toFixed(6));
-      const height_norm = parseFloat((ann.h / imageSize.height).toFixed(6));
-      let class_name = classes_old[ann.class].name
-      if (ann.class < 2) {
-        class_name = class_name.toLowerCase()
-      }
-      console.log(class_name)
-      return {
-        x_center,
-        y_center,
-        width_norm,
-        height_norm,
-        class_name
-      }
-    })
+  async function handleTrainModel() {
+    if (!trainModelWeightsId) return alert('Please select a model.')
+    if (!trainModelImageSetId) return alert('Please select an image set.')
+
+    setTrainModelModalOpen(false)
+    setIsLoading(true)
+    setLoadingMessage('Training model — this can take a while depending on epochs and image count...')
 
     try {
-      const res = await fetch(`${API_BASE_URL}/save-training-data`, {
+      const res = await fetch(`${API_BASE_URL}/train-model`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
-          original_filename: imageName,
-          annotations: normalizedAnnotations,
-          brightness: brightness,
-          contrast: contrast,
+          image_set_id: trainModelImageSetId,
+          weights_id: trainModelWeightsId,
+          epochs: epochs,
+          label: trainModelLabel.trim() || 'finetuned',
         }),
       })
+
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}))
-        throw new Error(errorData.error || `HTTP error! status: ${res.status}`)
+        const errorBody = await res.json().catch(() => null)
+        throw new Error(errorBody?.error || 'Training failed')
       }
       const data = await res.json()
-      console.log('Success from Server:', data)
-      setSavedAnnotationCount(savedAnnotationCount + annotations_old.length)
-      const newEntry = {
-        imageName: data.image_file,
-        annotationName: data.annotation_file,
-        thumbnailUrl: `/api/preview/${data.thumbnail_file}`,
-        count: data.annotation_count
-      }
-      setTrainingData((prevData) => [...prevData, newEntry])
-      alert('Training data saved!')
-    } catch (error) {
-      console.error('Save failed:', error)
-      alert(`Save failed: ${error.message}`)
-    }
-  }
 
-  async function fineTune() { //TODO: Update
-    if (!epochs || epochs < 1) {
-      alert('Please enter valid number of epochs!')
-      return
-    }
-
-    if (currentFineTuneModel === 0 && (preTrainImages > 7 || preTrainImages < 0)) {
-      alert('SGN pre-train images must be between 0 and 7')
-      return
-    }
-    if (currentFineTuneModel === 1 && (preTrainImages > 278 || preTrainImages < 0)) {
-      alert('MADM pre-train images must be between 0 and 278')
-      return
-    }
-
-    const formData = new FormData()
-    formData.append('model_type', fineTuneModels[currentFineTuneModel])
-    formData.append('epochs', epochs)
-    formData.append('num_images', preTrainImages)
-
-    setIsLoading(true)
-    try {
-      const res = await fetch(`${API_BASE_URL}/train-saved`, {
-        method: 'POST',
-        credentials: 'include',
-        body: formData
+      setModels(prev => {
+        const idx = prev.findIndex(m => m.id === data.weights.id)
+        if (idx === -1) return [...prev, data.weights]
+        return prev.map(m => m.id === data.weights.id ? data.weights : m)
       })
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}))
-        throw new Error(errorData.error || `HTTP error! status: ${res.status}`)
-      }
-      const resJson = await res.json()
-      setKFoldResults(resJson.kfold_results)
-      setFineTuneModelURL(resJson.model_url)
-      alert('Model fine tuned with saved data.')
-      handleOpenFineTuneDownloadModal()
-      handleCloseFineTuneModal()
+
+      alert(`Model trained: ${data.weights.name} (${data.total_images} images).`)
     } catch (err) {
       console.error(err)
-      alert('Training failed')
+      alert(`Training error: ${err.message}`)
     } finally {
       setIsLoading(false)
-    }
-  }
-
-  async function clearTrainingData() { //TODO: Rework
-    const confirm = window.confirm('Are you sure you want to delete all training data? This cannot be undone!')
-    if (!confirm) return
-
-    try {
-      const res = await fetch(`${API_BASE_URL}/clear-training-data`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-      })
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}))
-        throw new Error(errorData.error || `HTTP error! status: ${res.status}`)
-      }
-      alert('All training data has been cleared!')
-      setSavedAnnotationCount(0)
-      setTrainingData([])
-    } catch (error) {
-      console.error(error)
-      alert(`Clear failed: ${error.message}`)
+      setLoadingMessage('Processing...')
     }
   }
 
@@ -1477,155 +1324,6 @@ export default function CellAnnotationTool() {
     setSelectedFiles(prev => prev.filter((_, i) => i !== index))
   }
 
-  const deleteTrainingDataEntry = async (uniqueId) => { //TODO: Rework
-    if (!window.confirm("Are you sure you want to delete this training sample?")) return
-
-    try {
-      const res = await fetch(`${API_BASE_URL}/delete-training-data/${uniqueId}`, {
-        method: 'DELETE',
-        credentials: 'include',
-      })
-      if (res.ok) {
-        const data = await res.json()
-        setSavedAnnotationCount(savedAnnotationCount - data.deleted_annotations)
-        setTrainingData(prev => prev.filter(item => !item.annotationName.includes(uniqueId)))
-      } else {
-        alert("Failed to delete from server.")
-      }
-    } catch (err) {
-      console.error("Delete error:", err)
-    }
-  }
-
-  const loadSavedEntry = async (item) => { //TODO: Depricate
-      const confirmLoad = window.confirm("Loading this will clear your current work. Continue?")
-      if (!confirmLoad) return
-
-      try {
-          // 1. IMPORTANT: Use the original image, not the thumbnail!
-          const imageLink = `${item.thumbnailUrl}`
-          
-          // 2. Fetch annotations
-          const response = await fetch(`${API_BASE_URL}/api/annotations/${item.annotationName}`, { credentials: 'include' })
-          if (!response.ok) throw new Error('Failed to fetch annotations')
-          const yoloText = await response.text()
-
-          // 3. GET IMAGE DIMENSIONS (Wait for it to load)
-          const dimensions = await new Promise((resolve, reject) => {
-              const img = new Image()
-              img.onload = () => resolve({ width: img.width, height: img.height })
-              img.onerror = () => reject(new Error("Could not load image to determine size"))
-              img.src = imageLink;
-          });
-
-        const { width, height } = dimensions
-
-          const lines = yoloText.trim().split('\n')
-          const parsedAnnotations = lines.filter(line => line.trim()).map(line => {
-              const [classId, x_norm, y_norm, w_norm, h_norm] = line.split(' ').map(Number)
-              
-              // YOLO (center_x, center_y, width, height) -> Canvas (top_left_x, top_left_y, width, height)
-              const w = w_norm * width
-              const h = h_norm * height
-              const x = (x_norm * width) - (w / 2)
-              const y = (y_norm * height) - (h / 2)
-              
-              let annotationClass = classId
-              if (currentModel_old === 0) annotationClass = 2 //TODO: Find better way to check model of saved entry, current model may not be the same as the entry
-              return {
-                  id: Math.random().toString(36).substr(2, 9),
-                  class: annotationClass,
-                  x: x,
-                  y: y,
-                  w: w,
-                  h: h
-              };
-          });
-
-          // 4. Update states
-          setImageName(item.imageName)
-          setImageURL(`${API_BASE_URL}${imageLink}`)
-          setAnnotations_old(parsedAnnotations)
-          
-      } catch (error) {
-          console.error("Load failed:", error)
-          alert('Load failed: ' + error.message)
-      }
-  };
-
-  const handleModelDownload = async () => { //TODO: Update
-    try {
-      // 1. Prepare the URL
-      // If fineTuneModelURL is "/snapshots/my_model.pt", this prepends the backend host
-      const downloadUrl = `${API_BASE_URL}${fineTuneModelURL}`
-      const res = await fetch(downloadUrl, {
-        method: 'GET',
-        credentials: 'include',
-      })
-
-      if (!res.ok) {
-        throw new Error(`Download failed: ${res.statusText}`)
-      }
-
-      // 2. Convert response to Blob
-      const blob = await res.blob()
-      const url = window.URL.createObjectURL(blob)
-
-      // 3. Create invisible link and click
-      const a = document.createElement('a')
-      a.href = url
-      
-      // Extract filename from the URL path (e.g. "my_model.pt")
-      const filename = fineTuneModelURL.split('/').pop() || 'model.pt'
-      a.download = filename
-      
-      document.body.appendChild(a)
-      a.click()
-      
-      // 4. Cleanup
-      a.remove()
-      window.URL.revokeObjectURL(url)
-
-    } catch (error) {
-      console.error('Download error:', error)
-      alert('Failed to download model. Please try again.')
-    }
-  }
-
-  const handleTrainingDataDownload = async () => { //TODO: Update
-    try {
-      const res = await fetch(`${API_BASE_URL}/download-training-data`, {
-        method: 'GET',
-        credentials: 'include', 
-      })
-
-      if (!res.ok) {
-        throw new Error(`Download failed: ${res.statusText}`)
-      }
-
-      // 2. Convert response to Blob
-      const blob = await res.blob()
-      const url = window.URL.createObjectURL(blob)
-
-      // 3. Create invisible link and click
-      const a = document.createElement('a')
-      a.href = url
-      
-      const filename = 'training_data.zip'
-      a.download = filename
-      
-      document.body.appendChild(a)
-      a.click()
-      
-      // 4. Cleanup
-      a.remove()
-      window.URL.revokeObjectURL(url)
-
-    } catch (error) {
-      console.error('Download error:', error)
-      alert('Failed to download training data. Please try again.')
-    }
-  }
 
   async function getMetrics() { //TODO: Rework
     try {
@@ -1656,22 +1354,19 @@ export default function CellAnnotationTool() {
     setCustomUploadModalOpen(false)
   }
 
-  // Fine tuning modal state
-  const [fineTuneModalOpen, setFineTuneModalOpen] = useState(false)
-  const handleOpenFineTuneModal = () => {
-    setFineTuneModalOpen(true)
+  // Train model modal state
+  const [trainModelModalOpen, setTrainModelModalOpen] = useState(false)
+  const [trainModelWeightsId, setTrainModelWeightsId] = useState('')
+  const [trainModelImageSetId, setTrainModelImageSetId] = useState('')
+  const [trainModelLabel, setTrainModelLabel] = useState('finetuned')
+  const handleOpenTrainModelModal = () => {
+    setTrainModelWeightsId('')
+    setTrainModelImageSetId('')
+    setTrainModelLabel('finetuned')
+    setTrainModelModalOpen(true)
   }
-  const handleCloseFineTuneModal = () => {
-    setFineTuneModalOpen(false)
-  }
-
-  // Fine tune download modal state
-  const [fineTuneDownloadModalOpen, setFineTuneDownloadModalOpen] = useState(false)
-  const handleOpenFineTuneDownloadModal = () => {
-    setFineTuneDownloadModalOpen(true)
-  }
-  const handleCloseFineTuneDownloadModal = () => {
-    setFineTuneDownloadModalOpen(false)
+  const handleCloseTrainModelModal = () => {
+    setTrainModelModalOpen(false)
   }
 
   // Training metrics modal
@@ -2568,12 +2263,12 @@ export default function CellAnnotationTool() {
                         e.stopPropagation() // Vital: stops the row from getting highlighted/selected on eye click
                         handleToggleRowVisibility(row.id)
                       }}
-                      sx={{ mr: 0.5, color: isVisible ? 'primary.main' : 'text.disabled' }}
+                      sx={{ mr: 0.5, flexShrink: 0, color: isVisible ? 'primary.main' : 'text.disabled' }}
                     >
                       {isVisible ? <VisibilityIcon fontSize="small" /> : <VisibilityOffIcon fontSize="small" />}
                     </IconButton>
                     
-                    <Box display="flex" flexDirection="column" sx={{ flexGrow: 1 }}>
+                    <Box display="flex" flexDirection="column" sx={{ flexGrow: 1, minWidth: 0 }}>
                       {/* Model name — double-click to open dropdown */}
                       {modelDropdownIndex === index ? (
                         <FormControl size="small" sx={{ minWidth: 100 }} onClick={e => e.stopPropagation()}>
@@ -2599,6 +2294,7 @@ export default function CellAnnotationTool() {
                         <Typography
                           variant="body2"
                           fontWeight={500}
+                          noWrap
                           onDoubleClick={(e) => {
                             e.stopPropagation()
                             setModelDropdownIndex(index)
@@ -2635,6 +2331,7 @@ export default function CellAnnotationTool() {
                         <Typography
                           variant="body2"
                           color="text.secondary"
+                          noWrap
                           onDoubleClick={(e) => {
                             e.stopPropagation()
                             setEditingSublabelIndex(index)
@@ -2646,7 +2343,7 @@ export default function CellAnnotationTool() {
                         </Typography>
                       )}
                     </Box>
-                    
+
                     {/* Settings button */}
                     <IconButton
                       size="small"
@@ -2655,6 +2352,7 @@ export default function CellAnnotationTool() {
                         setSettingsRowIndex(index)
                         setSettingsAnchor(e.currentTarget)
                       }}
+                      sx={{ flexShrink: 0 }}
                     >
                       <SettingsIcon fontSize="small" />
                     </IconButton>
@@ -2808,6 +2506,15 @@ export default function CellAnnotationTool() {
                   sx={{ p: 1.5 }}
                 >
                   <ScreenSearchDesktop />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="Train Model" arrow>
+                <IconButton
+                  color="primary"
+                  onClick={handleOpenTrainModelModal}
+                  sx={{ p: 1.5 }}
+                >
+                  <ModelTrainingIcon />
                 </IconButton>
               </Tooltip>
               <Modal
@@ -2994,6 +2701,187 @@ export default function CellAnnotationTool() {
                       onClick={handleBatchDetect}
                     >
                       Run Batch ({batchSelectedRowIds.length} row{batchSelectedRowIds.length !== 1 ? 's' : ''})
+                    </Button>
+                  </Box>
+                </Box>
+              </Modal>
+              <Modal
+                open={trainModelModalOpen}
+                onClose={handleCloseTrainModelModal}
+                sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              >
+                <Box
+                  sx={{
+                    width: '100%',
+                    maxWidth: 500,
+                    bgcolor: 'background.paper',
+                    borderRadius: 2,
+                    boxShadow: 24,
+                    p: 3,
+                    outline: 'none',
+                    maxHeight: '85vh',
+                    overflowY: 'auto',
+                  }}
+                >
+                  {/* Header */}
+                  <Box display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+                    <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
+                      Train Model
+                    </Typography>
+                    <IconButton onClick={handleCloseTrainModelModal} size="small">
+                      <CloseIcon />
+                    </IconButton>
+                  </Box>
+
+                  <Divider sx={{ mb: 2 }} />
+
+                  {/* Model Picker */}
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                    Model
+                  </Typography>
+                  {models.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                      No models available.
+                    </Typography>
+                  ) : (
+                    <Box sx={{ mb: 3 }}>
+                      {models.map((model) => {
+                        const isSelected = trainModelWeightsId === model.id
+                        return (
+                          <Box
+                            key={model.id}
+                            display="flex"
+                            alignItems="center"
+                            sx={{
+                              px: 1.5,
+                              py: 1,
+                              mb: 0.5,
+                              borderRadius: 1,
+                              border: '1px solid',
+                              borderColor: isSelected ? 'primary.main' : 'divider',
+                              bgcolor: isSelected ? 'primary.50' : 'transparent',
+                              cursor: 'pointer',
+                              transition: 'all 0.15s ease',
+                            }}
+                            onClick={() => setTrainModelWeightsId(model.id)}
+                          >
+                            <Box
+                              sx={{
+                                width: 16,
+                                height: 16,
+                                borderRadius: '50%',
+                                border: '2px solid',
+                                borderColor: isSelected ? 'primary.main' : 'text.disabled',
+                                bgcolor: isSelected ? 'primary.main' : 'transparent',
+                                mr: 1.5,
+                                flexShrink: 0,
+                                transition: 'all 0.15s ease',
+                              }}
+                            />
+                            <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                              {model.name}
+                            </Typography>
+                          </Box>
+                        )
+                      })}
+                    </Box>
+                  )}
+
+                  {/* Image Set Picker */}
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                    Image Set
+                  </Typography>
+                  {imageSets.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                      No image sets available. Create one from the image sets menu.
+                    </Typography>
+                  ) : (
+                    <Box sx={{ mb: 3 }}>
+                      {imageSets.map((set) => {
+                        const isSelected = trainModelImageSetId === set.id
+                        return (
+                          <Box
+                            key={set.id}
+                            display="flex"
+                            alignItems="center"
+                            sx={{
+                              px: 1.5,
+                              py: 1,
+                              mb: 0.5,
+                              borderRadius: 1,
+                              border: '1px solid',
+                              borderColor: isSelected ? 'primary.main' : 'divider',
+                              bgcolor: isSelected ? 'primary.50' : 'transparent',
+                              cursor: 'pointer',
+                              transition: 'all 0.15s ease',
+                            }}
+                            onClick={() => setTrainModelImageSetId(set.id)}
+                          >
+                            <Box
+                              sx={{
+                                width: 16,
+                                height: 16,
+                                borderRadius: '50%',
+                                border: '2px solid',
+                                borderColor: isSelected ? 'primary.main' : 'text.disabled',
+                                bgcolor: isSelected ? 'primary.main' : 'transparent',
+                                mr: 1.5,
+                                flexShrink: 0,
+                                transition: 'all 0.15s ease',
+                              }}
+                            />
+                            <Box sx={{ flexGrow: 1 }}>
+                              <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                                {set.name}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {set.image_count} image{set.image_count !== 1 ? 's' : ''}
+                              </Typography>
+                            </Box>
+                          </Box>
+                        )
+                      })}
+                    </Box>
+                  )}
+
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                    Label
+                  </Typography>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    value={trainModelLabel}
+                    onChange={(e) => setTrainModelLabel(e.target.value)}
+                    placeholder="finetuned"
+                    helperText={`Saved as "${(models.find(m => m.id === trainModelWeightsId)?.name) || '<model>'}_${trainModelLabel.trim() || 'finetuned'}". Overwrites a model with the same name.`}
+                    sx={{ mb: 2 }}
+                  />
+
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                    Epochs
+                  </Typography>
+                  <TextField
+                    size="small"
+                    type="number"
+                    fullWidth
+                    value={epochs}
+                    onChange={(e) => setEpochs(parseInt(e.target.value, 10) || '')}
+                    sx={{ mb: 2 }}
+                  />
+
+                  <Divider sx={{ mb: 2 }} />
+
+                  {/* Footer */}
+                  <Box display="flex" justifyContent="flex-end" gap={1.5}>
+                    <Button variant="outlined" onClick={handleCloseTrainModelModal}>
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="contained"
+                      disabled={!trainModelWeightsId || !trainModelImageSetId}
+                      onClick={handleTrainModel}
+                    >
+                      Train
                     </Button>
                   </Box>
                 </Box>

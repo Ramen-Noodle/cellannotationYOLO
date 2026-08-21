@@ -1632,119 +1632,173 @@ def batch_detect():
 
 import yaml
 
-@app.route('/prepare-training-set', methods=['POST'])
-def prepare_training_set():
+@app.route('/train-model', methods=['POST'])
+def train_model():
     if not g.user:
         return jsonify({"error": "No active session"}), 401
 
     data = request.get_json()
-    # Expecting: image_set_id, target_weights_id, and an explicit list of chosen annotation row IDs
-    if not data or 'image_set_id' not in data or 'target_weights_id' not in data or 'selected_annotation_ids' not in data:
-        return jsonify({"error": "Missing required parameters"}), 400
+    if not data or 'image_set_id' not in data or 'weights_id' not in data:
+        return jsonify({"error": "Missing image_set_id or weights_id in request body"}), 400
 
-    set_id = data['image_set_id']
-    target_weights_id = data['target_weights_id']
-    selected_ids = data['selected_annotation_ids'] # Array of annotation string UUIDs
+    image_set_id = data['image_set_id']
+    weights_id = data['weights_id']
+    epochs = int(data.get('epochs', 20))
+    label = data.get('label') or 'finetuned'
 
     try:
-        # 1. Fetch and secure the root records
-        image_set = ImageSet.query.filter_by(id=set_id, user_id=g.user.id).first()
-        weights_record = Weights.query.filter_by(id=target_weights_id).first()
+        image_set = ImageSet.query.filter_by(id=image_set_id, user_id=g.user.id).first()
+        weights_record = Weights.query.filter_by(id=weights_id, user_id=g.user.id).first()
 
         if not image_set or not weights_record:
-            return jsonify({"error": "ImageSet or Weights not found"}), 404
+            return jsonify({"error": "ImageSet or Weights not found or unauthorized"}), 404
 
-        base_set_path = os.path.join('data', g.user.id, 'imagesets', set_id)
-        images_dir = os.path.join(base_set_path, 'images')
-        labels_dir = os.path.join(base_set_path, 'labels')
+        image_ids = [img.id for img in image_set.images]
 
-        # Clear existing workspace inside the image set to avoid phantom files from prior runs
-        import shutil
-        for folder in [images_dir, labels_dir]:
-            if os.path.exists(folder):
-                shutil.rmtree(folder)
-            os.makedirs(folder, exist_ok=True)
+        # Every annotation for this image set that was produced under a
+        # DetectionSetting tied to the target model - drawn + detected boxes
+        # merged together per image.
+        annotations = (
+            Annotation.query
+            .join(DetectionSetting, Annotation.detection_setting_id == DetectionSetting.id)
+            .filter(
+                DetectionSetting.weights_id == weights_id,
+                Annotation.user_id == g.user.id,
+                Annotation.image_id.in_(image_ids)
+            )
+            .all()
+        )
 
-        # 2. Batch fetch ALL selected annotations that belong to this user
-        # This keeps database round-trips to an absolute minimum
-        allowed_annotations = Annotation.query.filter(
-            Annotation.id.in_(selected_ids),
-            Annotation.user_id == g.user.id
-        ).all()
-
-        # Group annotations by image_id for fast lookup during our loop
         annotations_by_image = {}
-        for ann in allowed_annotations:
-            # STRICT BACKEND GUARDRAIL:
-            # If the user somehow bypassed the frontend and sent an annotation 
-            # belonging to a different model, reject it immediately!
-            if ann.weights_id != target_weights_id:
-                return jsonify({"error": f"Security violation: Annotation {ann.id} does not match target model."}), 400
-                
-            if ann.image_id not in annotations_by_image:
-                annotations_by_image[ann.image_id] = []
-            annotations_by_image[ann.image_id].append(ann)
+        for ann in annotations:
+            annotations_by_image.setdefault(ann.image_id, []).append(ann)
 
-        # 3. Step through the album images and build the YOLO layout
-        for image_record in image_set.images:
-            
-            # --- Setup Image Link ---
-            src_image_path = os.path.join('data', image_record.normalized+path)
-            image_filename = f"{image_record.id}.png"
-            dst_image_path = os.path.join(images_dir, image_filename)
+        image_records = [img for img in image_set.images if img.id in annotations_by_image]
+        if not image_records:
+            return jsonify({"error": "No annotations found for this model in this image set"}), 400
 
-            if not os.path.exists(dst_image_path):
-                relative_src = os.path.relpath(src_image_path, start=images_dir)
-                os.symlink(relative_src, dst_image_path)
+        # 1. Build the YOLO dataset layout in a scratch directory for this run
+        run_id = str(uuid.uuid4())
+        run_dir = os.path.join('data', g.user.id, 'training_runs', run_id)
+        img_dir = os.path.join(run_dir, 'images')
+        lbl_dir = os.path.join(run_dir, 'labels')
+        os.makedirs(img_dir, exist_ok=True)
+        os.makedirs(lbl_dir, exist_ok=True)
 
-            # --- Fabricate Combined Annotation File ---
-            annotation_filename = f"{image_record.id}.txt"
-            dst_annotation_path = os.path.join(labels_dir, annotation_filename)
-            
+        for image_record in image_records:
+            src_image_path = os.path.join('data', image_record.normalized_path)
+            dst_image_path = os.path.join(img_dir, f"{image_record.id}.png")
+            relative_src = os.path.relpath(src_image_path, start=img_dir)
+            os.symlink(relative_src, dst_image_path)
+
+            img_w = image_record.width
+            img_h = image_record.height
+
             combined_yolo_lines = []
-            
-            # Pull only the annotations selected by the user for this specific image
-            image_annotations = annotations_by_image.get(image_record.id, [])
-
-            for ann in image_annotations:
-                # Merge manually drawn and AI detected boxes together
-                all_boxes = ann.annotations_drawn + ann.annotations_detected
-                for box in all_boxes:
+            for ann in annotations_by_image[image_record.id]:
+                for box in ann.annotations_drawn + ann.annotations_detected:
+                    # Stored boxes are in pixel space with (x, y) as the
+                    # top-left corner - convert to normalized YOLO
+                    # (class, center_x, center_y, width, height).
+                    x_center = (box['x'] + box['w'] / 2) / img_w
+                    y_center = (box['y'] + box['h'] / 2) / img_h
+                    w_norm = box['w'] / img_w
+                    h_norm = box['h'] / img_h
                     combined_yolo_lines.append("{0} {1:.6f} {2:.6f} {3:.6f} {4:.6f}".format(
-                        box['class'], box['x'], box['y'], box['w'], box['h']
+                        box['class'], x_center, y_center, w_norm, h_norm
                     ))
 
-            # YOLO demands a blank text file even if an image has zero positive detections
-            with open(dst_annotation_path, 'w') as f:
+            with open(os.path.join(lbl_dir, f"{image_record.id}.txt"), 'w') as f:
                 f.write("\n".join(combined_yolo_lines))
 
-        # 4. Generate the dataset.yaml file inside the imageset directory
         class_names = [label['name'] for label in weights_record.label_set.labels]
-        dataset_yaml_content = {
-            'path': os.path.abspath(base_set_path), # Absolute path makes tracking easier for local runs
-            'train': 'images',
-            'val': 'images', 
-            'nc': len(class_names),
-            'names': class_names
-        }
-        
-        yaml_path = os.path.join(base_set_path, 'dataset.yaml')
+        yaml_path = os.path.join(run_dir, 'dataset.yaml')
         with open(yaml_path, 'w') as f:
-            yaml.dump(dataset_yaml_content, f, default_flow_style=False)
+            yaml.dump({
+                'path': os.path.abspath(run_dir),
+                'train': 'images',
+                'val': 'images',
+                'nc': len(class_names),
+                'names': class_names
+            }, f, default_flow_style=False)
 
-        # Lock the target weights to this image set record
-        image_set.target_weights_id = target_weights_id
+        # 2. Fine-tune starting from the selected model's current weights
+        snapshot_dir = os.path.join('data', g.user.id, 'snapshots')
+        train_cmd = [
+            sys.executable, 'scripts/run_train.py',
+            '--data', yaml_path,
+            '--weights', weights_record.file_path,
+            '--epochs', str(epochs),
+            '--project', snapshot_dir,
+            '--name', run_id,
+        ]
+        subprocess.run(train_cmd, check=True)
+
+        best_path = os.path.join(snapshot_dir, run_id, 'weights', 'best.pt')
+        if not os.path.exists(best_path):
+            return jsonify({"error": "best.pt not found after training"}), 500
+
+        # 3. Register the fine-tuned checkpoint as a model named
+        # "<base name>_<label>". If a model with that name already exists for
+        # this user, overwrite it in place instead of creating a duplicate.
+        new_name = f"{weights_record.name}_{label}"
+        target_weights = Weights.query.filter_by(user_id=g.user.id, name=new_name).first()
+
+        new_weights_id = target_weights.id if target_weights else str(uuid.uuid4())
+        model_dir = g.user.get_path('models')
+        final_path = os.path.join('data', model_dir, f'{new_weights_id}.pt')
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        shutil.copy2(best_path, final_path)
+
+        if target_weights:
+            target_weights.file_path = final_path
+            target_weights.label_set_id = weights_record.label_set_id
+            new_weights = target_weights
+        else:
+            new_weights = Weights(
+                id=new_weights_id,
+                user_id=g.user.id,
+                name=new_name,
+                file_path=final_path,
+                label_set_id=weights_record.label_set_id
+            )
+            db.session.add(new_weights)
         db.session.commit()
 
+        # 4. Optional 5-fold cross-validation for a quality readout
+        kfold_text = ""
+        if len(image_records) >= 5:
+            kfold_dir = os.path.join(snapshot_dir, run_id, 'kfold')
+            os.makedirs(kfold_dir, exist_ok=True)
+            kfold_cmd = [
+                sys.executable, 'scripts/kfold_train.py',
+                '--image_dir', img_dir,
+                '--label_dir', lbl_dir,
+                '--weights', best_path,
+                '--epochs', str(epochs),
+                '--output_dir', kfold_dir,
+                '--nc', str(len(class_names)),
+                '--names'
+            ] + class_names
+            subprocess.run(kfold_cmd, check=True)
+
+            kfold_result_path = os.path.join(kfold_dir, 'kfold_results.txt')
+            if os.path.exists(kfold_result_path):
+                with open(kfold_result_path, 'r') as f:
+                    kfold_text = f.read()
+
         return jsonify({
-            "message": "Dataset preparation complete. Ready for fine-tuning.",
-            "image_set_id": set_id,
-            "total_images": len(image_set.images)
+            "message": "Model fine-tuned successfully",
+            "weights": new_weights.to_dict(),
+            "total_images": len(image_records),
+            "kfold_results": kfold_text
         }), 200
 
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": f"Training subprocess failed: {str(e)}"}), 500
     except Exception as e:
         db.session.rollback()
-        print(f"Error compiling fine-tune dataset: {str(e)}")
+        print(f"Error training model: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 
@@ -1812,482 +1866,6 @@ def serve_tile(filename, tx, ty, tile_size):
     buf.seek(0)
     return send_file(buf, mimetype='image/png')
 
-@app.route('/save-training-data', methods=['POST']) #TODO: Update
-def save_training_data():
-    user_id = session['user_id']
-    try:
-        # Generate unique ID
-        unique_id = str(uuid.uuid4())
-
-        img_filename = f"{unique_id}.png"
-        lbl_filename = f"{unique_id}.txt"
-        final_img_path = os.path.join('users', user_id, 'images', img_filename)
-        final_lbl_path = os.path.join('users', user_id, 'snapshots', lbl_filename)
-        
-        # Get parameters from JSON
-        data = request.get_json()
-        original_filename = data['original_filename']
-        annotations = data['annotations']
-        
-        # Path setup
-        user_upload_dir = os.path.join('users', user_id, 'uploads')
-        saved_data_dir = os.path.join('users', user_id, 'saved_data')
-        saved_annotations_dir = os.path.join('users', user_id, 'saved_annotations')
-        thumbnail_dir = os.path.join('users', user_id, 'thumbnails')
-
-        os.makedirs(thumbnail_dir, exist_ok=True)
-
-        # Copy ORIGINAL image (not the scaled version)
-        original_path = os.path.join(user_upload_dir, original_filename)
-        dest_filename = f"{unique_id}_{original_filename}"
-        dest_path = os.path.join(saved_data_dir, dest_filename)
-        
-        # Always use the original file, never the scaled version
-        if not os.path.exists(original_path):
-            return jsonify({'error': 'Original image file not found'}), 404
-        
-        shutil.copy2(original_path, dest_path)
-
-        thumbnail_filename = f"thumb_{unique_id}.jpg"
-        thumbnail_path = os.path.join(thumbnail_dir, thumbnail_filename)
-        normalize_image(original_path, thumbnail_path)
-        
-        # Class mapping
-        CLASS_MAP = {
-            'neuron': 0,
-            'glia':   1,
-            'SGN':    0,  # only used when training SGN model separately
-            'CD3':    0,  # only used when training CD3 model separately
-        }
-                
-        # Create YOLO annotations with consistent formatting (already in original coordinates)
-        yolo_lines = []
-        for ann in annotations:
-            class_id = CLASS_MAP.get(ann['class_name'], 0)
-            line = "{0} {1:.6f} {2:.6f} {3:.6f} {4:.6f}".format(
-                class_id,
-                float(ann['x_center']),
-                float(ann['y_center']),
-                float(ann['width_norm']),
-                float(ann['height_norm'])
-            )
-            yolo_lines.append(line)
-        
-        # Save annotation file
-        os.makedirs(saved_annotations_dir, exist_ok=True)
-        annotation_filename = f"{unique_id}.txt"
-        with open(os.path.join(saved_annotations_dir, annotation_filename), 'w') as f:
-            f.write("\n".join(yolo_lines))
-        
-        print(f"Saved training data: {dest_filename} with {len(yolo_lines)} annotations in original coordinates")
-        
-        return jsonify({
-            'message': 'Training data saved with original image and coordinates',
-            'image_file': dest_filename,
-            'thumbnail_file': thumbnail_filename,
-            'annotation_file': annotation_filename,
-            'annotation_count': len(yolo_lines)
-        })
-        
-    except Exception as e:
-        print(f"Error saving training data: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/get-all-training-data', methods=['GET'])  #TODO: Update/Move
-def get_all_training_data():
-    user_id = session.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    saved_annotations_dir = os.path.join('users', user_id, 'saved_annotations')
-    # Use a helper to find images (since filenames have unique IDs)
-    saved_data_dir = os.path.join('users', user_id, 'saved_data')
-    
-    results = []
-    
-    if os.path.exists(saved_annotations_dir):
-        # Loop through text files in the annotation folder
-        for ann_file in os.listdir(saved_annotations_dir):
-            if ann_file.endswith('.txt'):
-                unique_id = ann_file.replace('.txt', '')
-                
-                # Find the matching image (starts with the same unique_id)
-                image_file = "Unknown"
-                if os.path.exists(saved_data_dir):
-                    for f in os.listdir(saved_data_dir):
-                        if f.startswith(unique_id):
-                            image_file = f
-                            break
-                
-                results.append({
-                    'imageName': image_file,
-                    'annotationName': ann_file,
-                    'thumbnailUrl': f"/api/preview/thumb_{unique_id}.jpg",
-                    # Add any extra info if you want to parse the txt file for counts
-                })
-                
-    return jsonify(results)
-    
-
-@app.route('/clear-training-data', methods=['POST'])  #TODO: Update
-def clear_training_data():
-    user_id = session['user_id']
-    saved_data_dir = os.path.join('users', user_id, 'saved_data')
-    saved_annotations_dir = os.path.join('users', user_id, 'saved_annotations')
-    yolo_dataset_dir = os.path.join('users', user_id, 'yolo_dataset')  # New directory to clear
-    thumbnail_dir = os.path.join('users', user_id, 'thumbnails')
-
-    try:
-        # Clear saved data
-        clear_folder(saved_data_dir)
-        
-        # Clear saved annotations
-        clear_folder(saved_annotations_dir)
-
-        # Clear thumbnails
-        clear_folder(thumbnail_dir)
-        
-        # Clear YOLO dataset if it exists
-        if os.path.exists(yolo_dataset_dir):
-            shutil.rmtree(yolo_dataset_dir, ignore_errors=True)
-            print(f"Cleared YOLO dataset directory for user: {user_id}")
-        
-        return jsonify({'message': 'Training data cleared successfully'})
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-import os
-
-@app.route('/delete-training-data/<unique_id>', methods=['DELETE'])  #TODO: Update
-def delete_training_data(unique_id):
-    user_id = session.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    try:
-        # Define the directories
-        saved_data_dir = os.path.join('users', user_id, 'saved_data')
-        saved_annotations_dir = os.path.join('users', user_id, 'saved_annotations')
-        thumbnail_dir = os.path.join('users', user_id, 'thumbnails')
-
-        # 1. Delete Annotation File (The easiest to find)
-        annotation_count = 0
-        ann_path = os.path.join(saved_annotations_dir, f"{unique_id}.txt")
-        if os.path.exists(ann_path):
-            with open(ann_path, 'r') as f:
-                # Count only lines that aren't just whitespace
-                lines = f.readlines()
-                annotation_count = len([line for line in lines if line.strip()])
-            
-            # Now delete the file after counting
-            os.remove(ann_path)
-
-        # 2. Delete Thumbnail
-        thumb_path = os.path.join(thumbnail_dir, f"thumb_{unique_id}.jpg")
-        if os.path.exists(thumb_path):
-            os.remove(thumb_path)
-
-        # 3. Delete Original Image
-        # Since the original image has the unique_id prepended (unique_id_filename.tif)
-        # we look for the file that starts with the unique_id
-        if os.path.exists(saved_data_dir):
-            for filename in os.listdir(saved_data_dir):
-                if filename.startswith(unique_id):
-                    os.remove(os.path.join(saved_data_dir, filename))
-                    break
-
-        return jsonify({
-            'message': f'Entry {unique_id} deleted successfully',
-            'deleted_annotations': annotation_count
-        }), 200
-
-    except Exception as e:
-        print(f"Error deleting data: {e}")
-        return jsonify({'error': str(e)}), 500
-    
-
-@app.route('/download-training-data', methods=['GET'])  #TODO: Update
-def download_training_data():
-    user_id = session.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    # Define paths
-    saved_data_dir = os.path.join('users', user_id, 'saved_data')
-    saved_annotations_dir = os.path.join('users', user_id, 'saved_annotations')
-
-    # Create an in-memory byte stream for the ZIP
-    zip_buffer = io.BytesIO()
-    
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # 1. Add All Images
-        if os.path.exists(saved_data_dir):
-            for root, dirs, files in os.walk(saved_data_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    # Store images in an 'images/' folder inside the zip
-                    zf.write(file_path, arcname=os.path.join('images', file))
-
-        # 2. Add All Annotations
-        if os.path.exists(saved_annotations_dir):
-            for root, dirs, files in os.walk(saved_annotations_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    # Store txt files in a 'labels/' folder inside the zip
-                    zf.write(file_path, arcname=os.path.join('labels', file))
-
-    # Seek to the start of the stream so it can be read
-    zip_buffer.seek(0)
-    
-    return send_file(
-        zip_buffer,
-        mimetype='application/zip',
-        as_attachment=True,
-        download_name=f'yolo_dataset_{user_id}.zip'
-    )
-
-
-@app.route('/train-saved', methods=['POST']) #TODO: Update
-def train_saved_data():
-    import shutil
-    import time
-    import os
-    from PIL import Image
-    from ultralytics import YOLO
-    from scripts.normalization import normalize_image
-    import subprocess
-
-    user_id       = session['user_id']
-    snapshot_dir  = os.path.join('users', user_id, 'snapshots')
-    yolo_base     = os.path.join('users', user_id, 'yolo_dataset')
-    img_dir       = os.path.join(yolo_base, 'images')
-    lbl_dir       = os.path.join(yolo_base, 'labels')
-
-    try:
-        # --- 1. Parse inputs ---
-        num_images = int(request.form.get('num_images', '0'))
-        model_type = request.form.get('model_type', 'SGN')
-        epochs     = int(request.form.get('epochs', '20'))
-
-        print(f"[DEBUG] Inputs → num_images={num_images}, model_type={model_type}, epochs={epochs}")
-
-        # --- 2. Prep dataset dirs ---
-        shutil.rmtree(yolo_base, ignore_errors=True)
-        os.makedirs(img_dir, exist_ok=True)
-        os.makedirs(lbl_dir, exist_ok=True)
-        
-
-        # --- 3. Copy SAVED DATA (uploaded manually) ---
-        # --- 3. COPY SAVED DATA (uploaded images + annotations) ---
-        print("[DEBUG] Copying saved training data...")
-
-        saved_data_dir = os.path.join('users', user_id, 'saved_data')
-        saved_annot_dir = os.path.join('users', user_id, 'saved_annotations')
-
-        saved_imgs = [
-            f for f in os.listdir(saved_data_dir)
-            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
-        ]
-
-        print(f"[DEBUG] Found {len(saved_imgs)} saved images")
-
-        for fname in saved_imgs:
-            src_img = os.path.join(saved_data_dir, fname)
-            dst_img = os.path.join(img_dir, fname)
-
-            # Normalize to RGB
-            try:
-                if fname.lower().endswith(('.tif', '.tiff')):
-                    temp_path = os.path.join(img_dir, f"temp_{fname}.png")
-                    normalize_image(src_img, temp_path)
-                    with Image.open(temp_path) as im:
-                        if im.mode != 'RGB':
-                            im = im.convert('RGB')
-                        im.save(dst_img)
-                    os.remove(temp_path)
-                else:
-                    with Image.open(src_img) as im:
-                        if im.mode != 'RGB':
-                            im = im.convert('RGB')
-                        im.save(dst_img)
-                print(f"[DEBUG] Copied image: {fname}")
-            except Exception as e:
-                print(f"[ERROR] Failed to copy image {fname}: {e}")
-                continue
-
-            # Copy corresponding annotation
-            # Get the unique_id from the filename (format is "{unique_id}_{original_name}")
-            unique_id = fname.split('_')[0]
-            src_lbl = os.path.join(saved_annot_dir, f"{unique_id}.txt")
-            dst_lbl = os.path.join(lbl_dir, os.path.splitext(fname)[0] + '.txt')
-
-            if os.path.exists(src_lbl):
-                shutil.copy2(src_lbl, dst_lbl)
-                print(f"[DEBUG] Copied label: {src_lbl} to {dst_lbl}")
-            else:
-                print(f"[WARNING] Label missing for {fname} (expected {src_lbl})")
-
-
-        # --- 4. Copy optional pre-train images + labels ---
-        # Copy optional pre-train images + labels ---
-        pre_dir = 'pre_train_MADM' if model_type == 'MADM' else 'pre_train_SGN' if model_type == 'SGN' else 'pre_train_CD3'
-        labels_sub = os.path.join(pre_dir, 'yolo_labels')  # Changed from 'yolo_labels' to 'labels'
-        print(f"[DEBUG] Using pre-train dir: {pre_dir}")
-
-        all_imgs = sorted([
-            f for f in os.listdir(pre_dir)
-            if f.lower().endswith(('.png','.jpg','.jpeg','.tif','.tiff'))
-        ])
-        selected = all_imgs[:num_images]
-        print(f"[DEBUG] Copying {len(selected)} pre-train images")
-
-        for fname in selected:
-            src_img = os.path.join(pre_dir, fname)
-            dst_img = os.path.join(img_dir, fname)
-
-            try:
-                if fname.lower().endswith(('.tif', '.tiff')):
-                    temp_path = os.path.join(img_dir, f"temp_{fname}.png")
-                    normalize_image(src_img, temp_path)
-                    with Image.open(temp_path) as im:
-                        if im.mode != 'RGB':
-                            im = im.convert('RGB')
-                        im.save(dst_img)
-                    os.remove(temp_path)
-                else:
-                    with Image.open(src_img) as im:
-                        if im.mode != 'RGB':
-                            im = im.convert('RGB')
-                        im.save(dst_img)
-                print(f"[DEBUG] Copied and normalized image {fname}")
-            except Exception as e:
-                print(f"[ERROR] image copy {fname}: {e}")
-                continue  # Skip to next image if current one fails
-
-            # Handle label copying more robustly
-            base = os.path.splitext(fname)[0] + '.txt'
-            
-            # Check multiple possible label locations
-            possible_label_locations = [
-                os.path.join(labels_sub, base),  # Primary location
-                os.path.join(pre_dir, base),     # Alternative location
-                os.path.join(pre_dir, 'labels', base)  # Another common location
-            ]
-            
-            label_copied = False
-            for src_lbl in possible_label_locations:
-                if os.path.exists(src_lbl):
-                    dst_lbl = os.path.join(lbl_dir, base)
-                    shutil.copy2(src_lbl, dst_lbl)
-                    print(f"[DEBUG] Copied label from {src_lbl} to {dst_lbl}")
-                    label_copied = True
-                    break
-            
-            if not label_copied:
-                print(f"[WARNING] Could not find label for {fname} in any of these locations:")
-                for loc in possible_label_locations:
-                    print(f"  - {loc}")
-
-        # --- 5. Write data.yaml ---
-               # --- 5. Write data.yaml ---
-        if model_type == 'SGN':
-            class_names = ["SGN"]
-        elif model_type == 'CD3':
-            # Hard-code CD3 at index 7 (with dummies at 0–6)
-            class_names = [f"dummy{i}" for i in range(7)] + ["CD3"]
-        elif model_type == 'MADM':
-            class_names = ["neuron", "glia"]
-        else:
-            # Fallback for any unexpected model type
-            return jsonify({'error': f'Unsupported model type for training: {model_type}'}), 400
-
-        # Simplified and more robust nc calculation
-        nc = len(class_names)
-        
-        yaml_path = os.path.join(yolo_base, 'data.yaml')
-        with open(yaml_path, 'w') as f:
-            f.write(f"path: {os.path.abspath(yolo_base)}\n")
-            f.write("train: images\nval: images\n")
-            f.write(f"nc: {nc}\n")
-            f.write(f"names: {class_names}\n")
-
-        print(f"[DEBUG] data.yaml written with nc={nc}, names={class_names}")
-
-        # --- 6. Train model ---
-        weights = 'snapshots/SGN_best.pt' if model_type == 'SGN' else 'snapshots/cd3_v3.pt' if model_type == 'CD3' else 'snapshots/MADM_best_latest.pt'
-        run_name = f"run_{int(time.time())}"
-        print(f"[DEBUG] Starting YOLO train, weights={weights}, run name={run_name}")
-        import subprocess, sys
-
-        train_cmd = [
-            sys.executable, 'scripts/run_train.py',
-            '--data',    yaml_path,
-            '--weights', weights,
-            '--epochs',  str(epochs),
-            '--project', snapshot_dir,
-            '--name',    run_name,
-        ]
-
-        print(f"[DEBUG] Launching training subprocess: {' '.join(train_cmd)}")
-        result = subprocess.run(train_cmd, check=True, capture_output=False)
-
-        best = os.path.join(snapshot_dir, run_name, 'weights', 'best.pt')
-        time.sleep(3)
-
-        if not os.path.exists(best):
-            return jsonify({'error': 'best.pt not found after training'}), 500
-
-        final = os.path.join(snapshot_dir, f"{model_type}_finetuned.pt")
-        shutil.copy2(best, final)
-        print(f"[DEBUG] Copied final model to {final}")
-
-        # --- 7. Check sample count ---
-        valid_samples = [
-            f for f in os.listdir(img_dir)
-            if os.path.exists(os.path.join(lbl_dir, os.path.splitext(f)[0] + '.txt'))
-        ]
-        if len(valid_samples) < 5:
-            msg = f"Not enough data for K-Fold (need 5, got {len(valid_samples)})"
-            print(f"[WARNING] {msg}")
-            return jsonify({
-                'model_url': f"/{final}",
-                'kfold_results': msg
-            })
-
-        # --- 8. Run K-Fold ---
-        kfold_dir = os.path.join(snapshot_dir, run_name, 'kfold')
-        os.makedirs(kfold_dir, exist_ok=True)
-
-        cmd = [
-            sys.executable, 'scripts/kfold_train.py',  # ← inherits the correct env
-            '--image_dir', img_dir,
-            '--label_dir', lbl_dir,
-            '--weights', best,
-            '--epochs', str(epochs),
-            '--output_dir', kfold_dir,
-            '--nc', str(nc),
-            '--names'
-        ] + class_names
-
-        print(f"[DEBUG] Running 5-fold validation...")
-        subprocess.run(cmd, check=True)
-
-        # --- 9. Read kfold_results.txt ---
-        kfold_result_path = os.path.join(kfold_dir, 'kfold_results.txt')
-        kfold_text = ""
-        if os.path.exists(kfold_result_path):
-            with open(kfold_result_path, 'r') as f:
-                kfold_text = f.read()
-
-        return jsonify({
-            'model_url': f"/snapshots/{model_type}_finetuned.pt",
-            'kfold_results': kfold_text
-        })
-
-    except Exception as e:
-        print(f"[ERROR] /train-saved exception: {e}")
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/snapshots/<path:filename>') #TODO: Remove
 def serve_snapshot(filename):
@@ -2399,4 +1977,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5001, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
