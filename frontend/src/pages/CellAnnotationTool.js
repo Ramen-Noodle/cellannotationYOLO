@@ -106,6 +106,7 @@ export default function CellAnnotationTool() {
   const [showLabels, setShowLabels] = useState(true)
   const [batchImageSetId, setBatchImageSetId] = useState('')
   const [batchSelectedRowIds, setBatchSelectedRowIds] = useState([])
+  const [batchOverwrite, setBatchOverwrite] = useState(true)
 
   const fileKey = (file) => `${file.name}-${file.size}-${file.lastModified}`
   // State for fine tuning
@@ -1155,7 +1156,7 @@ export default function CellAnnotationTool() {
 
   async function handleBatchDetect() {
     if (!batchImageSetId) return alert('Please select an image set.')
-    
+
     const detectionRows = detectionSettings.filter(r => batchSelectedRowIds.includes(r.id))
     if (detectionRows.length === 0) return alert('Please select at least one detection row.')
 
@@ -1164,47 +1165,45 @@ export default function CellAnnotationTool() {
     setLoadingMessage('Running batch detection — large images can take several minutes each...')
 
     try {
-      const batchResults = []
-
-      for (const row of detectionRows) {
-        const payload = {
-          image_set_id: batchImageSetId,
+      const payload = {
+        image_set_id: batchImageSetId,
+        overwrite: batchOverwrite,
+        detection_settings: detectionRows.map(row => ({
+          id: row.id,
           model_id: row.selectedModelId,
-          detection_setting_id: row.id,
           threshold: row.rowThreshold,
           cell_diameter: row.rowDiameter,
           min_cell_diameter: row.rowMinDiameter,
           max_cell_diameter: row.rowMaxDiameter,
           sublabel: row.rowSublabel,
           selected_classes: row.selectedClasses,
-        }
+        })),
+      }
 
-        const res = await fetch(`${API_BASE_URL}/batch-detect`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          credentials: 'include',
-        })
+      const res = await fetch(`${API_BASE_URL}/batch-detect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        credentials: 'include',
+      })
 
-        if (!res.ok) {
-          const errorBody = await res.json().catch(() => null)
-          throw new Error(errorBody?.error || `Batch detection failed for model ${row.selectedModelId}`)
-        }
-        const data = await res.json()
-        batchResults.push(data)
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => null)
+        throw new Error(errorBody?.error || 'Batch detection failed')
+      }
+      const data = await res.json()
 
-        if (data.detection_setting_id && data.detection_setting_id !== row.id) {
-          const resolvedId = data.detection_setting_id
-          setDetectionSettings(prev => prev.map(r => r.id === row.id ? { ...r, id: resolvedId } : r))
-          setBatchSelectedRowIds(prev => prev.map(id => id === row.id ? resolvedId : id))
-          setActiveRowIds(prev => prev.map(id => id === row.id ? resolvedId : id))
+      // Rows selected via a local temp id get resolved to a real backend id
+      // on their first run - patch that back into local state.
+      for (const { request_row_id, detection_setting_id } of data.resolved_settings || []) {
+        if (request_row_id && detection_setting_id && request_row_id !== detection_setting_id) {
+          setDetectionSettings(prev => prev.map(r => r.id === request_row_id ? { ...r, id: detection_setting_id } : r))
+          setBatchSelectedRowIds(prev => prev.map(id => id === request_row_id ? detection_setting_id : id))
+          setActiveRowIds(prev => prev.map(id => id === request_row_id ? detection_setting_id : id))
         }
       }
 
-      const total = batchResults.reduce((sum, r) => sum + (r.total || 0), 0)
-      const succeeded = batchResults.reduce((sum, r) => sum + (r.succeeded || 0), 0)
-      const failed = batchResults.reduce((sum, r) => sum + (r.failed || 0), 0)
-      alert(`Batch complete: ${succeeded}/${total} images succeeded${failed > 0 ? `, ${failed} failed` : ''}.`)
+      alert(`Batch complete: ${data.succeeded}/${data.total} images succeeded${data.failed > 0 ? `, ${data.failed} failed` : ''}.`)
 
       if (imageID) {
         await renderAnnotations(imageID)
@@ -1733,6 +1732,7 @@ export default function CellAnnotationTool() {
   function handleOpenBatchDetectModal() {
     setBatchSelectedRowIds(detectionSettings.map(r => r.id))
     setBatchImageSetId('')
+    setBatchOverwrite(true)
     setBatchDetectModalOpen(true)
   }
   
@@ -2959,6 +2959,27 @@ export default function CellAnnotationTool() {
                       })}
                     </Box>
                   )}
+
+                  <FormControlLabel
+                    sx={{ mb: 1 }}
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={batchOverwrite}
+                        onChange={(e) => setBatchOverwrite(e.target.checked)}
+                      />
+                    }
+                    label={
+                      <Box>
+                        <Typography variant="body2">Overwrite existing detections</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {batchOverwrite
+                            ? 'Overwrites all existing annotations for images in this batch.'
+                            : 'Leaves annotations in place (unless that row\'s settings changed).'}
+                        </Typography>
+                      </Box>
+                    }
+                  />
 
                   <Divider sx={{ mb: 2 }} />
 
