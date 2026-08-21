@@ -26,8 +26,8 @@ import glob
 import tensorflow as tf
 from ultralytics import YOLO
 from scripts.normalization import normalize_image
-from scripts.sahi_detect import detect_to_yolo
 from scripts.stardist_detect import stardist_detect_to_yolo
+from scripts import sahi_worker
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Gets directory where app.py is
 os.chdir(BASE_DIR)
 from PIL import Image
@@ -66,35 +66,26 @@ def ensure_user_session():
         g.user = db.session.get(User, user_id)
 
 
-def preprocess_image(image_path, detection_type, cell_diameter):
-    # Open source image
-    img = Image.open(image_path)
-    orig_w, orig_h = img.size
-
-    # Calculate Scaling
+def preprocess_image(orig_w, orig_h, detection_type, cell_diameter):
+    """
+    Computes the detection-space dimensions and cell-diameter scaling factor
+    purely from already-known image dimensions (DB values) — no file IO here.
+    The actual resize happens inside the SAHI worker process, right before
+    detection, so the parent Flask process never has to open the file.
+    """
     target_diameter = 20.0 if detection_type == 'CD3' else 34.0
     scaling_factor = target_diameter / float(cell_diameter)
-    
+
     if scaling_factor != 1.0:
         det_w = max(1, int(round(orig_w * scaling_factor)))
         det_h = max(1, int(round(orig_h * scaling_factor)))
-        
-        # Resize image in memory
-        scaled_img = img.resize((det_w, det_h), Image.Resampling.LANCZOS)
-        
-        return {
-            "image_source": scaled_img,  # In-memory PIL Image object
-            "is_temp_file": False,
-            "det_w": det_w,
-            "det_h": det_h,
-            "scaling_factor": scaling_factor
-        }
-    
+    else:
+        det_w = orig_w
+        det_h = orig_h
+
     return {
-        "image_source": image_path,  # Fallback directly to the file path to save memory/IO
-        "is_temp_file": False,
-        "det_w": orig_w,
-        "det_h": orig_h,
+        "det_w": det_w,
+        "det_h": det_h,
         "scaling_factor": scaling_factor
     }
 
@@ -138,35 +129,51 @@ def run_stardist_subprocess(image_path, model_path, image_width, image_height,
 
     return yolo_output
 
+def resolve_detection_setting(user_id, weights_id, params, detection_setting_id=None):
+    """
+    Finds or creates the DetectionSetting record for a row, given its
+    detection_setting_id (which may be a real id, a stale id, or a frontend
+    temp id) plus the settings to use for this run.
+
+    Returns (setting, params_changed). params_changed is True when a row with
+    a real existing id was resolved but its stored params differed from the
+    incoming ones - i.e. the row's configuration was edited since it last ran.
+    """
+    setting = None
+    if detection_setting_id:
+        setting = DetectionSetting.query.filter_by(id=detection_setting_id, user_id=user_id).first()
+
+    if setting:
+        # Row already has a real settings record - update it if the values changed.
+        params_changed = setting.weights_id != weights_id or setting.params != params
+        if params_changed:
+            setting.weights_id = weights_id
+            setting.params = params
+            flag_modified(setting, "params")
+        return setting, params_changed
+
+    # No record for this id - look for an existing duplicate before creating one.
+    candidates = DetectionSetting.query.filter_by(user_id=user_id, weights_id=weights_id).all()
+    setting = next((d for d in candidates if d.params == params), None)
+
+    if not setting:
+        setting = DetectionSetting(
+            id=str(uuid.uuid4()), user_id=user_id, weights_id=weights_id, params=params
+        )
+        db.session.add(setting)
+        db.session.flush()
+
+    return setting, False
+
+
 def resolve_annotation_record(user_id, image_id, weights_id, params, detection_setting_id):
     """
-    Finds or creates the Annotation record that a detect/batch-detect call
-    should write its results to, given a row's detection_setting_id (which
-    may be a real id, a stale id, or a frontend temp id) plus the settings
-    to use for this run.
+    Finds or creates the Annotation record that a detect call should write
+    its results to, given a row's detection_setting_id plus the settings to
+    use for this run.
     """
     try:
-        setting = None
-        if detection_setting_id:
-            setting = DetectionSetting.query.filter_by(id=detection_setting_id, user_id=user_id).first()
-
-        if setting:
-            # Row already has a real settings record - update it if the values changed.
-            if setting.weights_id != weights_id or setting.params != params:
-                setting.weights_id = weights_id
-                setting.params = params
-                flag_modified(setting, "params")
-        else:
-            # No record for this id - look for an existing duplicate before creating one.
-            candidates = DetectionSetting.query.filter_by(user_id=user_id, weights_id=weights_id).all()
-            setting = next((d for d in candidates if d.params == params), None)
-
-            if not setting:
-                setting = DetectionSetting(
-                    id=str(uuid.uuid4()), user_id=user_id, weights_id=weights_id, params=params
-                )
-                db.session.add(setting)
-                db.session.flush()
+        setting, _ = resolve_detection_setting(user_id, weights_id, params, detection_setting_id)
 
         annotation = Annotation.query.filter_by(
             user_id=user_id, image_id=image_id, detection_setting_id=setting.id
@@ -221,19 +228,23 @@ def execute_detection(image_record, model_record, threshold, cell_diameter, subl
     else:
         # Default SAHI / Standard Object Detection Path
         base_image_path = os.path.join('data', image_record.normalized_path)
+        abs_image_path = os.path.abspath(base_image_path)
         prep_data = preprocess_image(
-            image_path=base_image_path,
+            orig_w=image_record.width,
+            orig_h=image_record.height,
             detection_type=detection_type,
             cell_diameter=cell_diameter,
         )
 
-        # FIX: Restored exact parameter names matching your old endpoint
-        # Your old route passed image_path=prep_data['image_source']
-        yolo_output = detect_to_yolo(
-            image_path=prep_data['image_source'], 
+        # Runs in the persistent SAHI worker process (see scripts/sahi_worker.py) so
+        # a stuck or crashed detection can be killed/retried without taking down the
+        # Flask server, without paying a model-reload cost on every call.
+        yolo_output = sahi_worker.run_job(
+            image_path=abs_image_path,
+            det_w=prep_data['det_w'],
+            det_h=prep_data['det_h'],
+            scaling_factor=prep_data['scaling_factor'],
             model_path=model_path,
-            image_width=prep_data['det_w'],
-            image_height=prep_data['det_h'],
             threshold=threshold,
         )
 
@@ -1448,73 +1459,152 @@ def batch_detect():
         return jsonify({"error": "No active session"}), 401
 
     data = request.get_json()
-    if not data or 'image_set_id' not in data or 'model_id' not in data:
-        return jsonify({"error": "Missing image_set_id or model_id in request body"}), 400
+    if not data or 'image_set_id' not in data or 'detection_settings' not in data:
+        return jsonify({"error": "Missing image_set_id or detection_settings in request body"}), 400
 
     image_set_id = data['image_set_id']
-    model_id = data['model_id']
-    detection_setting_id = data.get('detection_setting_id')
-    threshold = float(data.get('threshold', 0.5))
-    cell_diameter = float(data.get('cell_diameter', 34))
-    min_cell_diameter = float(data.get('min_cell_diameter', 7))
-    max_cell_diameter = float(data.get('max_cell_diameter', 17))
-    sublabel = data.get('sublabel', '')
-    selected_classes = data.get('selected_classes', None)
+    requested_rows = data['detection_settings']
+    # When True (default), re-running a row overwrites any existing results for it.
+    # When False, an image/row pair that already has results is left untouched -
+    # UNLESS that row's config changed since it last ran (see force_rerun below),
+    # since silently keeping results computed under stale settings would be worse
+    # than the redundant work overwrite=False is meant to save.
+    overwrite = data.get('overwrite', True)
+
+    if not isinstance(requested_rows, list) or len(requested_rows) == 0:
+        return jsonify({"error": "detection_settings must be a non-empty list"}), 400
 
     try:
         image_set = ImageSet.query.filter_by(id=image_set_id, user_id=g.user.id).first()
-        model_record = Weights.query.filter_by(id=model_id, user_id=g.user.id).first()
+        if not image_set:
+            return jsonify({"error": "Image set not found or unauthorized"}), 404
 
-        if not image_set or not model_record:
-            return jsonify({"error": "Records not found or unauthorized"}), 404
+        # Resolve every requested row's DetectionSetting up front so the full
+        # "active" set (for cleanup) and each row's force_rerun flag are known
+        # before any image is touched.
+        resolved_rows = []
+        for row in requested_rows:
+            model_id = row.get('model_id')
+            model_record = Weights.query.filter_by(id=model_id, user_id=g.user.id).first()
+            if not model_record:
+                db.session.rollback()
+                return jsonify({"error": f"Model {model_id} not found or unauthorized"}), 404
 
-        params = {
-            "threshold": threshold,
-            "cell_diameter": cell_diameter,
-            "min_cell_diameter": min_cell_diameter,
-            "max_cell_diameter": max_cell_diameter,
-            "sublabel": sublabel,
-            "selected_classes": selected_classes,
-        }
+            threshold = float(row.get('threshold', 0.5))
+            cell_diameter = float(row.get('cell_diameter', 34))
+            min_cell_diameter = float(row.get('min_cell_diameter', 7))
+            max_cell_diameter = float(row.get('max_cell_diameter', 17))
+            sublabel = row.get('sublabel', '')
+            selected_classes = row.get('selected_classes', None)
 
-        results = []
-        resolved_setting_id = None
+            params = {
+                "threshold": threshold,
+                "cell_diameter": cell_diameter,
+                "min_cell_diameter": min_cell_diameter,
+                "max_cell_diameter": max_cell_diameter,
+                "sublabel": sublabel,
+                "selected_classes": selected_classes,
+            }
 
+            setting, params_changed = resolve_detection_setting(
+                g.user.id, model_id, params, row.get('id')
+            )
+
+            resolved_rows.append({
+                "request_row_id": row.get('id'),
+                "setting": setting,
+                "model_record": model_record,
+                "threshold": threshold,
+                "cell_diameter": cell_diameter,
+                "min_cell_diameter": min_cell_diameter,
+                "max_cell_diameter": max_cell_diameter,
+                "sublabel": sublabel,
+                "selected_classes": selected_classes,
+                "force_rerun": params_changed,
+            })
+
+        db.session.commit()
+        active_setting_ids = {r["setting"].id for r in resolved_rows}
+
+        image_results = []
         for image_record in image_set.images:
+            row_results = []
+            deleted_setting_ids = []
             try:
-                yolo_string, converted_annotations = execute_detection(
-                    image_record, model_record, threshold, cell_diameter, sublabel, selected_classes,
-                    min_cell_diameter=min_cell_diameter, max_cell_diameter=max_cell_diameter
-                )
+                for r in resolved_rows:
+                    setting = r["setting"]
+                    existing = Annotation.query.filter_by(
+                        user_id=g.user.id, image_id=image_record.id, detection_setting_id=setting.id
+                    ).first()
 
-                target_record = resolve_annotation_record(
-                    g.user.id, image_record.id, model_id, params, resolved_setting_id or detection_setting_id
-                )
-                resolved_setting_id = target_record.detection_setting_id
+                    if existing and existing.file_path and not overwrite and not r["force_rerun"]:
+                        row_results.append({
+                            "detection_setting_id": setting.id,
+                            "skipped": True,
+                            "count_detected": existing.count_detected
+                        })
+                        continue
 
-                if not target_record.file_path:
-                    annotation_dir = g.user.get_path('annotations')
-                    target_record.file_path = os.path.join('data', annotation_dir, f'{target_record.id}.txt')
+                    yolo_string, converted_annotations = execute_detection(
+                        image_record, r["model_record"], r["threshold"], r["cell_diameter"], r["sublabel"],
+                        r["selected_classes"], min_cell_diameter=r["min_cell_diameter"],
+                        max_cell_diameter=r["max_cell_diameter"]
+                    )
 
-                os.makedirs(os.path.dirname(target_record.file_path), exist_ok=True)
-                with open(target_record.file_path, 'w') as f:
-                    f.write(yolo_string)
+                    target_record = existing
+                    if not target_record:
+                        target_record = Annotation(
+                            id=str(uuid.uuid4()), user_id=g.user.id, image_id=image_record.id,
+                            detection_setting_id=setting.id
+                        )
+                        db.session.add(target_record)
+                        db.session.flush()
 
-                target_record.annotations_detected = converted_annotations
-                target_record.count_detected = len(converted_annotations)
-                flag_modified(target_record, "annotations_detected")
+                    if not target_record.file_path:
+                        annotation_dir = g.user.get_path('annotations')
+                        target_record.file_path = os.path.join('data', annotation_dir, f'{target_record.id}.txt')
+
+                    os.makedirs(os.path.dirname(target_record.file_path), exist_ok=True)
+                    with open(target_record.file_path, 'w') as f:
+                        f.write(yolo_string)
+
+                    target_record.annotations_detected = converted_annotations
+                    target_record.count_detected = len(converted_annotations)
+                    flag_modified(target_record, "annotations_detected")
+
+                    row_results.append({
+                        "detection_setting_id": setting.id,
+                        "skipped": False,
+                        "count_detected": len(converted_annotations)
+                    })
+
+                # Cleanup: when overwrite is set, this image should only carry
+                # annotations for rows in this batch run - delete anything left
+                # over from other rows. When overwrite is False, leave other
+                # rows' results alone.
+                if overwrite:
+                    stale = Annotation.query.filter(
+                        Annotation.user_id == g.user.id,
+                        Annotation.image_id == image_record.id,
+                        ~Annotation.detection_setting_id.in_(active_setting_ids)
+                    ).all()
+                    for ann in stale:
+                        if ann.file_path and os.path.exists(ann.file_path):
+                            os.remove(ann.file_path)
+                        deleted_setting_ids.append(ann.detection_setting_id)
+                        db.session.delete(ann)
+
                 db.session.commit()
-
-                results.append({
+                image_results.append({
                     "image_id": image_record.id,
-                    "annotation_id": target_record.id,
-                    "count_detected": len(converted_annotations),
-                    "success": True
+                    "success": True,
+                    "rows": row_results,
+                    "deleted_setting_ids": deleted_setting_ids
                 })
 
             except Exception as e:
                 db.session.rollback()
-                results.append({
+                image_results.append({
                     "image_id": image_record.id,
                     "success": False,
                     "error": str(e)
@@ -1523,11 +1613,14 @@ def batch_detect():
         return jsonify({
             "status": "complete",
             "image_set_id": image_set_id,
-            "detection_setting_id": resolved_setting_id,
-            "total": len(results),
-            "succeeded": sum(1 for r in results if r["success"]),
-            "failed": sum(1 for r in results if not r["success"]),
-            "results": results
+            "resolved_settings": [
+                {"request_row_id": r["request_row_id"], "detection_setting_id": r["setting"].id}
+                for r in resolved_rows
+            ],
+            "total": len(image_results),
+            "succeeded": sum(1 for r in image_results if r["success"]),
+            "failed": sum(1 for r in image_results if not r["success"]),
+            "results": image_results
         })
 
     except Exception as e:
@@ -2299,10 +2392,11 @@ scheduler.start()
 
 # Shut down the scheduler when exiting the app
 atexit.register(lambda: scheduler.shutdown())
+atexit.register(sahi_worker.shutdown)
 
 
 if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
