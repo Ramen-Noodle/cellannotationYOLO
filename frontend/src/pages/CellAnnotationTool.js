@@ -40,6 +40,11 @@ import CellCalibrator from '../components/CellCalibrator'
 import GalleryMenu from '../components/GalleryMenu'
 import RowMenu from '../components/RowMenu'
 
+// Seeded per-user on account creation (see User.setup_filesystem in the
+// backend) - not deletable. There's no is_default flag in the API response
+// yet, so this is a stand-in until that's exposed.
+const DEFAULT_MODEL_NAMES = ['MADM', 'SGN', 'StarDist']
+
 export default function CellAnnotationTool() {
   // Base URL for the backend API
   const API_BASE_URL = 'http://10.80.24.12:5002'
@@ -188,7 +193,6 @@ export default function CellAnnotationTool() {
     fetch(`${API_BASE_URL}/user-weights`, { credentials: 'include' })
     .then(res => res.json())
     .then(data => {
-      console.log(data)
       setModels(data)
       setCurrentModel(0)
       const allLabels = data.map(item => item.label_set.labels)
@@ -1369,6 +1373,69 @@ export default function CellAnnotationTool() {
     setTrainModelModalOpen(false)
   }
 
+  // Manage models modal state
+  const [manageModelsModalOpen, setManageModelsModalOpen] = useState(false)
+  const handleOpenManageModelsModal = () => {
+    setManageModelsModalOpen(true)
+  }
+  const handleCloseManageModelsModal = () => {
+    setManageModelsModalOpen(false)
+  }
+
+  async function handleDeleteModel(model) {
+    if (!window.confirm(`Delete model "${model.name}"? This cannot be undone.`)) return
+
+    const requestDelete = (force) => fetch(`${API_BASE_URL}/delete-model`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ weights_id: model.id, force }),
+    })
+
+    try {
+      let res = await requestDelete(false)
+
+      if (res.status === 409) {
+        const body = await res.json().catch(() => null)
+        const rows = body?.detection_setting_count ?? 'some'
+        const annotations = body?.annotation_count ?? 'some'
+        const confirmCascade = window.confirm(
+          `"${model.name}" is used by ${rows} detection row${rows === 1 ? '' : 's'} with ${annotations} annotation${annotations === 1 ? '' : 's'}. ` +
+          `Deleting it will also delete those detection rows and annotations. Continue?`
+        )
+        if (!confirmCascade) return
+        res = await requestDelete(true)
+      }
+
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => null)
+        throw new Error(errorBody?.error || 'Delete failed')
+      }
+
+      setModels(prev => prev.filter(m => m.id !== model.id))
+
+      const removedRowIds = detectionSettings
+        .filter(r => r.selectedModelId === model.id)
+        .map(r => r.id)
+
+      if (removedRowIds.length > 0) {
+        setDetectionSettings(prev => prev.filter(r => !removedRowIds.includes(r.id)))
+        setActiveRowIds(prev => prev.filter(id => !removedRowIds.includes(id)))
+        setBatchSelectedRowIds(prev => prev.filter(id => !removedRowIds.includes(id)))
+        setSelectedRowId(prev => removedRowIds.includes(prev) ? null : prev)
+        setAnnotations(prevAnnos => prevAnnos.filter(ann =>
+          !removedRowIds.includes(ann.detection_setting_id) &&
+          !removedRowIds.includes(ann.id) &&
+          !removedRowIds.includes(ann.annotation_id)
+        ))
+        setBoxes(prevBoxes => prevBoxes.filter(box => !removedRowIds.includes(box.annotation_id)))
+      }
+    } catch (err) {
+      console.error(err)
+      alert(`Failed to delete model: ${err.message}`)
+    }
+  }
+
   // Training metrics modal
   const [trainingMetricsModalOpen, setTrainingMetricsModalOpen] = useState(false)
   const handleOpenTrainingMetricsModal = () => {
@@ -2508,15 +2575,6 @@ export default function CellAnnotationTool() {
                   <ScreenSearchDesktop />
                 </IconButton>
               </Tooltip>
-              <Tooltip title="Train Model" arrow>
-                <IconButton
-                  color="primary"
-                  onClick={handleOpenTrainModelModal}
-                  sx={{ p: 1.5 }}
-                >
-                  <ModelTrainingIcon />
-                </IconButton>
-              </Tooltip>
               <Modal
                 open={batchDetectModalOpen}
                 onClose={() => setBatchDetectModalOpen(false)}
@@ -2705,6 +2763,30 @@ export default function CellAnnotationTool() {
                   </Box>
                 </Box>
               </Modal>
+            </Box>
+
+            <Typography variant='body1' sx={{ pt: 1, fontWeight: 'bold' }}>
+              Manage Models
+            </Typography>
+            <Box sx={{pt: 1, mt: 2, borderTop: 1, borderColor: 'grey.500'}}>
+              <Tooltip title="Train Model" arrow>
+                <IconButton
+                  color="primary"
+                  onClick={handleOpenTrainModelModal}
+                  sx={{ p: 1.5 }}
+                >
+                  <ModelTrainingIcon />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="Manage Models" arrow>
+                <IconButton
+                  color="primary"
+                  onClick={handleOpenManageModelsModal}
+                  sx={{ p: 1.5 }}
+                >
+                  <SettingsIcon />
+                </IconButton>
+              </Tooltip>
               <Modal
                 open={trainModelModalOpen}
                 onClose={handleCloseTrainModelModal}
@@ -2853,7 +2935,7 @@ export default function CellAnnotationTool() {
                     value={trainModelLabel}
                     onChange={(e) => setTrainModelLabel(e.target.value)}
                     placeholder="finetuned"
-                    helperText={`Saved as "${(models.find(m => m.id === trainModelWeightsId)?.name) || '<model>'}_${trainModelLabel.trim() || 'finetuned'}". Overwrites a model with the same name.`}
+                    helperText={`Saved as "${(models.find(m => m.id === trainModelWeightsId)?.name) || '<model>'}_${trainModelLabel.trim() || 'finetuned'}". Overwrites a non-default model with the same name.`}
                     sx={{ mb: 2 }}
                   />
 
@@ -2882,6 +2964,97 @@ export default function CellAnnotationTool() {
                       onClick={handleTrainModel}
                     >
                       Train
+                    </Button>
+                  </Box>
+                </Box>
+              </Modal>
+              <Modal
+                open={manageModelsModalOpen}
+                onClose={handleCloseManageModelsModal}
+                sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              >
+                <Box
+                  sx={{
+                    width: '100%',
+                    maxWidth: 450,
+                    bgcolor: 'background.paper',
+                    borderRadius: 2,
+                    boxShadow: 24,
+                    p: 3,
+                    outline: 'none',
+                    maxHeight: '85vh',
+                    overflowY: 'auto',
+                  }}
+                >
+                  {/* Header */}
+                  <Box display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+                    <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
+                      Manage Models
+                    </Typography>
+                    <IconButton onClick={handleCloseManageModelsModal} size="small">
+                      <CloseIcon />
+                    </IconButton>
+                  </Box>
+
+                  <Divider sx={{ mb: 2 }} />
+
+                  {models.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                      No models available.
+                    </Typography>
+                  ) : (
+                    <Box sx={{ mb: 2 }}>
+                      {models.map((model) => {
+                        const isDefault = DEFAULT_MODEL_NAMES.includes(model.name)
+                        return (
+                          <Box
+                            key={model.id}
+                            display="flex"
+                            alignItems="center"
+                            sx={{
+                              px: 1.5,
+                              py: 1,
+                              mb: 0.5,
+                              borderRadius: 1,
+                              border: '1px solid',
+                              borderColor: 'divider',
+                            }}
+                          >
+                            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                              <Typography variant="body2" noWrap sx={{ fontWeight: 500 }}>
+                                {model.name}
+                              </Typography>
+                              {isDefault && (
+                                <Typography variant="caption" color="text.secondary">
+                                  Default model
+                                </Typography>
+                              )}
+                            </Box>
+                            <Tooltip title={isDefault ? "Default models can't be deleted" : "Delete model"} arrow>
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  color="error"
+                                  disabled={isDefault}
+                                  onClick={() => handleDeleteModel(model)}
+                                  sx={{ flexShrink: 0 }}
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                          </Box>
+                        )
+                      })}
+                    </Box>
+                  )}
+
+                  <Divider sx={{ mb: 2 }} />
+
+                  {/* Footer */}
+                  <Box display="flex" justifyContent="flex-end">
+                    <Button variant="outlined" onClick={handleCloseManageModelsModal}>
+                      Close
                     </Button>
                   </Box>
                 </Box>

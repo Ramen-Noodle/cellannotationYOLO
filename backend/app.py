@@ -1646,6 +1646,7 @@ def train_model():
     epochs = int(data.get('epochs', 20))
     label = data.get('label') or 'finetuned'
 
+    run_dir = None
     try:
         image_set = ImageSet.query.filter_by(id=image_set_id, user_id=g.user.id).first()
         weights_record = Weights.query.filter_by(id=weights_id, user_id=g.user.id).first()
@@ -1740,9 +1741,13 @@ def train_model():
 
         # 3. Register the fine-tuned checkpoint as a model named
         # "<base name>_<label>". If a model with that name already exists for
-        # this user, overwrite it in place instead of creating a duplicate.
+        # this user, overwrite it in place instead of creating a duplicate -
+        # but never a default model's weights.
         new_name = f"{weights_record.name}_{label}"
         target_weights = Weights.query.filter_by(user_id=g.user.id, name=new_name).first()
+
+        if target_weights and target_weights.is_default:
+            return jsonify({"error": f"'{new_name}' is a default model and can't be overwritten. Choose a different label."}), 400
 
         new_weights_id = target_weights.id if target_weights else str(uuid.uuid4())
         model_dir = g.user.get_path('models')
@@ -1800,7 +1805,66 @@ def train_model():
         db.session.rollback()
         print(f"Error training model: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
+    finally:
+        # The dataset built in run_dir is scratch space - only best.pt (already
+        # copied out to the model's own file) needs to survive the request.
+        if run_dir and os.path.exists(run_dir):
+            shutil.rmtree(run_dir, ignore_errors=True)
 
+
+@app.route('/delete-model', methods=['DELETE'])
+def delete_model():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+
+    data = request.get_json()
+    if not data or 'weights_id' not in data:
+        return jsonify({"error": "Missing weights_id in request body"}), 400
+
+    weights_id = data['weights_id']
+    force = bool(data.get('force', False))
+
+    try:
+        weights_record = Weights.query.filter_by(id=weights_id, user_id=g.user.id).first()
+        if not weights_record:
+            return jsonify({"error": "Model not found or unauthorized"}), 404
+
+        if weights_record.is_default:
+            return jsonify({"error": "Default models can't be deleted"}), 400
+
+        detection_settings = DetectionSetting.query.filter_by(weights_id=weights_id, user_id=g.user.id).all()
+
+        # Without `force`, just report what's in the way so the caller can
+        # confirm with the user before we cascade the delete.
+        if detection_settings and not force:
+            annotation_count = sum(len(ds.annotations) for ds in detection_settings)
+            return jsonify({
+                "error": "in_use",
+                "message": "This model is used by existing detection rows.",
+                "detection_setting_count": len(detection_settings),
+                "annotation_count": annotation_count
+            }), 409
+
+        for ds in detection_settings:
+            for ann in list(ds.annotations):
+                if ann.file_path and os.path.exists(ann.file_path):
+                    os.remove(ann.file_path)
+                db.session.delete(ann)
+            db.session.delete(ds)
+
+        file_path = weights_record.file_path
+        db.session.delete(weights_record)
+        db.session.commit()
+
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+
+        return jsonify({"success": True, "message": "Model deleted"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error deleting model {weights_id}: {e}")
+        return jsonify({"error": "Internal server error occurred during model deletion"}), 500
 
 
 # *----------* OLD Endpoints *----------* #
