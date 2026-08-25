@@ -2196,57 +2196,6 @@ export default function CellAnnotationTool() {
               </IconButton>
             </Tooltip>
 
-            <Tooltip title="Load Custom Model" arrow>
-              <IconButton 
-                color="primary"
-                onClick={handleOpenCustomUploadModal} 
-                sx={{ p: 1.5 }}
-              >
-                <DriveFolderUploadIcon />
-              </IconButton>
-            </Tooltip>
-            <Modal
-              open={customUploadModalOpen}
-              onClose={cancelCustom}
-            >
-              <Box sx={{...modal_style}}>
-                <Typography>Load Custom Model</Typography>
-                <TextField
-                  label="Model Name"
-                  variant="outlined"
-                  fullWidth
-                  value={customModelName}
-                  onChange={(e) => setCustomModelName(e.target.value)}
-                />
-                <Button variant='contained' component='label'>
-                  Select File
-                  <input hidden type='file' accept='.pt' onChange={handleChooseCustomModel} />
-                </Button>
-                <PopupState variant='popover' popupId='model-popup-menu'>
-                  {(popupState) => (
-                    <Fragment>
-                      <Button variant='contained' {...bindTrigger(popupState)} endIcon={<KeyboardArrowDownIcon />}>
-                        {customModelType || 'Select Type'}
-                      </Button>
-                      <Menu {...bindMenu(popupState)}>
-                        {modelTypes.map((item, index) => (
-                          <MenuItem 
-                            key={index}
-                            onClick={() => {setCustomModelType(item)}}
-                          >
-                              <Typography variant='body1'>{item}</Typography>
-                          </MenuItem>
-                        ))}
-                      </Menu>
-                    </Fragment>
-                  )}
-                </PopupState>
-                <Typography>Selected: {customModelFilename}</Typography>
-                <Button onClick={handleUploadCustomModel}>Confirm</Button>
-                <Button onClick={cancelCustom}>Cancel</Button>
-              </Box>
-            </Modal>
-
             <PopupState variant='popover' popupId='class-popup-menu'>
               {(popupState) => (
                 <Fragment>
@@ -2769,6 +2718,57 @@ export default function CellAnnotationTool() {
               Manage Models
             </Typography>
             <Box sx={{pt: 1, mt: 2, borderTop: 1, borderColor: 'grey.500'}}>
+              {/* Load Custom Model Icon */}
+              <Tooltip title="Load Custom Model" arrow>
+                <IconButton 
+                  color="primary"
+                  onClick={handleOpenCustomUploadModal} 
+                  sx={{ p: 1.5 }}
+                >
+                  <DriveFolderUploadIcon />
+                </IconButton>
+              </Tooltip>
+              <Modal
+                open={customUploadModalOpen}
+                onClose={cancelCustom}
+              >
+                <Box sx={{...modal_style}}>
+                  <Typography>Load Custom Model</Typography>
+                  <TextField
+                    label="Model Name"
+                    variant="outlined"
+                    fullWidth
+                    value={customModelName}
+                    onChange={(e) => setCustomModelName(e.target.value)}
+                  />
+                  <Button variant='contained' component='label'>
+                    Select File
+                    <input hidden type='file' accept='.pt' onChange={handleChooseCustomModel} />
+                  </Button>
+                  <PopupState variant='popover' popupId='model-popup-menu'>
+                    {(popupState) => (
+                      <Fragment>
+                        <Button variant='contained' {...bindTrigger(popupState)} endIcon={<KeyboardArrowDownIcon />}>
+                          {customModelType || 'Select Type'}
+                        </Button>
+                        <Menu {...bindMenu(popupState)}>
+                          {modelTypes.map((item, index) => (
+                            <MenuItem 
+                              key={index}
+                              onClick={() => {setCustomModelType(item)}}
+                            >
+                                <Typography variant='body1'>{item}</Typography>
+                            </MenuItem>
+                          ))}
+                        </Menu>
+                      </Fragment>
+                    )}
+                  </PopupState>
+                  <Typography>Selected: {customModelFilename}</Typography>
+                  <Button onClick={handleUploadCustomModel}>Confirm</Button>
+                  <Button onClick={cancelCustom}>Cancel</Button>
+                </Box>
+              </Modal>
               <Tooltip title="Train Model" arrow>
                 <IconButton
                   color="primary"
