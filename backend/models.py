@@ -55,6 +55,13 @@ class User(db.Model):
                 'labels': [
                     {'name': 'Nucleus', 'color': '#41BF37'}
                 ]
+            },
+            {
+                'weights_name': 'CD3',
+                'filepath': 'snapshots/CD3_best.pt',
+                'labels': [
+                    {'name': 'CD3', 'color': '#EAB308'}
+                ]
             }
         ]
 
