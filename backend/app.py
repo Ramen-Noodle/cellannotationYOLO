@@ -211,7 +211,7 @@ def execute_detection(image_record, model_record, threshold, cell_diameter, subl
 
     # 2. Check model type and route execution
     if "stardist" in detection_type.lower():
-        base_image_path = os.path.join('data', image_record.original_path)
+        base_image_path = os.path.join('data', image_record.normalized_path)
         abs_image_path = os.path.abspath(base_image_path)
         abs_model_path = os.path.abspath(model_path)
         print("Executing StarDist Detect (subprocess)")
@@ -2399,4 +2399,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5001, debug=True, threaded=True)
