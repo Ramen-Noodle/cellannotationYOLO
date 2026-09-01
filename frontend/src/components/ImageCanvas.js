@@ -328,15 +328,32 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
       currentBox.class = currentClass
       if (isCropping) {
         onCrop(currentBox)
-        console.log(currentBox)
         setboundaries({
           xMin: currentBox.x,
           xMax: currentBox.x + currentBox.w,
           yMin: currentBox.y,
           yMax: currentBox.y + currentBox.h
         })
-        console.log(boundaries)
         setIsNewImage(false)
+
+        // Re-center/fit the view on the cropped region so it stays on screen
+        // regardless of whatever pan/zoom state the user was in while drawing it.
+        const canvas = canvasRef.current
+        if (canvas && currentBox.w > 0 && currentBox.h > 0) {
+          const margin = 0.9
+          const fitScale = Math.min(
+            (canvas.width / currentBox.w) * margin,
+            (canvas.height / currentBox.h) * margin
+          )
+          const centerX = currentBox.x + currentBox.w / 2
+          const centerY = currentBox.y + currentBox.h / 2
+          onScaleChange(fitScale)
+          setOffset({
+            x: canvas.width / 2 - centerX * fitScale,
+            y: canvas.height / 2 - centerY * fitScale
+          })
+        }
+
         setCurrentBox(null)
         return
       }
