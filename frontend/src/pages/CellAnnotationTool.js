@@ -1326,6 +1326,7 @@ export default function CellAnnotationTool() {
           weights_id: trainModelWeightsId,
           epochs: epochs,
           label: trainModelLabel.trim() || 'finetuned',
+          num_pretrain_images: numPretrainImages,
         }),
       })
 
@@ -1400,10 +1401,12 @@ export default function CellAnnotationTool() {
   const [trainModelWeightsId, setTrainModelWeightsId] = useState('')
   const [trainModelImageSetId, setTrainModelImageSetId] = useState('')
   const [trainModelLabel, setTrainModelLabel] = useState('finetuned')
+  const [numPretrainImages, setNumPretrainImages] = useState(0)
   const handleOpenTrainModelModal = () => {
     setTrainModelWeightsId('')
     setTrainModelImageSetId('')
     setTrainModelLabel('finetuned')
+    setNumPretrainImages(0)
     setTrainModelModalOpen(true)
   }
   const handleCloseTrainModelModal = () => {
@@ -2999,6 +3002,19 @@ export default function CellAnnotationTool() {
                     onChange={(e) => setTrainModelLabel(e.target.value)}
                     placeholder="finetuned"
                     helperText={`Saved as "${(models.find(m => m.id === trainModelWeightsId)?.name) || '<model>'}_${trainModelLabel.trim() || 'finetuned'}". Overwrites a non-default model with the same name.`}
+                    sx={{ mb: 2 }}
+                  />
+
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                    Pretrain Images
+                  </Typography>
+                  <TextField
+                    size="small"
+                    type="number"
+                    fullWidth
+                    value={numPretrainImages}
+                    onChange={(e) => setNumPretrainImages(parseInt(e.target.value, 10) || 0)}
+                    helperText="Number of curated pretrain images to include from this model's pretrain set."
                     sx={{ mb: 2 }}
                   />
 
