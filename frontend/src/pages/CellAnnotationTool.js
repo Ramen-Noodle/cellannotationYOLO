@@ -112,7 +112,7 @@ export default function CellAnnotationTool() {
 
   const fileKey = (file) => `${file.name}-${file.size}-${file.lastModified}`
   // State for fine tuning
-  const [fineTuneModels] = useState(['SGN', 'MADM'])
+  const [fineTuneModels] = useState(['SGN', 'MADM', 'CD3'])
   const [currentFineTuneModel, setCurrentFineTuneModel] = useState(0)
   const [preTrainImages, setPreTrainImages] = useState(0)
   const [maxImages, setMaxImages] = useState(7)
@@ -1442,6 +1442,10 @@ export default function CellAnnotationTool() {
     }
     if (currentFineTuneModel === 1 && (preTrainImages > 278 || preTrainImages < 0)) {
       alert('MADM pre-train images must be between 0 and 278')
+      return
+    }
+    if (currentFineTuneModel === 2 && (preTrainImages > 4 || preTrainImages < 0)) {
+      alert('CD3 pre-train images must be between 0 and 4')
       return
     }
 

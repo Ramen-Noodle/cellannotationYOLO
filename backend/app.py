@@ -2130,15 +2130,18 @@ def train_saved_data():
 
 
         # --- 4. Copy optional pre-train images + labels ---
-        # Copy optional pre-train images + labels ---
-        pre_dir = 'pre_train_MADM' if model_type == 'MADM' else 'pre_train_SGN' if model_type == 'SGN' else 'pre_train_CD3'
-        labels_sub = os.path.join(pre_dir, 'yolo_labels')  # Changed from 'yolo_labels' to 'labels'
+        pre_dir = os.path.join('pretrain_images', model_type)
+        labels_sub = os.path.join(pre_dir, 'yolo_labels')
         print(f"[DEBUG] Using pre-train dir: {pre_dir}")
 
-        all_imgs = sorted([
-            f for f in os.listdir(pre_dir)
-            if f.lower().endswith(('.png','.jpg','.jpeg','.tif','.tiff'))
-        ])
+        if not os.path.isdir(pre_dir):
+            print(f"[WARNING] Pre-train dir {pre_dir} does not exist yet, skipping pre-train images")
+            all_imgs = []
+        else:
+            all_imgs = sorted([
+                f for f in os.listdir(pre_dir)
+                if f.lower().endswith(('.png','.jpg','.jpeg','.tif','.tiff'))
+            ])
         selected = all_imgs[:num_images]
         print(f"[DEBUG] Copying {len(selected)} pre-train images")
 
