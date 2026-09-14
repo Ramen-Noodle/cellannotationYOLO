@@ -9,3 +9,4 @@ backend/instance
 backend/snapshots
 backend/data
 backend/backups
+backend/pretrain_images
