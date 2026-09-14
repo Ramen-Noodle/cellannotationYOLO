@@ -47,7 +47,7 @@ const DEFAULT_MODEL_NAMES = ['MADM', 'SGN', 'StarDist']
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5002'
+  const API_BASE_URL = 'http://10.80.24.12:5001'
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('Processing...')
@@ -113,6 +113,8 @@ export default function CellAnnotationTool() {
   const [batchImageSetId, setBatchImageSetId] = useState('')
   const [batchSelectedRowIds, setBatchSelectedRowIds] = useState([])
   const [batchOverwrite, setBatchOverwrite] = useState(true)
+  const [batchDetectionSettings, setBatchDetectionSettings] = useState([])
+  const [batchDetectionSettingsLoading, setBatchDetectionSettingsLoading] = useState(false)
 
   const fileKey = (file) => `${file.name}-${file.size}-${file.lastModified}`
   // State for fine tuning
@@ -506,6 +508,54 @@ export default function CellAnnotationTool() {
     setIsCropping(false)
   }
 
+  // Converts a /load-annotations entry into a "Detection Rows" row
+  function annotationToRow(modelObj) {
+    const labels = modelObj.labels?.labels || []
+    return {
+      id: modelObj.detection_setting_id,
+      selectedModelId: modelObj.weights_id,
+      selectedClasses: labels.map(l => l.name),
+      rowThreshold: modelObj.threshold ?? 0.5,
+      rowDiameter: modelObj.cell_diameter ?? 34,
+      rowMinDiameter: modelObj.min_cell_diameter ?? 7,
+      rowMaxDiameter: modelObj.max_cell_diameter ?? 17,
+      rowSublabel: modelObj.sublabel ?? ''
+    }
+  }
+
+  // Aggregates the distinct detection settings used across every image in an
+  // image set, so batch detect can offer settings from the whole set instead
+  // of only whatever the currently active image happens to have.
+  async function fetchImageSetDetectionRows(setId) {
+    const set = imageSets.find(s => s.id === setId)
+    if (!set || !set.images || set.images.length === 0) return []
+
+    const perImageResults = await Promise.all(
+      set.images.map(async (img) => {
+        try {
+          const res = await fetch(`${API_BASE_URL}/load-annotations`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_id: img.id }),
+            credentials: 'include',
+          })
+          if (!res.ok) return []
+          const data = await res.json()
+          return data.annotations || []
+        } catch (e) {
+          console.error(`Failed to load annotations for image ${img.id}:`, e.message)
+          return []
+        }
+      })
+    )
+
+    const rowsById = new Map()
+    for (const modelObj of perImageResults.flat()) {
+      rowsById.set(modelObj.detection_setting_id, annotationToRow(modelObj))
+    }
+    return Array.from(rowsById.values())
+  }
+
   // Helper that renders annotations onto the canvas
   async function renderAnnotations(imgId) {
     try {
@@ -551,20 +601,7 @@ export default function CellAnnotationTool() {
       setBoxes(boxList)
 
       if (annoList.length > 0) {
-        const loadedRows = annoList.map((modelObj) => {
-          const annotationId = modelObj.detection_setting_id
-          const labels = modelObj.labels?.labels || []
-          return {
-            id: annotationId,
-            selectedModelId: modelObj.weights_id,
-            selectedClasses: labels.map(l => l.name),
-            rowThreshold: modelObj.threshold ?? 0.5,
-            rowDiameter: modelObj.cell_diameter ?? 34,
-            rowMinDiameter: modelObj.min_cell_diameter ?? 7,
-            rowMaxDiameter: modelObj.max_cell_diameter ?? 17,
-            rowSublabel: modelObj.sublabel ?? ''
-          }
-        })
+        const loadedRows = annoList.map(annotationToRow)
         setDetectionSettings(loadedRows)
         setSelectedRowId(loadedRows[0].id)
         setActiveRowIds(loadedRows.map(row => row.id))
@@ -1143,7 +1180,7 @@ export default function CellAnnotationTool() {
   async function handleBatchDetect() {
     if (!batchImageSetId) return alert('Please select an image set.')
 
-    const detectionRows = detectionSettings.filter(r => batchSelectedRowIds.includes(r.id))
+    const detectionRows = batchDetectionSettings.filter(r => batchSelectedRowIds.includes(r.id))
     if (detectionRows.length === 0) return alert('Please select at least one detection row.')
 
     setBatchDetectModalOpen(false)
@@ -1289,6 +1326,7 @@ export default function CellAnnotationTool() {
           weights_id: trainModelWeightsId,
           epochs: epochs,
           label: trainModelLabel.trim() || 'finetuned',
+          num_pretrain_images: numPretrainImages,
         }),
       })
 
@@ -1363,10 +1401,12 @@ export default function CellAnnotationTool() {
   const [trainModelWeightsId, setTrainModelWeightsId] = useState('')
   const [trainModelImageSetId, setTrainModelImageSetId] = useState('')
   const [trainModelLabel, setTrainModelLabel] = useState('finetuned')
+  const [numPretrainImages, setNumPretrainImages] = useState(0)
   const handleOpenTrainModelModal = () => {
     setTrainModelWeightsId('')
     setTrainModelImageSetId('')
     setTrainModelLabel('finetuned')
+    setNumPretrainImages(0)
     setTrainModelModalOpen(true)
   }
   const handleCloseTrainModelModal = () => {
@@ -1492,10 +1532,30 @@ export default function CellAnnotationTool() {
   const [clearModalOpen, setClearModalOpen] = useState(false)
   const [batchDetectModalOpen, setBatchDetectModalOpen] = useState(false)
   function handleOpenBatchDetectModal() {
+    // Seed with the sidebar's current rows (includes any unsaved drafts) so
+    // they're selectable even before an image set is chosen below.
+    setBatchDetectionSettings(detectionSettings)
     setBatchSelectedRowIds(detectionSettings.map(r => r.id))
     setBatchImageSetId('')
     setBatchOverwrite(true)
     setBatchDetectModalOpen(true)
+  }
+
+  async function handleSelectBatchImageSet(setId) {
+    setBatchImageSetId(setId)
+    setBatchDetectionSettingsLoading(true)
+    try {
+      const setRows = await fetchImageSetDetectionRows(setId)
+      // Union with the sidebar's current rows so a freshly drafted (not yet
+      // run anywhere) setting stays selectable alongside the set's existing ones.
+      const mergedById = new Map(detectionSettings.map(r => [r.id, r]))
+      for (const row of setRows) mergedById.set(row.id, row)
+      const merged = Array.from(mergedById.values())
+      setBatchDetectionSettings(merged)
+      setBatchSelectedRowIds(merged.map(r => r.id))
+    } finally {
+      setBatchDetectionSettingsLoading(false)
+    }
   }
   
   // const [images] = useState([
@@ -2554,17 +2614,80 @@ export default function CellAnnotationTool() {
 
                   <Divider sx={{ mb: 2 }} />
 
+                  {/* Image Set Picker */}
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                    Image Set
+                  </Typography>
+                  {imageSets.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                      No image sets available. Create one from the image sets menu.
+                    </Typography>
+                  ) : (
+                    <Box sx={{ mb: 3 }}>
+                      {imageSets.map((set) => {
+                        const isSelected = batchImageSetId === set.id
+                        return (
+                          <Box
+                            key={set.id}
+                            display="flex"
+                            alignItems="center"
+                            sx={{
+                              px: 1.5,
+                              py: 1,
+                              mb: 0.5,
+                              borderRadius: 1,
+                              border: '1px solid',
+                              borderColor: isSelected ? 'primary.main' : 'divider',
+                              bgcolor: isSelected ? 'primary.50' : 'transparent',
+                              cursor: 'pointer',
+                              transition: 'all 0.15s ease',
+                            }}
+                            onClick={() => handleSelectBatchImageSet(set.id)}
+                          >
+                            <Box
+                              sx={{
+                                width: 16,
+                                height: 16,
+                                borderRadius: '50%',
+                                border: '2px solid',
+                                borderColor: isSelected ? 'primary.main' : 'text.disabled',
+                                bgcolor: isSelected ? 'primary.main' : 'transparent',
+                                mr: 1.5,
+                                flexShrink: 0,
+                                transition: 'all 0.15s ease',
+                              }}
+                            />
+                            <Box sx={{ flexGrow: 1 }}>
+                              <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                                {set.name}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {set.image_count} image{set.image_count !== 1 ? 's' : ''}
+                              </Typography>
+                            </Box>
+                          </Box>
+                        )
+                      })}
+                    </Box>
+                  )}
+
                   {/* Detection Rows */}
                   <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
                     Detection Rows
                   </Typography>
-                  {detectionSettings.length === 0 ? (
+                  {batchDetectionSettingsLoading ? (
                     <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                      No detection rows configured. Add rows in the sidebar first.
+                      Loading detection settings for this image set...
+                    </Typography>
+                  ) : batchDetectionSettings.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                      {batchImageSetId
+                        ? 'No detection settings found on this image set. Add rows in the sidebar first.'
+                        : 'No detection rows configured. Add rows in the sidebar, or select an image set below.'}
                     </Typography>
                   ) : (
                     <Box sx={{ mb: 3 }}>
-                      {detectionSettings.map((row) => {
+                      {batchDetectionSettings.map((row) => {
                         const rowModel = models.find(m => m.id === row.selectedModelId)
                         const isChecked = batchSelectedRowIds.includes(row.id)
                         const isStardist = rowModel?.name?.toLowerCase().includes('stardist') ?? false
@@ -2609,63 +2732,6 @@ export default function CellAnnotationTool() {
                               <Typography variant="caption" color="text.secondary">
                                 Threshold {row.rowThreshold} · Ø {isStardist ? `${row.rowMinDiameter}-${row.rowMaxDiameter}` : row.rowDiameter}px
                                 {row.selectedClasses?.length > 0 ? ` · ${row.selectedClasses.join(', ')}` : ''}
-                              </Typography>
-                            </Box>
-                          </Box>
-                        )
-                      })}
-                    </Box>
-                  )}
-
-                  {/* Image Set Picker */}
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Image Set
-                  </Typography>
-                  {imageSets.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                      No image sets available. Create one from the image sets menu.
-                    </Typography>
-                  ) : (
-                    <Box sx={{ mb: 3 }}>
-                      {imageSets.map((set) => {
-                        const isSelected = batchImageSetId === set.id
-                        return (
-                          <Box
-                            key={set.id}
-                            display="flex"
-                            alignItems="center"
-                            sx={{
-                              px: 1.5,
-                              py: 1,
-                              mb: 0.5,
-                              borderRadius: 1,
-                              border: '1px solid',
-                              borderColor: isSelected ? 'primary.main' : 'divider',
-                              bgcolor: isSelected ? 'primary.50' : 'transparent',
-                              cursor: 'pointer',
-                              transition: 'all 0.15s ease',
-                            }}
-                            onClick={() => setBatchImageSetId(set.id)}
-                          >
-                            <Box
-                              sx={{
-                                width: 16,
-                                height: 16,
-                                borderRadius: '50%',
-                                border: '2px solid',
-                                borderColor: isSelected ? 'primary.main' : 'text.disabled',
-                                bgcolor: isSelected ? 'primary.main' : 'transparent',
-                                mr: 1.5,
-                                flexShrink: 0,
-                                transition: 'all 0.15s ease',
-                              }}
-                            />
-                            <Box sx={{ flexGrow: 1 }}>
-                              <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                                {set.name}
-                              </Typography>
-                              <Typography variant="caption" color="text.secondary">
-                                {set.image_count} image{set.image_count !== 1 ? 's' : ''}
                               </Typography>
                             </Box>
                           </Box>
@@ -2936,6 +3002,19 @@ export default function CellAnnotationTool() {
                     onChange={(e) => setTrainModelLabel(e.target.value)}
                     placeholder="finetuned"
                     helperText={`Saved as "${(models.find(m => m.id === trainModelWeightsId)?.name) || '<model>'}_${trainModelLabel.trim() || 'finetuned'}". Overwrites a non-default model with the same name.`}
+                    sx={{ mb: 2 }}
+                  />
+
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                    Pretrain Images
+                  </Typography>
+                  <TextField
+                    size="small"
+                    type="number"
+                    fullWidth
+                    value={numPretrainImages}
+                    onChange={(e) => setNumPretrainImages(parseInt(e.target.value, 10) || 0)}
+                    helperText="Number of curated pretrain images to include from this model's pretrain set."
                     sx={{ mb: 2 }}
                   />
 

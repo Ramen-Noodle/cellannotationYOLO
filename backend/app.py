@@ -211,7 +211,7 @@ def execute_detection(image_record, model_record, threshold, cell_diameter, subl
 
     # 2. Check model type and route execution
     if "stardist" in detection_type.lower():
-        base_image_path = os.path.join('data', image_record.original_path)
+        base_image_path = os.path.join('data', image_record.normalized_path)
         abs_image_path = os.path.abspath(base_image_path)
         abs_model_path = os.path.abspath(model_path)
         print("Executing StarDist Detect (subprocess)")
@@ -1645,6 +1645,7 @@ def train_model():
     weights_id = data['weights_id']
     epochs = int(data.get('epochs', 20))
     label = data.get('label') or 'finetuned'
+    num_pretrain_images = int(data.get('num_pretrain_images', 0) or 0)
 
     run_dir = None
     try:
@@ -1653,6 +1654,29 @@ def train_model():
 
         if not image_set or not weights_record:
             return jsonify({"error": "ImageSet or Weights not found or unauthorized"}), 404
+
+        # Curated pretrain images bundled with the app (backend/pretrain_images/<SGN|MADM|CD3>).
+        # Matched by prefix so fine-tuned derivatives (e.g. "CD3_finetuned") still find their folder.
+        pretrain_model_name = next(
+            (name for name in ('SGN', 'MADM', 'CD3') if (weights_record.name or '').startswith(name)),
+            None
+        )
+        
+        pretrain_dir = os.path.join('pretrain_images', pretrain_model_name) if pretrain_model_name else None
+        pretrain_labels_dir = os.path.join(pretrain_dir, 'yolo_labels') if pretrain_dir else None
+        available_pretrain_images = []
+        print(pretrain_dir)
+        if pretrain_dir and os.path.isdir(pretrain_dir):
+            available_pretrain_images = sorted([
+                f for f in os.listdir(pretrain_dir)
+                if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff'))
+                and os.path.exists(os.path.join(pretrain_labels_dir, os.path.splitext(f)[0] + '.txt'))
+            ])
+
+        if num_pretrain_images > len(available_pretrain_images):
+            return jsonify({
+                "error": f"Only {len(available_pretrain_images)} pretrain images available for {pretrain_model_name or weights_record.name}, requested {num_pretrain_images}"
+            }), 400
 
         image_ids = [img.id for img in image_set.images]
 
@@ -1675,7 +1699,7 @@ def train_model():
             annotations_by_image.setdefault(ann.image_id, []).append(ann)
 
         image_records = [img for img in image_set.images if img.id in annotations_by_image]
-        if not image_records:
+        if not image_records and num_pretrain_images == 0:
             return jsonify({"error": "No annotations found for this model in this image set"}), 400
 
         # 1. Build the YOLO dataset layout in a scratch directory for this run
@@ -1712,7 +1736,22 @@ def train_model():
             with open(os.path.join(lbl_dir, f"{image_record.id}.txt"), 'w') as f:
                 f.write("\n".join(combined_yolo_lines))
 
+        # 1b. Merge in the requested number of curated pretrain images
         class_names = [label['name'] for label in weights_record.label_set.labels]
+        single_class = len(class_names) == 1
+        for fname in available_pretrain_images[:num_pretrain_images]:
+            base = os.path.splitext(fname)[0]
+            normalize_image(os.path.join(pretrain_dir, fname), os.path.join(img_dir, f"pretrain_{base}.png"))
+
+            with open(os.path.join(pretrain_labels_dir, f"{base}.txt")) as f:
+                label_lines = [line for line in f.read().splitlines() if line.strip()]
+            if single_class:
+                # Curated labels may carry a legacy multi-class index; this
+                # model's label set only has one class, so pin it to index 0.
+                label_lines = ["0 " + line.split(maxsplit=1)[1] for line in label_lines]
+            with open(os.path.join(lbl_dir, f"pretrain_{base}.txt"), 'w') as f:
+                f.write("\n".join(label_lines))
+
         yaml_path = os.path.join(run_dir, 'dataset.yaml')
         with open(yaml_path, 'w') as f:
             yaml.dump({
@@ -1771,8 +1810,9 @@ def train_model():
         db.session.commit()
 
         # 4. Optional 5-fold cross-validation for a quality readout
+        total_images = len(image_records) + num_pretrain_images
         kfold_text = ""
-        if len(image_records) >= 5:
+        if total_images >= 5:
             kfold_dir = os.path.join(snapshot_dir, run_id, 'kfold')
             os.makedirs(kfold_dir, exist_ok=True)
             kfold_cmd = [
@@ -1795,7 +1835,7 @@ def train_model():
         return jsonify({
             "message": "Model fine-tuned successfully",
             "weights": new_weights.to_dict(),
-            "total_images": len(image_records),
+            "total_images": total_images,
             "kfold_results": kfold_text
         }), 200
 
@@ -2041,4 +2081,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5001, debug=True, threaded=True)
