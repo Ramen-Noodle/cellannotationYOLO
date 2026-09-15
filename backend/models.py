@@ -2,6 +2,7 @@ from database import db
 import datetime
 import os
 import uuid
+from sqlalchemy import event
 
 class User(db.Model):
     id = db.Column(db.String(36), primary_key=True)
@@ -100,25 +101,64 @@ class User(db.Model):
 class ImageRecord(db.Model):
     id = db.Column(db.String(36), primary_key=True)
     user_id = db.Column(db.String(36), db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
-    original_filename = db.Column(db.String(255))
-    original_extension = db.Column(db.String(16))
-    
-    # Paths to the physical files
-    original_path = db.Column(db.String(512)) # Original image
-    normalized_path = db.Column(db.String(512)) # Normalized PNG
-    # cropped_path = db.Column(db.String(512))
-    
+
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
+    # Shared pixel-space dimensions every channel must be aligned to.
     width = db.Column(db.Integer)
     height = db.Column(db.Integer)
-    # crop_width = db.Column(db.Integer)
-    # crop_height = db.Column(db.Integer)
+
+    channels = db.relationship(
+        'Channel', cascade='all, delete-orphan', order_by='Channel.order_index', backref='image_record'
+    )
+
+    @property
+    def base_channel(self):
+        return next((c for c in self.channels if c.is_base), None) or (self.channels[0] if self.channels else None)
+
+
+class Channel(db.Model):
+    id = db.Column(db.String(36), primary_key=True)
+    image_id = db.Column(db.String(36), db.ForeignKey('image_record.id', ondelete='CASCADE'), nullable=False)
+
+    name = db.Column(db.String(255))
+    order_index = db.Column(db.Integer, default=0)
+    is_base = db.Column(db.Boolean, default=False)
+
+    original_extension = db.Column(db.String(16))
+    # Paths to the physical files
+    original_path = db.Column(db.String(512))   # Original uploaded image
+    normalized_path = db.Column(db.String(512))  # Normalized PNG for display/detection
 
     p_low = db.Column(db.Integer)
     p_high = db.Column(db.Integer)
 
-    annotations = db.relationship('Annotation', cascade='all, delete-orphan', backref='image_record')
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+    annotations = db.relationship('Annotation', cascade='all, delete-orphan', backref='channel')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'image_id': self.image_id,
+            'name': self.name,
+            'order_index': self.order_index,
+            'is_base': self.is_base,
+            'url': f"/static/{self.normalized_path}",
+            'p_low': self.p_low,
+            'p_high': self.p_high,
+        }
+
+
+@event.listens_for(Channel, 'after_delete')
+def delete_channel_files(mapper, connection, target):
+    """Cleans up a channel's physical image files when its row is deleted."""
+    for rel_path in (target.original_path, target.normalized_path):
+        if not rel_path:
+            continue
+        abs_path = os.path.join('data', rel_path)
+        if os.path.exists(abs_path):
+            os.remove(abs_path)
 
 
 
@@ -139,7 +179,7 @@ class DetectionSetting(db.Model):
 
 class Annotation(db.Model):
     __table_args__ = (
-        db.UniqueConstraint('image_id', 'detection_setting_id', name='uq_annotation_image_detection_setting'),
+        db.UniqueConstraint('channel_id', 'detection_setting_id', name='uq_annotation_channel_detection_setting'),
     )
 
     id = db.Column(db.String(36), primary_key=True)
@@ -148,7 +188,7 @@ class Annotation(db.Model):
     file_path = db.Column(db.String(512))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
-    image_id = db.Column(db.String(36), db.ForeignKey('image_record.id', ondelete='CASCADE'))
+    channel_id = db.Column(db.String(36), db.ForeignKey('channel.id', ondelete='CASCADE'), nullable=False)
     detection_setting_id = db.Column(db.String(36), db.ForeignKey('detection_setting.id'), nullable=False)
 
     annotations_detected = db.Column(db.JSON, nullable=False, default=list)
@@ -225,18 +265,16 @@ class ImageSet(db.Model):
             'images': [
                 {
                     'id': img.id,
-                    'url': f"/static/{img.normalized_path}",
-                    'name': f'{img.original_filename}{img.original_extension}',
+                    'url': f"/static/{img.base_channel.normalized_path}" if img.base_channel else None,
+                    'name': f'{img.base_channel.name}{img.base_channel.original_extension}' if img.base_channel else img.id,
                     'dimensions': [img.width, img.height],
-                    'p_low': img.p_low,
-                    'p_high': img.p_high
+                    'p_low': img.base_channel.p_low if img.base_channel else None,
+                    'p_high': img.base_channel.p_high if img.base_channel else None
                 }
                 for img in self.images
             ]
         }
 
-
-from sqlalchemy import event
 
 @event.listens_for(ImageSet, 'after_insert')
 def create_imageset_directory(mapper, connection, target):
