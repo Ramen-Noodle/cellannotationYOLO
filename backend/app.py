@@ -49,7 +49,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # Session expires after 24 hours
 
 from database import db
-from models import User, ImageRecord, ImageSet, Annotation, LabelSet, Weights, DetectionSetting
+from models import User, ImageRecord, Channel, ImageSet, Annotation, LabelSet, Weights, DetectionSetting
 from flask_migrate import Migrate
 
 db.init_app(app)
@@ -166,7 +166,7 @@ def resolve_detection_setting(user_id, weights_id, params, detection_setting_id=
     return setting, False
 
 
-def resolve_annotation_record(user_id, image_id, weights_id, params, detection_setting_id):
+def resolve_annotation_record(user_id, channel_id, weights_id, params, detection_setting_id):
     """
     Finds or creates the Annotation record that a detect call should write
     its results to, given a row's detection_setting_id plus the settings to
@@ -176,12 +176,12 @@ def resolve_annotation_record(user_id, image_id, weights_id, params, detection_s
         setting, _ = resolve_detection_setting(user_id, weights_id, params, detection_setting_id)
 
         annotation = Annotation.query.filter_by(
-            user_id=user_id, image_id=image_id, detection_setting_id=setting.id
+            user_id=user_id, channel_id=channel_id, detection_setting_id=setting.id
         ).first()
 
         if not annotation:
             annotation = Annotation(
-                id=str(uuid.uuid4()), user_id=user_id, image_id=image_id, detection_setting_id=setting.id
+                id=str(uuid.uuid4()), user_id=user_id, channel_id=channel_id, detection_setting_id=setting.id
             )
             db.session.add(annotation)
             db.session.flush()
@@ -192,12 +192,15 @@ def resolve_annotation_record(user_id, image_id, weights_id, params, detection_s
         raise
 
 
-def execute_detection(image_record, model_record, threshold, cell_diameter, sublabel, selected_classes=None,
+def execute_detection(channel, model_record, threshold, cell_diameter, sublabel, selected_classes=None,
                        min_cell_diameter=None, max_cell_diameter=None):
     """
     Shared pipeline that handles preprocessing, model routing (StarDist vs. SAHI),
-    and coordinate space translation from YOLO to UI-pixels.
+    and coordinate space translation from YOLO to UI-pixels. Runs against a single
+    Channel's normalized image - the image it belongs to may have others.
     """
+    image_record = channel.image_record
+
     # 1. Filter class indices
     allowed_class_indices = None
     if selected_classes is not None:
@@ -211,7 +214,7 @@ def execute_detection(image_record, model_record, threshold, cell_diameter, subl
 
     # 2. Check model type and route execution
     if "stardist" in detection_type.lower():
-        base_image_path = os.path.join('data', image_record.normalized_path)
+        base_image_path = os.path.join('data', channel.normalized_path)
         abs_image_path = os.path.abspath(base_image_path)
         abs_model_path = os.path.abspath(model_path)
         print("Executing StarDist Detect (subprocess)")
@@ -227,7 +230,7 @@ def execute_detection(image_record, model_record, threshold, cell_diameter, subl
         print(f'[DEBUG] yolo_output repr (first 300 chars): {repr(yolo_output[:300])}')
     else:
         # Default SAHI / Standard Object Detection Path
-        base_image_path = os.path.join('data', image_record.normalized_path)
+        base_image_path = os.path.join('data', channel.normalized_path)
         abs_image_path = os.path.abspath(base_image_path)
         prep_data = preprocess_image(
             orig_w=image_record.width,
@@ -520,26 +523,35 @@ def upload_file():
         normalized_save_path = os.path.join('data', normalized_path)
         p_low, p_high = normalize_image(original_save_path, normalized_save_path)
 
-        # 4. Create the Database Record
+        # 4. Create the Database Records - an ImageRecord owning one base Channel
         new_image_record = ImageRecord(
             id=unique_id,
             user_id=g.user.id,
-            original_filename=original_name,
+            width=w,
+            height=h,
+        )
+        db.session.add(new_image_record)
+
+        channel_id = str(uuid.uuid4())
+        base_channel = Channel(
+            id=channel_id,
+            image_id=unique_id,
+            name=original_name,
+            order_index=0,
+            is_base=True,
             original_extension=ext,
             original_path=original_path,
             normalized_path=normalized_path,
-            width=w,
-            height=h,
             p_low=int(p_low) if p_low is not None else None,
             p_high=int(p_high) if p_high is not None else None
         )
-        
-        db.session.add(new_image_record)
+        db.session.add(base_channel)
         db.session.commit()
 
         # 5. Respond to React
         return jsonify({
             'image_id': unique_id,
+            'channel_id': channel_id,
             'converted_url': f'/static/{normalized_path}',
             'dimensions': [w, h],
             'p_low': p_low,
@@ -640,7 +652,7 @@ def save_annotations():
         return jsonify({"error": "No active session"}), 401
     try:
         data = request.get_json()
-        image_id = data['image_id']
+        default_channel_id = data.get('channel_id')
         annotation_groups = data['annotations']
         annotation_dir = g.user.get_path('annotations')
 
@@ -649,6 +661,7 @@ def save_annotations():
         for group in annotation_groups:
             client_id = group.get('detection_setting_id')
             weights_id = group['weights_id']
+            channel_id = group.get('channel_id', default_channel_id)
             annotations_detected = group.get('annotations_detected', [])
             annotations_drawn = group.get('annotations_drawn', [])
 
@@ -667,7 +680,7 @@ def save_annotations():
             # Frontend rows are keyed by detection_setting_id, so the id_map
             # (used to reconcile client temp ids) maps onto the resolved
             # DetectionSetting id rather than the Annotation id.
-            target = resolve_annotation_record(g.user.id, image_id, weights_id, params, client_id)
+            target = resolve_annotation_record(g.user.id, channel_id, weights_id, params, client_id)
 
             target.annotations_detected = list(annotations_detected)
             target.count_detected = len(annotations_detected)
@@ -776,10 +789,15 @@ def _parse_annotation_file(file_path):
 
 
 def merge_annotations(image_id, user_id, include_confidence=False):
-    """Merges all Annotation records for a single image into one set of class-name YOLO label lines."""
-    annotation_records = db.session.query(Annotation).filter_by(
-        image_id=image_id,
-        user_id=user_id
+    """Merges all Annotation records across every channel of an image into one set of class-name YOLO label lines."""
+    channels = Channel.query.filter_by(image_id=image_id).all()
+    channel_ids = [c.id for c in channels]
+    if not channel_ids:
+        return None
+
+    annotation_records = db.session.query(Annotation).filter(
+        Annotation.channel_id.in_(channel_ids),
+        Annotation.user_id == user_id
     ).all()
 
     if not annotation_records:
@@ -809,14 +827,20 @@ def merge_annotations(image_id, user_id, include_confidence=False):
 
 def split_annotations_by_setting(image_id, user_id, include_confidence=False):
     """
-    Builds one class-number YOLO file per detection setting run on this image.
-    Raw class indices only mean something within a single model's label set, so
-    (unlike merge_annotations) these can't be combined across detection settings.
+    Builds one class-number YOLO file per (channel, detection setting) run on this
+    image. Raw class indices only mean something within a single model's label set,
+    so (unlike merge_annotations) these can't be combined across detection settings.
     Returns a list of (filename_suffix, lines) tuples.
     """
-    annotation_records = db.session.query(Annotation).filter_by(
-        image_id=image_id,
-        user_id=user_id
+    channels = Channel.query.filter_by(image_id=image_id).all()
+    channel_by_id = {c.id: c for c in channels}
+    multi_channel = len(channels) > 1
+    if not channel_by_id:
+        return []
+
+    annotation_records = db.session.query(Annotation).filter(
+        Annotation.channel_id.in_(list(channel_by_id.keys())),
+        Annotation.user_id == user_id
     ).all()
 
     files = []
@@ -829,6 +853,13 @@ def split_annotations_by_setting(image_id, user_id, include_confidence=False):
         model_name = model.name if model else 'model'
         sublabel = record.detection_setting.params.get('sublabel') if record.detection_setting else None
         suffix = f"{model_name}_{sublabel}" if sublabel else model_name
+
+        # Disambiguate by channel name when an image has more than one channel,
+        # since two channels could otherwise run the same model/sublabel combo.
+        if multi_channel:
+            channel = channel_by_id.get(record.channel_id)
+            if channel and channel.name:
+                suffix = f"{channel.name}_{suffix}"
 
         lines = []
         for class_idx, coords, confidence in rows:
@@ -871,7 +902,7 @@ def export_annotations():
             exported_any = False
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for image_record in image_set.images:
-                    base_name = image_record.original_filename if image_record.original_filename else image_record.id
+                    base_name = image_record.base_channel.name if image_record.base_channel and image_record.base_channel.name else image_record.id
 
                     if label_format == 'number':
                         for suffix, lines in split_annotations_by_setting(image_record.id, g.user.id, include_confidence):
@@ -898,7 +929,11 @@ def export_annotations():
             )
 
         image_record = db.session.get(ImageRecord, image_id)
-        base_name = image_record.original_filename if image_record and image_record.original_filename else image_id
+        base_name = (
+            image_record.base_channel.name
+            if image_record and image_record.base_channel and image_record.base_channel.name
+            else image_id
+        )
 
         if label_format == 'number':
             files = [(suffix, lines) for suffix, lines in split_annotations_by_setting(image_id, g.user.id, include_confidence) if lines]
@@ -939,7 +974,7 @@ def export_annotations():
 
 @app.route('/upload-cropped', methods=['POST'])
 def upload_cropped_file():
-    temp_crop_path = None
+    temp_crop_paths = []
     try:
         # Get crop coordinates and original filename
         image_id = request.form['image_id']
@@ -952,59 +987,228 @@ def upload_cropped_file():
         if not image_record:
             return jsonify({'error': 'Image record not found'}), 404
 
-        original_path = os.path.join('data', image_record.original_path)
-        temp_crop_path = os.path.join(os.path.dirname(original_path), f"temp_{image_id}.tiff")
+        # A crop is a region of the whole image, so every channel's original
+        # file gets masked identically to stay pixel-aligned with the others.
+        channel_results = []
+        for channel in image_record.channels:
+            original_path = os.path.join('data', channel.original_path)
+            temp_crop_path = os.path.join(os.path.dirname(original_path), f"temp_{channel.id}.tiff")
+            temp_crop_paths.append(temp_crop_path)
 
-        # Load original image, crop, and overwrite
-        img = tifffile.imread(original_path)
-        padded_img = np.zeros_like(img)
-        padded_img[y:y+height, x:x+width] = img[y:y+height, x:x+width]
-        tifffile.imwrite(temp_crop_path, padded_img)
+            img = tifffile.imread(original_path)
+            padded_img = np.zeros_like(img)
+            padded_img[y:y+height, x:x+width] = img[y:y+height, x:x+width]
+            tifffile.imwrite(temp_crop_path, padded_img)
 
-        # Create and normalize png conversion of cropped image
-        output_path = os.path.join('data', image_record.normalized_path)
-        p_low = image_record.p_low
-        p_high = image_record.p_high
-        normalize_image(temp_crop_path, output_path, p_low=p_low, p_high=p_high)
+            output_path = os.path.join('data', channel.normalized_path)
+            normalize_image(temp_crop_path, output_path, p_low=channel.p_low, p_high=channel.p_high)
 
-        existing_annotations = Annotation.query.filter_by(image_id=image_id).all()
+            channel_results.append({
+                'channel_id': channel.id,
+                'converted_url': f'/static/{channel.normalized_path}',
+            })
 
-        for annotation in existing_annotations:
-            filtered = [
-                ann for ann in annotation.annotations
-                if (x <= ann['x'] <= x + width and
-                    y <= ann['y'] <= y + height)
-            ]
+            existing_annotations = Annotation.query.filter_by(channel_id=channel.id).all()
+            for annotation in existing_annotations:
+                def keep_in_crop(ann):
+                    return x <= ann['x'] <= x + width and y <= ann['y'] <= y + height
 
-            annotation.annotations = filtered
-            annotation.count = len(filtered)
-            flag_modified(annotation, "annotations")
+                filtered_detected = [a for a in (annotation.annotations_detected or []) if keep_in_crop(a)]
+                filtered_drawn = [a for a in (annotation.annotations_drawn or []) if keep_in_crop(a)]
 
-            # Overwrite physical annotation file
-            yolo_lines = []
-            for ann in filtered:
-                yolo_lines.append("{0} {1:.6f} {2:.6f} {3:.6f} {4:.6f}".format(
-                    ann['class'], ann['x'], ann['y'], ann['w'], ann['h']
-                ))
-            with open(annotation.file_path, 'w') as f:
-                f.write("\n".join(yolo_lines))
-        
+                annotation.annotations_detected = filtered_detected
+                annotation.count_detected = len(filtered_detected)
+                annotation.annotations_drawn = filtered_drawn
+                annotation.count_drawn = len(filtered_drawn)
+                flag_modified(annotation, "annotations_detected")
+                flag_modified(annotation, "annotations_drawn")
+
+                if annotation.file_path:
+                    yolo_lines = []
+                    for ann in filtered_detected + filtered_drawn:
+                        yolo_lines.append("{0} {1:.6f} {2:.6f} {3:.6f} {4:.6f}".format(
+                            ann['class'], ann['x'], ann['y'], ann['w'], ann['h']
+                        ))
+                    with open(annotation.file_path, 'w') as f:
+                        f.write("\n".join(yolo_lines))
+
         db.session.commit()
 
+        base_channel = image_record.base_channel
         return jsonify({
-            'converted_url': f'/static/{image_record.normalized_path}',
-            'original_name': image_record.original_filename
+            'converted_url': f'/static/{base_channel.normalized_path}' if base_channel else None,
+            'original_name': base_channel.name if base_channel else None,
+            'channels': channel_results,
         })
 
     except Exception as e:
         db.session.rollback()
         print(f"Error in upload-cropped: {str(e)}")
         return jsonify({'error': f"Server error: {str(e)}"}), 500
-    
-    finally:
-        if temp_crop_path and os.path.exists(temp_crop_path):
-            os.remove(temp_crop_path)
 
+    finally:
+        for temp_crop_path in temp_crop_paths:
+            if temp_crop_path and os.path.exists(temp_crop_path):
+                os.remove(temp_crop_path)
+
+
+# *----------* Channel Endpoints *----------* #
+
+@app.route('/add-channel', methods=['POST'])
+def add_channel():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+
+    if 'file' not in request.files or 'image_id' not in request.form:
+        return jsonify({'error': 'Missing file or image_id'}), 400
+
+    image_id = request.form['image_id']
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+
+    try:
+        image_record = ImageRecord.query.filter_by(id=image_id, user_id=g.user.id).first()
+        if not image_record:
+            return jsonify({'error': 'Image record not found or unauthorized'}), 404
+
+        image_dir = g.user.get_path('images')
+        full_filename = file.filename
+        original_name = os.path.splitext(full_filename)[0]
+        ext = os.path.splitext(full_filename)[1].lower()
+        unique_id = str(uuid.uuid4())
+
+        original_filename = f"{unique_id}_orig{ext}"
+        original_path = os.path.join(image_dir, 'original', original_filename)
+        original_save_path = os.path.join('data', original_path)
+        file.save(original_save_path)
+
+        with Image.open(original_save_path) as img:
+            w, h = img.size
+
+        if (w, h) != (image_record.width, image_record.height):
+            os.remove(original_save_path)
+            return jsonify({
+                'error': f'Channel dimensions {w}x{h} do not match image dimensions '
+                         f'{image_record.width}x{image_record.height}'
+            }), 400
+
+        normalized_filename = f"{unique_id}_norm.png"
+        normalized_path = os.path.join(image_dir, 'normalized', normalized_filename)
+        normalized_save_path = os.path.join('data', normalized_path)
+        p_low, p_high = normalize_image(original_save_path, normalized_save_path)
+
+        existing_channels = image_record.channels
+        new_channel = Channel(
+            id=unique_id,
+            image_id=image_id,
+            name=original_name,
+            order_index=(max((c.order_index or 0) for c in existing_channels) + 1) if existing_channels else 0,
+            is_base=False,
+            original_extension=ext,
+            original_path=original_path,
+            normalized_path=normalized_path,
+            p_low=int(p_low) if p_low is not None else None,
+            p_high=int(p_high) if p_high is not None else None
+        )
+        db.session.add(new_channel)
+        db.session.commit()
+
+        return jsonify(new_channel.to_dict())
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/load-channels', methods=['POST'])
+def load_channels():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+
+    data = request.get_json()
+    if not data or 'image_id' not in data:
+        return jsonify({"error": "Missing image_id in request body"}), 400
+
+    image_record = ImageRecord.query.filter_by(id=data['image_id'], user_id=g.user.id).first()
+    if not image_record:
+        return jsonify({"error": "Image record not found or unauthorized"}), 404
+
+    return jsonify([c.to_dict() for c in image_record.channels])
+
+
+@app.route('/update-channel', methods=['POST'])
+def update_channel():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+
+    data = request.get_json()
+    if not data or 'channel_id' not in data:
+        return jsonify({"error": "Missing channel_id in request body"}), 400
+
+    try:
+        channel = Channel.query.join(ImageRecord).filter(
+            Channel.id == data['channel_id'], ImageRecord.user_id == g.user.id
+        ).first()
+        if not channel:
+            return jsonify({"error": "Channel not found or unauthorized"}), 404
+
+        if 'name' in data:
+            channel.name = data['name']
+
+        db.session.commit()
+        return jsonify(channel.to_dict())
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/delete-channel', methods=['DELETE'])
+def delete_channel():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+
+    data = request.get_json()
+    if not data or 'channel_id' not in data:
+        return jsonify({"error": "Missing channel_id in request body"}), 400
+
+    try:
+        channel = Channel.query.join(ImageRecord).filter(
+            Channel.id == data['channel_id'], ImageRecord.user_id == g.user.id
+        ).first()
+        if not channel:
+            return jsonify({"error": "Channel not found or unauthorized"}), 404
+
+        image_record = channel.image_record
+        if len(image_record.channels) <= 1:
+            return jsonify({
+                "error": "Cannot delete an image's only channel - delete the image instead."
+            }), 400
+
+        # Promote another channel to base before this one goes away, so the
+        # image always has a base channel for thumbnails/exports.
+        if channel.is_base:
+            successor = min(
+                (c for c in image_record.channels if c.id != channel.id),
+                key=lambda c: c.order_index or 0
+            )
+            successor.is_base = True
+
+        annotation_paths = [ann.file_path for ann in channel.annotations if ann.file_path]
+
+        db.session.delete(channel)
+        db.session.commit()
+
+        for ann_path in annotation_paths:
+            if os.path.exists(ann_path):
+                os.remove(ann_path)
+
+        return jsonify({"success": True, "message": "Channel deleted"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 
 
 # *----------* Data Retrieval Endpoints *----------* #
@@ -1019,12 +1223,12 @@ def get_user_images():
     image_list = [
         {
             'id': img.id,
-            'url': f"/static/{img.normalized_path}",
-            'name': f'{img.original_filename}{img.original_extension}',
+            'url': f"/static/{img.base_channel.normalized_path}" if img.base_channel else None,
+            'name': f'{img.base_channel.name}{img.base_channel.original_extension}' if img.base_channel else img.id,
             'dimensions': [img.width, img.height],
-            'p_low': img.p_low,
-            'p_high': img.p_high
-        } 
+            'p_low': img.base_channel.p_low if img.base_channel else None,
+            'p_high': img.base_channel.p_high if img.base_channel else None
+        }
         for img in images
     ]
 
@@ -1070,10 +1274,11 @@ def load_annotations():
         return jsonify({"error": "Missing image_id in request body"}), 400
 
     image_id = data['image_id']
-    annotations = Annotation.query.filter_by(
-        user_id=g.user.id, 
-        image_id=image_id
-    ).all()
+    channel_ids = [c.id for c in Channel.query.filter_by(image_id=image_id).all()]
+    annotations = Annotation.query.filter(
+        Annotation.user_id == g.user.id,
+        Annotation.channel_id.in_(channel_ids)
+    ).all() if channel_ids else []
 
     results = []
     for ann in annotations:
@@ -1085,6 +1290,7 @@ def load_annotations():
         params = setting.params or {}
         results.append({
             "id": ann.id,
+            "channel_id": ann.channel_id,
             "detection_setting_id": setting.id,
             "weights_id": setting.weights_id,
             "threshold": params.get("threshold"),
@@ -1121,23 +1327,21 @@ def delete_image():
         image = ImageRecord.query.filter_by(id=image_id, user_id=g.user.id).first()
         if not image:
             return jsonify({"error": "Image not found or unauthorized"}), 404
-        
-        # Set paths for cleanup
-        original_path = os.path.join('data', image.original_path)
-        norm_path = os.path.join('data', image.normalized_path)
-        annotation_paths = [ann.file_path for ann in image.annotations if ann.file_path]
-        
+
+        # Annotation .txt files aren't cleaned up by any ORM hook, so gather
+        # their paths up front. Each channel's own image files are removed by
+        # the Channel 'after_delete' hook as the cascade delete runs below.
+        annotation_paths = [
+            ann.file_path
+            for channel in image.channels
+            for ann in channel.annotations
+            if ann.file_path
+        ]
+
         # Update database
         db.session.delete(image)
         db.session.commit()
 
-        # Execute cleanup
-        if os.path.exists(original_path):
-            os.remove(original_path)
-
-        if os.path.exists(norm_path):
-            os.remove(norm_path)
-        
         for ann_path in annotation_paths:
             if os.path.exists(ann_path):
                 os.remove(ann_path)
@@ -1159,18 +1363,18 @@ def delete_annotations():
         return jsonify({"error": "No active session"}), 401
 
     data = request.get_json()
-    if not data or 'image_id' not in data or 'detection_setting_id' not in data:
-        return jsonify({"error": "Missing image_id or detection_setting_id in request body"}), 400
+    if not data or 'channel_id' not in data or 'detection_setting_id' not in data:
+        return jsonify({"error": "Missing channel_id or detection_setting_id in request body"}), 400
 
-    image_id = data['image_id']
+    channel_id = data['channel_id']
     detection_setting_id = data['detection_setting_id']
 
     try:
-        # Exactly one annotation should match this (image, detection_setting) pair
-        # per the uq_annotation_image_detection_setting constraint on Annotation.
+        # Exactly one annotation should match this (channel, detection_setting) pair
+        # per the uq_annotation_channel_detection_setting constraint on Annotation.
         annotation = Annotation.query.filter_by(
             user_id=g.user.id,
-            image_id=image_id,
+            channel_id=channel_id,
             detection_setting_id=detection_setting_id
         ).first()
 
@@ -1192,7 +1396,7 @@ def delete_annotations():
 
     except Exception as e:
         db.session.rollback()
-        print(f"CRITICAL: Failed to delete annotation for image {image_id}: {e}")
+        print(f"CRITICAL: Failed to delete annotation for channel {channel_id}: {e}")
         return jsonify({"error": "Internal server error occurred during annotation deletion"}), 500
 
 
@@ -1200,23 +1404,24 @@ def delete_annotations():
 def clear_annotations():
     if not g.user:
         return jsonify({"error": "No active session"}), 401
-    
+
     data = request.get_json()
     if not data or 'image_id' not in data or 'annotation_ids' not in data:
         return jsonify({"error": "Missing image_id or annotation_ids in request body"}), 400
 
 
     image_id = data['image_id']
-    clear_all = data['annotation_ids']
+    annotation_ids = data['annotation_ids']
 
     if not isinstance(annotation_ids, list):
         return jsonify({"error": "annotation_ids must be a list"}), 400
-    
+
     try:
-        # Filter the target annotations belonging *only* to this image and matching the requested IDs
-        target_annotations = Annotation.query.join(ImageRecord).filter(
+        # Filter the target annotations belonging *only* to this image (across
+        # all of its channels) and matching the requested IDs
+        target_annotations = Annotation.query.join(Channel).join(ImageRecord).filter(
             Annotation.id.in_(annotation_ids),
-            Annotation.image_id == image_id,
+            Channel.image_id == image_id,
             ImageRecord.user_id == g.user.id
         ).all()
         
@@ -1393,10 +1598,10 @@ def detect():
         return jsonify({"error": "No active session"}), 401
 
     data = request.get_json()
-    if not data or 'image_id' not in data or 'model_id' not in data:
-        return jsonify({"error": "Missing image_id or model_id in request body"}), 400
+    if not data or 'channel_id' not in data or 'model_id' not in data:
+        return jsonify({"error": "Missing channel_id or model_id in request body"}), 400
 
-    image_id = data['image_id']
+    channel_id = data['channel_id']
     model_id = data['model_id']
     detection_setting_id = data.get('detection_setting_id')
     threshold = float(data.get('threshold', 0.5))
@@ -1407,14 +1612,16 @@ def detect():
     selected_classes = data.get('selected_classes', None)
 
     try:
-        image_record = ImageRecord.query.filter_by(id=image_id, user_id=g.user.id).first()
+        channel = Channel.query.join(ImageRecord).filter(
+            Channel.id == channel_id, ImageRecord.user_id == g.user.id
+        ).first()
         model_record = Weights.query.filter_by(id=model_id, user_id=g.user.id).first()
 
-        if not image_record or not model_record:
+        if not channel or not model_record:
             return jsonify({"error": "Data records not found or unauthorized"}), 404
 
         yolo_string, converted_annotations = execute_detection(
-            image_record, model_record, threshold, cell_diameter, sublabel, selected_classes,
+            channel, model_record, threshold, cell_diameter, sublabel, selected_classes,
             min_cell_diameter=min_cell_diameter, max_cell_diameter=max_cell_diameter
         )
 
@@ -1426,7 +1633,7 @@ def detect():
             "sublabel": sublabel,
             "selected_classes": selected_classes,
         }
-        target_record = resolve_annotation_record(g.user.id, image_id, model_id, params, detection_setting_id)
+        target_record = resolve_annotation_record(g.user.id, channel_id, model_id, params, detection_setting_id)
 
         if not target_record.file_path:
             annotation_dir = g.user.get_path('annotations')
@@ -1528,13 +1735,24 @@ def batch_detect():
 
         image_results = []
         for image_record in image_set.images:
+            # Batch-detect targets each image's base channel only for now;
+            # per-channel batch-detect is deferred to a later pass.
+            base_channel = image_record.base_channel
+            if not base_channel:
+                image_results.append({
+                    "image_id": image_record.id,
+                    "success": False,
+                    "error": "Image has no channels"
+                })
+                continue
+
             row_results = []
             deleted_setting_ids = []
             try:
                 for r in resolved_rows:
                     setting = r["setting"]
                     existing = Annotation.query.filter_by(
-                        user_id=g.user.id, image_id=image_record.id, detection_setting_id=setting.id
+                        user_id=g.user.id, channel_id=base_channel.id, detection_setting_id=setting.id
                     ).first()
 
                     if existing and existing.file_path and not overwrite and not r["force_rerun"]:
@@ -1546,7 +1764,7 @@ def batch_detect():
                         continue
 
                     yolo_string, converted_annotations = execute_detection(
-                        image_record, r["model_record"], r["threshold"], r["cell_diameter"], r["sublabel"],
+                        base_channel, r["model_record"], r["threshold"], r["cell_diameter"], r["sublabel"],
                         r["selected_classes"], min_cell_diameter=r["min_cell_diameter"],
                         max_cell_diameter=r["max_cell_diameter"]
                     )
@@ -1554,7 +1772,7 @@ def batch_detect():
                     target_record = existing
                     if not target_record:
                         target_record = Annotation(
-                            id=str(uuid.uuid4()), user_id=g.user.id, image_id=image_record.id,
+                            id=str(uuid.uuid4()), user_id=g.user.id, channel_id=base_channel.id,
                             detection_setting_id=setting.id
                         )
                         db.session.add(target_record)
@@ -1585,7 +1803,7 @@ def batch_detect():
                 if overwrite:
                     stale = Annotation.query.filter(
                         Annotation.user_id == g.user.id,
-                        Annotation.image_id == image_record.id,
+                        Annotation.channel_id == base_channel.id,
                         ~Annotation.detection_setting_id.in_(active_setting_ids)
                     ).all()
                     for ann in stale:
@@ -1678,7 +1896,12 @@ def train_model():
                 "error": f"Only {len(available_pretrain_images)} pretrain images available for {pretrain_model_name or weights_record.name}, requested {num_pretrain_images}"
             }), 400
 
-        image_ids = [img.id for img in image_set.images]
+        # Training targets each image's base channel only for now; per-channel
+        # training is deferred to a later pass.
+        base_channel_by_image_id = {
+            img.id: img.base_channel for img in image_set.images if img.base_channel
+        }
+        base_channel_by_channel_id = {c.id: img_id for img_id, c in base_channel_by_image_id.items()}
 
         # Every annotation for this image set that was produced under a
         # DetectionSetting tied to the target model - drawn + detected boxes
@@ -1689,14 +1912,15 @@ def train_model():
             .filter(
                 DetectionSetting.weights_id == weights_id,
                 Annotation.user_id == g.user.id,
-                Annotation.image_id.in_(image_ids)
+                Annotation.channel_id.in_(list(base_channel_by_channel_id.keys()))
             )
             .all()
         )
 
         annotations_by_image = {}
         for ann in annotations:
-            annotations_by_image.setdefault(ann.image_id, []).append(ann)
+            image_id_for_ann = base_channel_by_channel_id[ann.channel_id]
+            annotations_by_image.setdefault(image_id_for_ann, []).append(ann)
 
         image_records = [img for img in image_set.images if img.id in annotations_by_image]
         if not image_records and num_pretrain_images == 0:
@@ -1711,7 +1935,7 @@ def train_model():
         os.makedirs(lbl_dir, exist_ok=True)
 
         for image_record in image_records:
-            src_image_path = os.path.join('data', image_record.normalized_path)
+            src_image_path = os.path.join('data', base_channel_by_image_id[image_record.id].normalized_path)
             dst_image_path = os.path.join(img_dir, f"{image_record.id}.png")
             relative_src = os.path.relpath(src_image_path, start=img_dir)
             os.symlink(relative_src, dst_image_path)
@@ -2081,4 +2305,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5001, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
