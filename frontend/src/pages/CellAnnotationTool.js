@@ -462,59 +462,14 @@ export default function CellAnnotationTool() {
         })
 
         if (!res.ok) throw new Error('Crop failed')
-        const data = await res.json()
 
-        const newAnnotations = (prevAnnotations) => {
-          // Map over each model's sub-array of annotations
-          return prevAnnotations.map((modelObj) => {
-            const innerBoxes = modelObj.annotations || []
-              // A box is "inside" if its boundaries are within the crop box boundaries
-            const filteredBoxes = innerBoxes.filter((anno) => {
-              const isInside =
-                anno.x >= box.x &&
-                anno.y >= box.y &&
-                (anno.x + anno.w) <= (box.x + box.w) &&
-                (anno.y + anno.h) <= (box.y + box.h)
-
-              return isInside
-            })
-            return {
-              ...modelObj,
-              annotations: filteredBoxes
-            }
-          })
-        }
-
-        console.log(newAnnotations)
-        setAnnotations(newAnnotations)
-
-        const newBoxes = (prevBoxes) => {
-          return prevBoxes.filter((anno) => {
-            const isInside =
-              anno.x >= box.x &&
-              anno.y >= box.y &&
-              (anno.x + anno.w) <= (box.x + box.w) &&
-              (anno.y + anno.h) <= (box.y + box.h)
-
-            return isInside
-          })
-        }
-        console.log(newBoxes)
-        setBoxes(newBoxes)
-
-        // Add a timestamp as a query parameter (?t=123456789)
-        setImageURL(`${API_BASE_URL}${data.converted_url}?t=${new Date().getTime()}`)
-        //setImageSize({width: box.width, height: box.height})
-
-        // Crop runs against every channel server-side - keep each channel's
-        // image in sync so switching channels after a crop shows the cropped version.
-        if (Array.isArray(data.channels)) {
-          const stamp = new Date().getTime()
-          setChannels(prev => prev.map(c => {
-            const match = data.channels.find(ch => ch.channel_id === c.id)
-            return match ? { ...c, channelUrl: `${API_BASE_URL}${match.converted_url}?t=${stamp}` } : c
-          }))
-        }
+        // /upload-cropped already trims annotations_detected/annotations_drawn to the
+        // new bounds and persists that for every channel - reload from there instead
+        // of re-deriving it client-side. (The old code here filtered a nonexistent
+        // `modelObj.annotations` field, so it was a no-op: the real annotation arrays
+        // stayed stale, and a save right after a crop would resend the pre-crop boxes
+        // and undo the crop.)
+        await renderAnnotations(imageID, selectedChannelId)
     } catch(e) {
       alert('Crop failed: ' + (e.response?.data?.error || e.message))
     }
@@ -608,8 +563,10 @@ export default function CellAnnotationTool() {
     }
   }
 
-  // Helper that loads an image's channels + annotations and renders them onto the canvas
-  async function renderAnnotations(imgId) {
+  // Helper that loads an image's channels + annotations and renders them onto the canvas.
+  // preferredChannelId keeps whatever channel was showing selected after the reload
+  // (e.g. after a crop) instead of always jumping back to the base channel.
+  async function renderAnnotations(imgId, preferredChannelId = null) {
     try {
       const [channelsRes, annosRes] = await Promise.all([
         fetch(`${API_BASE_URL}/load-channels`, {
@@ -686,7 +643,9 @@ export default function CellAnnotationTool() {
       setBoxes(boxList)
 
       if (channelRows.length > 0) {
-        const baseChannel = channelRows.find(c => c.isBaseChannel) || channelRows[0]
+        const baseChannel = channelRows.find(c => c.id === preferredChannelId)
+          || channelRows.find(c => c.isBaseChannel)
+          || channelRows[0]
         setSelectedChannelId(baseChannel.id)
         setImageURL(baseChannel.channelUrl)
         const firstSetting = settingRows.find(r => r.channelId === baseChannel.id)
@@ -1600,8 +1559,11 @@ export default function CellAnnotationTool() {
   // mirrored across every other channel, so they all run the same pipelines.
   const [propagateSettings, setPropagateSettings] = useState(true)
   const channelFileInputRef = useRef(null)
-  // Off by default: the canvas shows only the selected channel until turned on.
-  const [overlayChannels, setOverlayChannels] = useState(false)
+  // On by default: the canvas shows every visible channel composited together.
+  const [overlayChannels, setOverlayChannels] = useState(true)
+  // Anchor for the "Channels" section's view-options popover (show labels /
+  // propagate settings / overlay channels).
+  const [channelsViewSettingsAnchor, setChannelsViewSettingsAnchor] = useState(null)
 
   // Calibrator
   const [calibratorOpen, setCalibratorOpen] = useState(false)
@@ -2587,33 +2549,53 @@ export default function CellAnnotationTool() {
                 </Fragment>
               )}
             </PopupState>
-            <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
-              <Checkbox
-                checked={showLabels}
-                onChange={(e) => setShowLabels(e.target.checked)}
-                size='small'
-                sx={{ p: 0, mr: 0.5 }}
-              />
-              <Typography variant='body2'>Show labels</Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.5 }}>
+              <Typography variant='subtitle2' sx={{ fontWeight: 'bold' }}>Channels</Typography>
+              <IconButton
+                size="small"
+                color="primary"
+                onClick={(e) => setChannelsViewSettingsAnchor(e.currentTarget)}
+              >
+                <SettingsIcon fontSize="small" />
+              </IconButton>
             </Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
-              <Checkbox
-                checked={propagateSettings}
-                onChange={(e) => setPropagateSettings(e.target.checked)}
-                size='small'
-                sx={{ p: 0, mr: 0.5 }}
-              />
-              <Typography variant='body2'>Propagate detection settings to all channels</Typography>
-            </Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
-              <Checkbox
-                checked={overlayChannels}
-                onChange={(e) => setOverlayChannels(e.target.checked)}
-                size='small'
-                sx={{ p: 0, mr: 0.5 }}
-              />
-              <Typography variant='body2'>Overlay channels</Typography>
-            </Box>
+            <Popover
+              open={Boolean(channelsViewSettingsAnchor)}
+              anchorEl={channelsViewSettingsAnchor}
+              onClose={() => setChannelsViewSettingsAnchor(null)}
+              anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+            >
+              <Box sx={{ p: 1.5, display: 'flex', flexDirection: 'column', minWidth: 260 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
+                  <Checkbox
+                    checked={showLabels}
+                    onChange={(e) => setShowLabels(e.target.checked)}
+                    size='small'
+                    sx={{ p: 0, mr: 0.5 }}
+                  />
+                  <Typography variant='body2'>Show labels</Typography>
+                </Box>
+                <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
+                  <Checkbox
+                    checked={propagateSettings}
+                    onChange={(e) => setPropagateSettings(e.target.checked)}
+                    size='small'
+                    sx={{ p: 0, mr: 0.5 }}
+                  />
+                  <Typography variant='body2'>Propagate detection settings to all channels</Typography>
+                </Box>
+                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                  <Checkbox
+                    checked={overlayChannels}
+                    onChange={(e) => setOverlayChannels(e.target.checked)}
+                    size='small'
+                    sx={{ p: 0, mr: 0.5 }}
+                  />
+                  <Typography variant='body2'>Overlay channels</Typography>
+                </Box>
+              </Box>
+            </Popover>
             <input
               type="file"
               accept=".tiff,.tif"

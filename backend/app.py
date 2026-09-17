@@ -1069,7 +1069,13 @@ def upload_cropped_file():
             existing_annotations = Annotation.query.filter_by(channel_id=channel.id).all()
             for annotation in existing_annotations:
                 def keep_in_crop(ann):
-                    return x <= ann['x'] <= x + width and y <= ann['y'] <= y + height
+                    # Wholly inside the new bounds - a box straddling the border is
+                    # dropped along with ones entirely outside it.
+                    return (
+                        ann['x'] >= x and ann['y'] >= y and
+                        ann['x'] + ann['w'] <= x + width and
+                        ann['y'] + ann['h'] <= y + height
+                    )
 
                 filtered_detected = [a for a in (annotation.annotations_detected or []) if keep_in_crop(a)]
                 filtered_drawn = [a for a in (annotation.annotations_drawn or []) if keep_in_crop(a)]
