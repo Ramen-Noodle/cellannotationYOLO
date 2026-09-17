@@ -1,15 +1,32 @@
-import { rgbToHex } from '@mui/material'
 import { useRef, useState, useEffect } from 'react'
 
 const TILE_SIZE = 2048
 const LARGE_IMAGE_THRESHOLD = 16000
 const MAX_VISIBLE_TILES = 36
 
-export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropping,
+// Tints a grayscale (or already-colored) source onto an offscreen canvas by
+// multiplying it with a flat color - white pixels become the color, black
+// stays black. Composited additively ('lighter') with other tinted layers,
+// this reproduces the classic pseudo-colored multi-channel microscopy view.
+function tintToCanvas(source, color, width, height) {
+  const c = document.createElement('canvas')
+  c.width = width
+  c.height = height
+  const tctx = c.getContext('2d')
+  tctx.drawImage(source, 0, 0)
+  tctx.globalCompositeOperation = 'multiply'
+  tctx.fillStyle = color
+  tctx.fillRect(0, 0, width, height)
+  return c
+}
+
+export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCropping,
     onCrop, currentClass, classes, imageSize, brightness, contrast, scale, onScaleChange, showLabels = true, currentSet }) {
   const canvasRef = useRef(null)
-  const imgRef = useRef(null)
-  const tilesRef = useRef({})
+  const imagesRef = useRef({})       // layerId -> loaded Image (non-tiled)
+  const tintCacheRef = useRef({})    // layerId -> { color, sourceImg, canvas } (non-tiled)
+  const tilesRef = useRef({})        // "layerId:tx_ty" -> 'loading' | 'error' | Image (tiled)
+  const tintedTilesRef = useRef({})  // "layerId:tx_ty" -> tinted canvas (tiled)
 
   // pan + zoom state
   const [offset, setOffset] = useState({ x: 0, y: 0 })
@@ -24,7 +41,8 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
   })
 
   const [isNewImage, setIsNewImage] = useState(true)
-  const [imageLoaded, setImageLoaded] = useState(false)
+  // Bumped whenever a layer image (or tile) finishes loading, to trigger a redraw.
+  const [layerLoadVersion, setLayerLoadVersion] = useState(0)
 
   const [windowSize, setWindowSize] = useState({
     width: window.innerWidth,
@@ -34,47 +52,53 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
   // box drawing state
   const [currentBox, setCurrentBox] = useState(null)
   const [canDraw, setCanDraw] = useState(false)
-  const [tileVersion, setTileVersion] = useState(0)
 
   const isTiled = imageSize && (imageSize.width > LARGE_IMAGE_THRESHOLD || imageSize.height > LARGE_IMAGE_THRESHOLD)
 
-  // load image
+  // A stable, content-derived key so the load effect only re-runs when a
+  // layer's src or color actually changes, not on every parent re-render
+  // (the layers array itself is a fresh reference each render).
+  const layersKey = (layers || []).map(l => `${l.id}:${l.src}:${l.color || ''}`).join('|')
+
+  // load layer images
   useEffect(() => {
-    tilesRef.current = {}
-    imgRef.current = null
-    setImageLoaded(false)
-
-    if (!src) return
-
     if (isTiled) {
+      tilesRef.current = {}
+      tintedTilesRef.current = {}
+      imagesRef.current = {}
       if (isNewImage) {
         setboundaries({ xMin: 0, xMax: imageSize.width, yMin: 0, yMax: imageSize.height })
       }
       setIsNewImage(true)
-      setImageLoaded(true)
       return
     }
 
-    const img = new Image()
-    img.onload = () => {
-      console.log('naturalWidth:', img.naturalWidth)
-      console.log('naturalHeight:', img.naturalHeight)
-      console.log('complete:', img.complete)
-      imgRef.current = img
-      if (isNewImage) {
-        setboundaries({xMin: 0, xMax: img.width, yMin: 0, yMax: img.height})
+    imagesRef.current = {}
+    tintCacheRef.current = {}
+
+    ;(layers || []).forEach((layer, idx) => {
+      if (!layer.src) return
+      const img = new Image()
+      img.onload = () => {
+        imagesRef.current[layer.id] = img
+        if (idx === 0) {
+          if (isNewImage) {
+            setboundaries({ xMin: 0, xMax: img.width, yMin: 0, yMax: img.height })
+          }
+          setIsNewImage(true)
+        }
+        setLayerLoadVersion(v => v + 1)
       }
-      setIsNewImage(true)
-      setImageLoaded(true)
-    }
-
-    img.onerror = () => {
-      console.error('Failed to load image:', src)
-      alert('Image failed to load. The file may be too large for the browser to render.')
-    }
-
-    img.src = src
-  }, [src])
+      img.onerror = () => {
+        console.error('Failed to load image:', layer.src)
+        if (idx === 0) {
+          alert('Image failed to load. The file may be too large for the browser to render.')
+        }
+      }
+      img.src = layer.src
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layersKey, isTiled])
 
   // Track window size for rendering
   useEffect(() => {
@@ -84,7 +108,7 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
         height: window.innerHeight
       })
     }
-    
+
     window.addEventListener('resize', handleResize)
     return () => window.removeEventListener('resize', handleResize)
   }, [])
@@ -92,7 +116,8 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
   // draw loop
   useEffect(() => {
     draw()
-  }, [scale, offset, boxes, currentBox, classes, brightness, contrast, windowSize, imageLoaded, tileVersion, showLabels])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scale, offset, boxes, currentBox, classes, brightness, contrast, windowSize, layerLoadVersion, layersKey, showLabels])
 
   const getLabelTextColor = (hex) => {
     const r = parseInt(hex.slice(1, 3), 16)
@@ -100,6 +125,90 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
     const b = parseInt(hex.slice(5, 7), 16)
     const luminance = 0.299 * r + 0.587 * g + 0.114 * b
     return luminance > 160 ? 'black' : 'white'
+  }
+
+  const drawImageLayers = (ctx) => {
+    (layers || []).forEach(layer => {
+      const img = imagesRef.current[layer.id]
+      if (!img) return
+
+      if (!layer.color) {
+        ctx.globalCompositeOperation = 'source-over'
+        ctx.drawImage(img, 0, 0)
+        return
+      }
+
+      let cached = tintCacheRef.current[layer.id]
+      if (!cached || cached.color !== layer.color || cached.sourceImg !== img) {
+        cached = { color: layer.color, sourceImg: img, canvas: tintToCanvas(img, layer.color, img.width, img.height) }
+        tintCacheRef.current[layer.id] = cached
+      }
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.drawImage(cached.canvas, 0, 0)
+    })
+    ctx.globalCompositeOperation = 'source-over'
+  }
+
+  const drawTiledLayers = (ctx, canvas) => {
+    const visX0 = Math.max(0, -offset.x / scale)
+    const visY0 = Math.max(0, -offset.y / scale)
+    const visX1 = Math.min(imageSize.width, (canvas.width - offset.x) / scale)
+    const visY1 = Math.min(imageSize.height, (canvas.height - offset.y) / scale)
+
+    const txMin = Math.floor(visX0 / TILE_SIZE)
+    const txMax = Math.ceil(visX1 / TILE_SIZE)
+    const tyMin = Math.floor(visY0 / TILE_SIZE)
+    const tyMax = Math.ceil(visY1 / TILE_SIZE)
+    const tileCount = (txMax - txMin) * (tyMax - tyMin)
+
+    if (tileCount > MAX_VISIBLE_TILES) {
+      ctx.restore()
+      ctx.fillStyle = 'white'
+      ctx.font = '20px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText('Zoom in to view image', canvas.width / 2, canvas.height / 2)
+      return
+    }
+
+    ;(layers || []).forEach(layer => {
+      if (!layer.src) return
+      const filename = layer.src.split('/').pop()
+      const baseURL = new URL(layer.src).origin
+
+      for (let ty = tyMin; ty < tyMax; ty++) {
+        for (let tx = txMin; tx < txMax; tx++) {
+          const key = `${layer.id}:${tx}_${ty}`
+          const cached = tilesRef.current[key]
+          if (!cached) {
+            tilesRef.current[key] = 'loading'
+            const img = new Image()
+            img.onload = () => {
+              tilesRef.current[key] = img
+              if (layer.color) {
+                tintedTilesRef.current[key] = tintToCanvas(img, layer.color, TILE_SIZE, TILE_SIZE)
+              }
+              setLayerLoadVersion(v => v + 1)
+            }
+            img.onerror = () => { tilesRef.current[key] = 'error' }
+            img.src = `${baseURL}/tile/${filename}/${tx}/${ty}/${TILE_SIZE}`
+          } else if (cached !== 'loading' && cached !== 'error') {
+            const drawX = tx * TILE_SIZE
+            const drawY = ty * TILE_SIZE
+            if (layer.color) {
+              const tinted = tintedTilesRef.current[key]
+              if (tinted) {
+                ctx.globalCompositeOperation = 'lighter'
+                ctx.drawImage(tinted, drawX, drawY)
+              }
+            } else {
+              ctx.globalCompositeOperation = 'source-over'
+              ctx.drawImage(cached, drawX, drawY)
+            }
+          }
+        }
+      }
+    })
+    ctx.globalCompositeOperation = 'source-over'
   }
 
   const draw = () => {
@@ -118,56 +227,13 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
     ctx.filter = `brightness(${100 + +brightness}%) contrast(${100 + +contrast}%)`
 
     if (isTiled) {
-      const visX0 = Math.max(0, -offset.x / scale)
-      const visY0 = Math.max(0, -offset.y / scale)
-      const visX1 = Math.min(imageSize.width, (canvas.width - offset.x) / scale)
-      const visY1 = Math.min(imageSize.height, (canvas.height - offset.y) / scale)
-
-      const txMin = Math.floor(visX0 / TILE_SIZE)
-      const txMax = Math.ceil(visX1 / TILE_SIZE)
-      const tyMin = Math.floor(visY0 / TILE_SIZE)
-      const tyMax = Math.ceil(visY1 / TILE_SIZE)
-      const tileCount = (txMax - txMin) * (tyMax - tyMin)
-
-      if (tileCount > MAX_VISIBLE_TILES) {
-        ctx.restore()
-        ctx.fillStyle = 'white'
-        ctx.font = '20px sans-serif'
-        ctx.textAlign = 'center'
-        ctx.fillText('Zoom in to view image', canvas.width / 2, canvas.height / 2)
-        return
-      }
-
-      const filename = src.split('/').pop()
-
-      for (let ty = tyMin; ty < tyMax; ty++) {
-        for (let tx = txMin; tx < txMax; tx++) {
-          const key = `${tx}_${ty}`
-          const cached = tilesRef.current[key]
-          if (!cached) {
-            tilesRef.current[key] = 'loading'
-            const img = new Image()
-            img.onload = () => {
-              tilesRef.current[key] = img
-              setTileVersion(v => v + 1)
-            }
-            img.onerror = () => { tilesRef.current[key] = 'error' }
-            const baseURL = src ? new URL(src).origin : ''
-            img.src = `${baseURL}/tile/${filename}/${tx}/${ty}/${TILE_SIZE}`
-          } else if (cached !== 'loading' && cached !== 'error') {
-            ctx.drawImage(cached, tx * TILE_SIZE, ty * TILE_SIZE)
-          }
-        }
-      }
+      drawTiledLayers(ctx, canvas)
     } else {
-      if (!imgRef.current) {
-        ctx.restore()
-        return
-      }
-      ctx.drawImage(imgRef.current, 0, 0)
+      drawImageLayers(ctx)
     }
 
     ctx.filter = 'none'
+    ctx.globalCompositeOperation = 'source-over'
     // draw existing boxes
     ctx.lineWidth = 2 / scale // scale-independent line width
 
@@ -214,7 +280,7 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
     })
 
     ctx.setLineDash([])
-    
+
     // draw box while dragging
     if (currentBox) {
       ctx.strokeStyle = classes[currentSet][currentClass].color
@@ -365,7 +431,7 @@ export default function ImageCanvas({ src, boxes, onAddBox, onRemoveBox, isCropp
 
   const handleWheel = (e) => {
     //e.preventDefault()
-    
+
     const delta = e.deltaY < 0 ? 1.1 : 0.9
 
     const rect = canvasRef.current.getBoundingClientRect()

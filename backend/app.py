@@ -485,6 +485,10 @@ def login():
 
 # *----------* Data Upload Endpoints *----------* #
 
+import numpy as np
+import tifffile
+
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if not g.user:
@@ -492,7 +496,7 @@ def upload_file():
 
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
-        
+
     file = request.files['file']
     if file.filename == '':
         return jsonify({'error': 'No selected file'}), 400
@@ -500,10 +504,10 @@ def upload_file():
     try:
         image_dir = g.user.get_path('images')
 
-        # 1. Save Original
+        # 1. Save Original (full, unsplit file)
         full_filename = file.filename
-        original_name = os.path.splitext(full_filename)[0]
-        ext = os.path.splitext(full_filename)[1].lower()
+        original_name, ext = os.path.splitext(full_filename)
+        ext = ext.lower()
         unique_id = str(uuid.uuid4())
 
         original_filename = f"{unique_id}_orig{ext}"
@@ -511,19 +515,36 @@ def upload_file():
         original_save_path = os.path.join('data', original_path)
         file.save(original_save_path)
 
-        # 2. Get Dimensions (Using PIL)
-        with Image.open(original_save_path) as img:
-            w, h = img.size
+        # 2. Load pixel data and split into channels
+        if ext in ('.tif', '.tiff'):
+            # tifffile handles multi-page / (C, H, W) / 16-bit stacks better than PIL
+            arr = tifffile.imread(original_save_path)
+        else:
+            with Image.open(original_save_path) as img:
+                if img.mode == 'P':
+                    img = img.convert('RGB')
+                elif img.mode == 'RGBA':
+                    img = img.convert('RGB')  # drop alpha
+                elif img.mode == 'LA':
+                    img = img.convert('L')
+                arr = np.array(img)
 
-        # 3. Generate Normalized Preview
-        normalized_filename = f"{unique_id}_norm.png"
-        normalized_path = os.path.join(image_dir, 'normalized', normalized_filename)
-        
-        # Normalize image for training/display
-        normalized_save_path = os.path.join('data', normalized_path)
-        p_low, p_high = normalize_image(original_save_path, normalized_save_path)
+        arr = np.squeeze(arr)
+        if arr.ndim == 2:
+            channel_arrays = [arr]
+        elif arr.ndim == 3:
+            # Assume the smallest axis is the channel axis: (C,H,W) or (H,W,C)
+            arr = np.moveaxis(arr, int(np.argmin(arr.shape)), 0)
+            if arr.shape[0] > 16:
+                raise ValueError(f"Image has {arr.shape[0]} channels; max is 16")
+            channel_arrays = list(arr)
+        else:
+            raise ValueError(f"Unsupported image shape {arr.shape}")
 
-        # 4. Create the Database Records - an ImageRecord owning one base Channel
+        h, w = channel_arrays[0].shape
+        multi_channel = len(channel_arrays) > 1
+
+        # 3. Create the ImageRecord
         new_image_record = ImageRecord(
             id=unique_id,
             user_id=g.user.id,
@@ -532,32 +553,69 @@ def upload_file():
         )
         db.session.add(new_image_record)
 
-        channel_id = str(uuid.uuid4())
-        base_channel = Channel(
-            id=channel_id,
-            image_id=unique_id,
-            name=original_name,
-            order_index=0,
-            is_base=True,
-            original_extension=ext,
-            original_path=original_path,
-            normalized_path=normalized_path,
-            p_low=int(p_low) if p_low is not None else None,
-            p_high=int(p_high) if p_high is not None else None
-        )
-        db.session.add(base_channel)
+        # 4. Create one Channel per image channel
+        channels_out = []
+        for idx, channel_data in enumerate(channel_arrays):
+            channel_id = str(uuid.uuid4())
+
+            if multi_channel:
+                # Write each channel as its own TIFF (preserves bit depth)
+                ch_ext = '.tif'
+                ch_orig_filename = f"{unique_id}_c{idx}_orig{ch_ext}"
+                ch_orig_path = os.path.join(image_dir, 'original', ch_orig_filename)
+                tifffile.imwrite(os.path.join('data', ch_orig_path), channel_data)
+                ch_name = f"{original_name} (C{idx + 1})"
+            else:
+                # Single channel: use the uploaded file directly, as before
+                ch_ext = ext
+                ch_orig_path = original_path
+                ch_name = original_name
+
+            normalized_filename = f"{unique_id}_c{idx}_norm.png"
+            normalized_path = os.path.join(image_dir, 'normalized', normalized_filename)
+            p_low, p_high = normalize_image(
+                os.path.join('data', ch_orig_path),
+                os.path.join('data', normalized_path),
+            )
+
+            channel = Channel(
+                id=channel_id,
+                image_id=unique_id,
+                name=ch_name,
+                order_index=idx,
+                is_base=(idx == 0),
+                original_extension=ch_ext,
+                original_path=ch_orig_path,
+                normalized_path=normalized_path,
+                p_low=int(p_low) if p_low is not None else None,
+                p_high=int(p_high) if p_high is not None else None,
+            )
+            db.session.add(channel)
+
+            channels_out.append({
+                'channel_id': channel_id,
+                'name': ch_name,
+                'order_index': idx,
+                'is_base': idx == 0,
+                'converted_url': f'/static/{normalized_path}',
+                'p_low': p_low,
+                'p_high': p_high,
+            })
+
         db.session.commit()
 
-        # 5. Respond to React
+        # 5. Respond to React (top-level fields still describe the base channel)
+        base = channels_out[0]
         return jsonify({
             'image_id': unique_id,
-            'channel_id': channel_id,
-            'converted_url': f'/static/{normalized_path}',
+            'channel_id': base['channel_id'],
+            'converted_url': base['converted_url'],
             'dimensions': [w, h],
-            'p_low': p_low,
-            'p_high': p_high
+            'p_low': base['p_low'],
+            'p_high': base['p_high'],
+            'channels': channels_out,
         })
-        
+
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
@@ -1011,7 +1069,13 @@ def upload_cropped_file():
             existing_annotations = Annotation.query.filter_by(channel_id=channel.id).all()
             for annotation in existing_annotations:
                 def keep_in_crop(ann):
-                    return x <= ann['x'] <= x + width and y <= ann['y'] <= y + height
+                    # Wholly inside the new bounds - a box straddling the border is
+                    # dropped along with ones entirely outside it.
+                    return (
+                        ann['x'] >= x and ann['y'] >= y and
+                        ann['x'] + ann['w'] <= x + width and
+                        ann['y'] + ann['h'] <= y + height
+                    )
 
                 filtered_detected = [a for a in (annotation.annotations_detected or []) if keep_in_crop(a)]
                 filtered_drawn = [a for a in (annotation.annotations_drawn or []) if keep_in_crop(a)]
@@ -2305,4 +2369,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5001, debug=True, threaded=True)

@@ -1,4 +1,4 @@
-import { useState, useEffect, Fragment } from 'react'
+import { useState, useEffect, useRef, Fragment } from 'react'
 import { Box, Button, Typography, Divider, Modal, IconButton, FormControlLabel, Checkbox, Popover, Paper, Select, FormControl, InputLabel, OutlinedInput, Chip, RadioGroup, Radio } from '@mui/material'
 import PopupState, { bindTrigger, bindMenu } from 'material-ui-popup-state'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
@@ -45,9 +45,13 @@ import RowMenu from '../components/RowMenu'
 // yet, so this is a stand-in until that's exposed.
 const DEFAULT_MODEL_NAMES = ['MADM', 'SGN', 'StarDist']
 
+// Default per-channel tint colors for the overlay view, cycled by channel order.
+// Frontend-only for now - not persisted to the backend.
+const CHANNEL_COLOR_PALETTE = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
+
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5002'
+  const API_BASE_URL = 'http://10.80.24.12:5001'
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('Processing...')
@@ -358,10 +362,10 @@ export default function CellAnnotationTool() {
         setImageID(firstUploadedImageData.image_id)
         setImageURL(`${API_BASE_URL}${firstUploadedImageData.converted_url}`)
         setImageSize({
-          width: firstUploadedImageData.dimensions[0], 
+          width: firstUploadedImageData.dimensions[0],
           height: firstUploadedImageData.dimensions[1]
         })
-        setAnnotations([])
+        await renderAnnotations(firstUploadedImageData.image_id)
       }
 
       if (targetSetId) {
@@ -458,49 +462,14 @@ export default function CellAnnotationTool() {
         })
 
         if (!res.ok) throw new Error('Crop failed')
-        const data = await res.json()
 
-        const newAnnotations = (prevAnnotations) => {
-          // Map over each model's sub-array of annotations
-          return prevAnnotations.map((modelObj) => {
-            const innerBoxes = modelObj.annotations || []
-              // A box is "inside" if its boundaries are within the crop box boundaries
-            const filteredBoxes = innerBoxes.filter((anno) => {
-              const isInside =
-                anno.x >= box.x &&
-                anno.y >= box.y &&
-                (anno.x + anno.w) <= (box.x + box.w) &&
-                (anno.y + anno.h) <= (box.y + box.h)
-
-              return isInside
-            })
-            return {
-              ...modelObj,
-              annotations: filteredBoxes
-            }
-          })
-        }
-
-        console.log(newAnnotations)
-        setAnnotations(newAnnotations)
-
-        const newBoxes = (prevBoxes) => {
-          return prevBoxes.filter((anno) => {
-            const isInside =
-              anno.x >= box.x &&
-              anno.y >= box.y &&
-              (anno.x + anno.w) <= (box.x + box.w) &&
-              (anno.y + anno.h) <= (box.y + box.h)
-
-            return isInside
-          })
-        }
-        console.log(newBoxes)
-        setBoxes(newBoxes)
-
-        // Add a timestamp as a query parameter (?t=123456789)
-        setImageURL(`${API_BASE_URL}${data.converted_url}?t=${new Date().getTime()}`)
-        //setImageSize({width: box.width, height: box.height})
+        // /upload-cropped already trims annotations_detected/annotations_drawn to the
+        // new bounds and persists that for every channel - reload from there instead
+        // of re-deriving it client-side. (The old code here filtered a nonexistent
+        // `modelObj.annotations` field, so it was a no-op: the real annotation arrays
+        // stayed stale, and a save right after a crop would resend the pre-crop boxes
+        // and undo the crop.)
+        await renderAnnotations(imageID, selectedChannelId)
     } catch(e) {
       alert('Crop failed: ' + (e.response?.data?.error || e.message))
     }
@@ -556,30 +525,102 @@ export default function CellAnnotationTool() {
     return Array.from(rowsById.values())
   }
 
-  // Helper that renders annotations onto the canvas
-  async function renderAnnotations(imgId) {
+  // Builds a "channel row" for the per-image RowMenu - one row per channel,
+  // A channel row only carries channel identity - no detection settings.
+  function buildChannelRow(channel) {
+    return {
+      id: channel.id,
+      channelName: channel.name,
+      channelUrl: `${API_BASE_URL}${channel.url}?t=${new Date().getTime()}`,
+      isBaseChannel: channel.is_base,
+      // Frontend-only tint for the overlay view - not persisted to the backend (yet).
+      channelColor: CHANNEL_COLOR_PALETTE[(channel.order_index || 0) % CHANNEL_COLOR_PALETTE.length],
+      // Whether this channel is included in the overlay view (image layer + its annotations).
+      visible: true,
+    }
+  }
+
+  // A channel can have many detection-setting rows (each its own model/params
+  // run against that channel). Each row is tagged with the channel it belongs to.
+  function buildDetectionSettingRow(channelId, existingAnnotation) {
+    const labels = existingAnnotation?.labels?.labels || []
+    const defaultModel = models[0]
+    const defaultClasses = defaultModel?.label_set?.labels?.map(label => label.name) || []
+    return {
+      // Stable local identity for this row/its boxes - NEVER the backend
+      // DetectionSetting id, which the backend dedups by (weights_id, params)
+      // and can end up shared across different channels' rows.
+      id: existingAnnotation?.id ?? generateId(),
+      channelId,
+      detectionSettingId: existingAnnotation?.detection_setting_id ?? generateId(),
+      selectedModelId: existingAnnotation?.weights_id ?? (defaultModel ? defaultModel.id : ''),
+      selectedClasses: labels.length ? labels.map(l => l.name) : defaultClasses,
+      rowThreshold: existingAnnotation?.threshold ?? 0.5,
+      rowDiameter: existingAnnotation?.cell_diameter ?? 34,
+      rowMinDiameter: existingAnnotation?.min_cell_diameter ?? 7,
+      rowMaxDiameter: existingAnnotation?.max_cell_diameter ?? 17,
+      rowSublabel: existingAnnotation?.sublabel ?? ''
+    }
+  }
+
+  // Helper that loads an image's channels + annotations and renders them onto the canvas.
+  // preferredChannelId keeps whatever channel was showing selected after the reload
+  // (e.g. after a crop) instead of always jumping back to the base channel.
+  async function renderAnnotations(imgId, preferredChannelId = null) {
     try {
-      const res = await fetch(`${API_BASE_URL}/load-annotations`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ image_id: imgId }),
-        credentials: 'include',
+      const [channelsRes, annosRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/load-channels`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image_id: imgId }),
+          credentials: 'include',
+        }),
+        fetch(`${API_BASE_URL}/load-annotations`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image_id: imgId }),
+          credentials: 'include',
+        }),
+      ])
+
+      if (!channelsRes.ok) throw new Error('Load channels failed')
+      if (!annosRes.ok) throw new Error('Load failed')
+
+      const channelList = await channelsRes.json()
+      const data = await annosRes.json()
+      const annoList = data.annotations || []
+      setAnnotations(annoList)
+
+      const channelRows = channelList.map(buildChannelRow)
+      setChannels(channelRows)
+
+      const annosByChannel = new Map()
+      annoList.forEach(a => {
+        if (!annosByChannel.has(a.channel_id)) annosByChannel.set(a.channel_id, [])
+        annosByChannel.get(a.channel_id).push(a)
       })
 
-      if (!res.ok) throw new Error('Load failed')
-      const data = await res.json()
-      setAnnotations(data.annotations)
+      // Every channel gets at least one settings row - a blank default one if
+      // it has never been detected/saved - so the nested menu is never empty.
+      const settingRows = channelRows.flatMap(c => {
+        const channelAnnos = annosByChannel.get(c.id) || []
+        return channelAnnos.length > 0
+          ? channelAnnos.map(a => buildDetectionSettingRow(c.id, a))
+          : [buildDetectionSettingRow(c.id, null)]
+      })
+      setDetectionSettings(settingRows)
 
-      const annoList = data.annotations || []
       const boxList = annoList.flatMap((modelObj) => {
-        const annotationId = modelObj.detection_setting_id
+        const channelId = modelObj.channel_id
+        // Group boxes by the Annotation's own id, not detection_setting_id -
+        // the latter can be shared across channels (see buildDetectionSettingRow).
+        const rowId = modelObj.id
         const labels = modelObj.labels.labels
 
         const detectedBoxes = (modelObj.annotations_detected || []).map((box) => ({
           ...box,
-          annotation_id: annotationId,
+          annotation_id: rowId,
+          channel_id: channelId,
           is_detected: true,
           name: labels[box.class].name,
           color: labels[box.class].color,
@@ -588,7 +629,8 @@ export default function CellAnnotationTool() {
 
         const drawnBoxes = (modelObj.annotations_drawn || []).map((box) => ({
           ...box,
-          annotation_id: annotationId,
+          annotation_id: rowId,
+          channel_id: channelId,
           is_detected: false,
           name: labels[box.class].name,
           color: labels[box.class].color,
@@ -600,13 +642,18 @@ export default function CellAnnotationTool() {
 
       setBoxes(boxList)
 
-      if (annoList.length > 0) {
-        const loadedRows = annoList.map(annotationToRow)
-        setDetectionSettings(loadedRows)
-        setSelectedRowId(loadedRows[0].id)
-        setActiveRowIds(loadedRows.map(row => row.id))
+      if (channelRows.length > 0) {
+        const baseChannel = channelRows.find(c => c.id === preferredChannelId)
+          || channelRows.find(c => c.isBaseChannel)
+          || channelRows[0]
+        setSelectedChannelId(baseChannel.id)
+        setImageURL(baseChannel.channelUrl)
+        const firstSetting = settingRows.find(r => r.channelId === baseChannel.id)
+        setSelectedDetectionSettingId(firstSetting ? firstSetting.id : null)
+        setActiveRowIds(settingRows.map(row => row.id))
       } else {
-        setDetectionSettings([])
+        setSelectedChannelId(null)
+        setSelectedDetectionSettingId(null)
         setActiveRowIds([])
       }
     } catch (e) {
@@ -639,7 +686,7 @@ export default function CellAnnotationTool() {
           credentials: 'include'
       })
       if (!res.ok) throw new Error('Delete failed')
-      if (image_id = imageID) {
+      if (image_id === imageID) {
         loadImageSets()
         setImageID('')
         setImageName('')
@@ -647,6 +694,11 @@ export default function CellAnnotationTool() {
         setImageSize({width: 0, height: 0})
         setAnnotations([])
         setBoxes([])
+        setChannels([])
+        setDetectionSettings([])
+        setSelectedChannelId(null)
+        setSelectedDetectionSettingId(null)
+        setActiveRowIds([])
       }
     } catch (e) {
       console.error('Image deletion failed:', e.message)
@@ -754,10 +806,10 @@ export default function CellAnnotationTool() {
   // *----------* Annotation Operations *----------* \\
 
   const handleAddBox = (box) => {
-    if (!imageURL || !selectedRowId) return
+    if (!imageURL || !selectedChannelId || !selectedDetectionSettingId) return
 
-    // Find the selected row to get model info
-    const selectedRow = detectionSettings.find(r => r.id === selectedRowId)
+    // Find the selected detection-setting row to get model info
+    const selectedRow = detectionSettings.find(r => r.id === selectedDetectionSettingId)
     if (!selectedRow) return
 
     const model = models.find(m => m.id === selectedRow.selectedModelId)
@@ -768,37 +820,34 @@ export default function CellAnnotationTool() {
 
     const enrichedBox = {
       ...box,
-      annotation_id: selectedRowId,
+      annotation_id: selectedDetectionSettingId,
+      channel_id: selectedChannelId,
       is_detected: false,
       name: classLabel.name,
       color: classLabel.color,
-      sublabel: selectedRow.sublabel
+      sublabel: selectedRow.rowSublabel
     }
 
     // Add to boxes for canvas rendering
     setBoxes(prev => [...prev, enrichedBox])
 
-    // Add to the correct annotation group's annotations_drawn
+    // Add to the correct detection setting's annotations_drawn
     setAnnotations(prev => {
-      const exists = prev.some(
-        modelObj => (modelObj.id ?? modelObj.annotation_id) === selectedRowId
-      )
+      const exists = prev.some(modelObj => modelObj.id === selectedDetectionSettingId)
 
       if (exists) {
-        return prev.map(modelObj => {
-          const id = modelObj.id ?? modelObj.annotation_id
-          if (id !== selectedRowId) return modelObj
-          return {
-            ...modelObj,
-            annotations_drawn: [...(modelObj.annotations_drawn || []), box]
-          }
-        })
+        return prev.map(modelObj => modelObj.id === selectedDetectionSettingId
+          ? { ...modelObj, annotations_drawn: [...(modelObj.annotations_drawn || []), box] }
+          : modelObj
+        )
       } else {
-        // No annotation group yet for this row — create one
+        // No annotation group yet for this detection setting — create one
         return [
           ...prev,
           {
-            annotation_id: selectedRowId,
+            id: selectedDetectionSettingId,
+            channel_id: selectedChannelId,
+            detection_setting_id: selectedRow.detectionSettingId,
             annotations_detected: [],
             annotations_drawn: [box],
             labels: model.label_set,
@@ -813,9 +862,7 @@ export default function CellAnnotationTool() {
   const handleRemoveBox = (targetBox) => {
     setAnnotations((prevAnnotations) => {
       return prevAnnotations.map((modelObj) => {
-        const modelId = modelObj.id || modelObj.annotation_id
-
-        if (modelId !== targetBox.annotation_id) return modelObj
+        if (modelObj.id !== targetBox.annotation_id) return modelObj
 
         const isTargetBox = (b) =>
           b.x === targetBox.x && b.y === targetBox.y && b.w === targetBox.w && b.h === targetBox.h
@@ -882,7 +929,7 @@ export default function CellAnnotationTool() {
     try {
       const payload = annotations
         .map(modelObj => {
-          const rowId = modelObj.id ?? modelObj.annotation_id
+          const rowId = modelObj.id
           const annotationsDetected = modelObj.annotations_detected || []
           const annotationsDrawn = modelObj.annotations_drawn || []
 
@@ -890,12 +937,13 @@ export default function CellAnnotationTool() {
 
           const row = detectionSettings.find(r => r.id === rowId)
           if (!row) {
-            console.warn(`No detection row found for annotation group ${rowId}, skipping`)
+            console.warn(`No detection-setting row found for annotation group ${rowId}, skipping`)
             return null
           }
 
           return {
-            detection_setting_id: rowId,
+            channel_id: row.channelId,
+            detection_setting_id: row.detectionSettingId,
             weights_id: row.selectedModelId,
             threshold: row.rowThreshold,
             cell_diameter: row.rowDiameter,
@@ -926,16 +974,15 @@ export default function CellAnnotationTool() {
       const data = await res.json()
       const idMap = data.id_map || {}
 
-      // Replace temp client-generated ids with the real ids the server assigned
+      // Replace temp client-generated DetectionSetting ids with the real ids the
+      // server assigned. Row/box/annotation identity (id) is a stable local id
+      // that never needs reconciling - only detectionSettingId can change here.
       if (Object.keys(idMap).length > 0) {
-        setDetectionSettings(prev => prev.map(r => idMap[r.id] ? { ...r, id: idMap[r.id] } : r))
-        setAnnotations(prev => prev.map(modelObj => {
-          const rowId = modelObj.id ?? modelObj.annotation_id
-          return idMap[rowId] ? { ...modelObj, id: idMap[rowId], annotation_id: idMap[rowId] } : modelObj
-        }))
-        setBoxes(prev => prev.map(box => idMap[box.annotation_id] ? { ...box, annotation_id: idMap[box.annotation_id] } : box))
-        setActiveRowIds(prev => prev.map(id => idMap[id] || id))
-        setSelectedRowId(prev => idMap[prev] || prev)
+        setDetectionSettings(prev => prev.map(r => idMap[r.detectionSettingId] ? { ...r, detectionSettingId: idMap[r.detectionSettingId] } : r))
+        setAnnotations(prev => prev.map(modelObj => idMap[modelObj.detection_setting_id]
+          ? { ...modelObj, detection_setting_id: idMap[modelObj.detection_setting_id] }
+          : modelObj
+        ))
       }
 
       console.log('Saved annotations successfully')
@@ -1078,13 +1125,13 @@ export default function CellAnnotationTool() {
   // *----------* Detection Operations *----------* \\
 
   async function detect() {
-    if (!imageURL || !models[currentModel]) {
-      alert('Please select both an image and a model before running detection.')
+    if (!imageURL) {
+      alert('Please select an image before running detection.')
       return
     }
 
-    if (detectionSettings.length == 0) {
-      alert('Please set detection settings before running detection.')
+    if (detectionSettings.length === 0) {
+      alert('This image has no detection settings configured. Add one from a channel\'s settings menu.')
       return
     }
 
@@ -1093,11 +1140,17 @@ export default function CellAnnotationTool() {
 
     try {
       for (const row of detectionSettings) {
-        const tempRowId = row.id
+        if (!row.selectedModelId) continue
+
+        // rowId is this row's stable local identity (never changes - see
+        // buildDetectionSettingRow). detectionSettingId is the backend
+        // DetectionSetting id, which the backend may dedup across channels.
+        const rowId = row.id
+        const channelId = row.channelId
         const payload = {
-          image_id: imageID,
+          channel_id: channelId,
           model_id: row.selectedModelId,
-          detection_setting_id: tempRowId,
+          detection_setting_id: row.detectionSettingId,
           threshold: row.rowThreshold,
           cell_diameter: row.rowDiameter,
           min_cell_diameter: row.rowMinDiameter,
@@ -1118,54 +1171,53 @@ export default function CellAnnotationTool() {
 
           if (!res.ok) {
             const errorBody = await res.json().catch(() => null)
-            throw new Error(errorBody?.error || `${models[currentModel].name} detection failed`)
+            const modelName = models.find(m => m.id === row.selectedModelId)?.name || 'Model'
+            const channelName = channels.find(c => c.id === channelId)?.channelName || channelId
+            throw new Error(errorBody?.error || `${modelName} detection failed for channel "${channelName}"`)
           }
           const data = await res.json()
 
           const newAnnotations = data.annotations
-          console.log(data)
-          const targetId = data.detection_setting_id
+          const resolvedSettingId = data.detection_setting_id
           const newBoxes = newAnnotations.map(box => ({
             ...box,
-            annotation_id: targetId,
+            annotation_id: rowId,
+            channel_id: channelId,
             is_detected: true,
             name: data.labels.labels[box.class].name,
             color: data.labels.labels[box.class].color,
             renderStyle: 'dashed'
           }))
           setAnnotations((prevAnnotations) => {
-            const exists = prevAnnotations.some(
-              (modelObj) => modelObj.id === targetId || modelObj.annotation_id === targetId
-            )
+            const exists = prevAnnotations.some((modelObj) => modelObj.id === rowId)
 
             if (exists) {
-              return prevAnnotations.map((modelObj) => {
-                const id = modelObj.id || modelObj.annotation_id
-                return id === targetId
-                  ? { ...modelObj, annotations_detected: newAnnotations }
-                  : modelObj
-              })
+              return prevAnnotations.map((modelObj) => modelObj.id === rowId
+                ? { ...modelObj, annotations_detected: newAnnotations, detection_setting_id: resolvedSettingId }
+                : modelObj
+              )
             } else {
-              // First detection for this model — append a new entry
+              // First detection for this setting — append a new entry
               return [
                 ...prevAnnotations,
                 {
-                  annotation_id: targetId,
+                  id: rowId,
+                  channel_id: channelId,
+                  detection_setting_id: resolvedSettingId,
                   annotations_detected: newAnnotations,
+                  annotations_drawn: [],
                   labels: data.labels,
                 }
               ]
             }
           })
           setBoxes((prevBoxes) => {
-            const filteredBoxes = prevBoxes.filter(box => box.annotation_id != targetId)
+            // Only replace this row's previously-detected boxes — manually drawn ones stay.
+            const filteredBoxes = prevBoxes.filter(box => !(box.annotation_id === rowId && box.is_detected))
             return [...filteredBoxes, ...newBoxes]
           })
           setDetectionSettings((prevRows) =>
-            prevRows.map((r) => r.id === tempRowId ? { ...r, id: targetId } : r)
-          )
-          setActiveRowIds((prevActive) =>
-            prevActive.map((id) => id === tempRowId ? targetId : id)
+            prevRows.map((r) => r.id === rowId ? { ...r, detectionSettingId: resolvedSettingId } : r)
           )
         } catch (e) {
           alert('Detection failed: ' + e.message)
@@ -1454,20 +1506,17 @@ export default function CellAnnotationTool() {
 
       setModels(prev => prev.filter(m => m.id !== model.id))
 
-      const removedRowIds = detectionSettings
-        .filter(r => r.selectedModelId === model.id)
-        .map(r => r.id)
+      const removedRows = detectionSettings.filter(r => r.selectedModelId === model.id)
+      const removedRowIds = removedRows.map(r => r.id)
+      // batchDetectionSettings/batchSelectedRowIds are keyed by detection_setting_id (see annotationToRow), not row id.
+      const removedDetectionSettingIds = removedRows.map(r => r.detectionSettingId)
 
       if (removedRowIds.length > 0) {
         setDetectionSettings(prev => prev.filter(r => !removedRowIds.includes(r.id)))
         setActiveRowIds(prev => prev.filter(id => !removedRowIds.includes(id)))
-        setBatchSelectedRowIds(prev => prev.filter(id => !removedRowIds.includes(id)))
-        setSelectedRowId(prev => removedRowIds.includes(prev) ? null : prev)
-        setAnnotations(prevAnnos => prevAnnos.filter(ann =>
-          !removedRowIds.includes(ann.detection_setting_id) &&
-          !removedRowIds.includes(ann.id) &&
-          !removedRowIds.includes(ann.annotation_id)
-        ))
+        setBatchSelectedRowIds(prev => prev.filter(id => !removedDetectionSettingIds.includes(id)))
+        setSelectedDetectionSettingId(prev => removedRowIds.includes(prev) ? null : prev)
+        setAnnotations(prevAnnos => prevAnnos.filter(ann => !removedRowIds.includes(ann.id)))
         setBoxes(prevBoxes => prevBoxes.filter(box => !removedRowIds.includes(box.annotation_id)))
       }
     } catch (err) {
@@ -1495,12 +1544,26 @@ export default function CellAnnotationTool() {
     setDetectionSettingsModalOpen(false)
   }
 
-  const [selectedRowId, setSelectedRowId] = useState(null)
+  const [channels, setChannels] = useState([])
+  const [selectedChannelId, setSelectedChannelId] = useState(null)
+  const [selectedDetectionSettingId, setSelectedDetectionSettingId] = useState(null)
+  // Which channel's nested detection-settings menu is open (settings gear on a channel row)
+  const [channelSettingsChannelId, setChannelSettingsChannelId] = useState(null)
+  const [channelSettingsAnchor, setChannelSettingsAnchor] = useState(null)
+  // The settings popover for one detection-setting row inside that nested menu
   const [settingsAnchor, setSettingsAnchor] = useState(null)
-  const [settingsRowIndex, setSettingsRowIndex] = useState(null)
-  const [editingSublabelIndex, setEditingSublabelIndex] = useState(null)
-  const [sublabelDraft, setSublabelDraft] = useState('')
-  const [modelDropdownIndex, setModelDropdownIndex] = useState(null)
+  const [settingsRowId, setSettingsRowId] = useState(null)
+  const [channelRenameIndex, setChannelRenameIndex] = useState(null)
+  const [channelNameDraft, setChannelNameDraft] = useState('')
+  // On by default: a channel's set of detection settings (add/delete/edit) stays
+  // mirrored across every other channel, so they all run the same pipelines.
+  const [propagateSettings, setPropagateSettings] = useState(true)
+  const channelFileInputRef = useRef(null)
+  // On by default: the canvas shows every visible channel composited together.
+  const [overlayChannels, setOverlayChannels] = useState(true)
+  // Anchor for the "Channels" section's view-options popover (show labels /
+  // propagate settings / overlay channels).
+  const [channelsViewSettingsAnchor, setChannelsViewSettingsAnchor] = useState(null)
 
   // Calibrator
   const [calibratorOpen, setCalibratorOpen] = useState(false)
@@ -1594,126 +1657,314 @@ export default function CellAnnotationTool() {
     return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15)
   }
 
-  const createEmptyRow = () => {
-    const defaultModel = models[0]
-    const defaultClasses = defaultModel?.label_set?.labels?.map(label => label.name) || []
-    return {
-      id: generateId(),
-      selectedModelId: defaultModel ? defaultModel.id : '',
-      selectedClasses: defaultClasses,
-      rowThreshold: 0.5,
-      rowDiameter: 34,
-      rowMinDiameter: 7,
-      rowMaxDiameter: 17,
-      rowSublabel: ''
-    }
-  }
-
   const [detectionSettings, setDetectionSettings] = useState([])
 
-  const handleRowChange = (index, fieldName, value) => {
-    setDetectionSettings((prevRows) => {
-      const updatedRows = [...prevRows]
-      
-      // Special Case: If the model changes, reset the selected classes 
-      // because the old classes won't exist in the new model.
-      if (fieldName === 'selectedModelId') {
-        const targetModel = models.find(model => model.id === value)
-        const targetModelClasses = targetModel?.label_set?.labels?.map(label => label.name) || []
-        updatedRows[index] = {
-          ...updatedRows[index],
-          [fieldName]: value,
-          selectedClasses: targetModelClasses
-        }
-      } else {
-        updatedRows[index] = {
-          ...updatedRows[index],
-          [fieldName]: value,
-        }
-      }
-      return updatedRows
+  // Fields edited via a detection-setting row's settings popover - these are the
+  // ones that get mirrored across every channel's matching row when propagating.
+  const SETTINGS_FIELDS = ['selectedModelId', 'selectedClasses', 'rowThreshold', 'rowDiameter', 'rowMinDiameter', 'rowMaxDiameter', 'rowSublabel']
+
+  // Groups the flat detectionSettings list back into per-channel arrays, in
+  // display order, so "same position across channels" is well defined.
+  const detectionSettingsByChannel = () => {
+    const byChannel = new Map()
+    detectionSettings.forEach(row => {
+      if (!byChannel.has(row.channelId)) byChannel.set(row.channelId, [])
+      byChannel.get(row.channelId).push(row)
     })
+    return byChannel
   }
 
+  // Edits one channel's detection-setting row. When propagating, the row at the
+  // same position in every other channel's list gets the same field value.
+  const handleDetectionSettingChange = (channelId, rowId, fieldName, value) => {
+    setDetectionSettings((prevRows) => {
+      const applyValue = (row) => {
+        if (fieldName === 'selectedModelId') {
+          const targetModel = models.find(model => model.id === value)
+          const targetModelClasses = targetModel?.label_set?.labels?.map(label => label.name) || []
+          return { ...row, selectedModelId: value, selectedClasses: targetModelClasses }
+        }
+        return { ...row, [fieldName]: value }
+      }
+
+      if (!propagateSettings || !SETTINGS_FIELDS.includes(fieldName)) {
+        return prevRows.map(r => r.id === rowId ? applyValue(r) : r)
+      }
+
+      const channelRows = prevRows.filter(r => r.channelId === channelId)
+      const targetIndex = channelRows.findIndex(r => r.id === rowId)
+      if (targetIndex === -1) return prevRows.map(r => r.id === rowId ? applyValue(r) : r)
+
+      const byChannel = new Map()
+      prevRows.forEach(r => {
+        if (!byChannel.has(r.channelId)) byChannel.set(r.channelId, [])
+        byChannel.get(r.channelId).push(r)
+      })
+      const idsToUpdate = new Set()
+      byChannel.forEach(rows => {
+        if (rows[targetIndex]) idsToUpdate.add(rows[targetIndex].id)
+      })
+      return prevRows.map(r => idsToUpdate.has(r.id) ? applyValue(r) : r)
+    })
+  }
 
   const handleToggleRowVisibility = (rowId) => {
     // 1. Calculate next visibility status based on current active state array
     const isCurrentlyVisible = activeRowIds.includes(rowId)
     const nextVisibility = !isCurrentlyVisible
 
-    setActiveRowIds(prev => 
-      isCurrentlyVisible 
-        ? prev.filter(activeId => activeId !== rowId) 
+    setActiveRowIds(prev =>
+      isCurrentlyVisible
+        ? prev.filter(activeId => activeId !== rowId)
         : [...prev, rowId]
     )
 
     // 2. Map through the flat boxes state array to flip the renderStyle of matching items
-    setBoxes(prevBoxes => 
+    setBoxes(prevBoxes =>
       prevBoxes.map(box => {
         if (box.annotation_id !== rowId) return box
 
         // If the row is visible, check the box data to see if it was auto-detected or manually drawn
         return {
           ...box,
-          renderStyle: nextVisibility 
-            ? (box.is_detected ? 'dashed' : 'solid') 
+          renderStyle: nextVisibility
+            ? (box.is_detected ? 'dashed' : 'solid')
             : 'invisible'
         }
       })
     )
   }
 
-  const handleAddRow = () => {
-    const newRow = createEmptyRow()
-    setDetectionSettings((prevRows) => [...prevRows, newRow])
-    setActiveRowIds((prevActive) => [...prevActive, newRow.id]) // Default new row to visible
+  // Clicking a channel's "+" opens a file picker; the actual channel gets
+  // created in handleAddChannelFile once a file is chosen.
+  const handleAddChannelClick = () => {
+    if (!imageID) {
+      alert('Load an image first.')
+      return
+    }
+    channelFileInputRef.current?.click()
   }
-  const handleDeleteRow = async (targetIndex) => {
-    const targetRow = detectionSettings[targetIndex]
-    if (!targetRow) return
 
-    // A row only exists in the backend once it has a matching entry in `annotations`
-    // (set by load-annotations or detect()). Rows added locally via "Add" but never
-    // detected/saved yet only carry a client-generated temp id — nothing to delete server-side.
-    const isPersisted = annotations.some(ann =>
-      ann.detection_setting_id === targetRow.id ||
-      ann.id === targetRow.id ||
-      ann.annotation_id === targetRow.id
-    )
+  const handleAddChannelFile = async (e) => {
+    const file = e.target.files[0]
+    e.target.value = null
+    if (!file) return
 
-    if (isPersisted) {
+    setIsLoading(true)
+    setLoadingMessage('Adding channel...')
+    try {
+      const formData = new FormData()
+      formData.append('image_id', imageID)
+      formData.append('file', file)
+
+      const res = await fetch(`${API_BASE_URL}/add-channel`, {
+        method: 'POST',
+        body: formData,
+        credentials: 'include',
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => null)
+        throw new Error(err?.error || 'Add channel failed')
+      }
+      const channel = await res.json()
+      const newChannelRow = buildChannelRow(channel)
+
+      // Propagating means every channel's detection-setting list stays mirrored -
+      // clone the first channel's rows into the new one so positions still line up.
+      const templateChannelId = channels[0]?.id
+      const templateRows = templateChannelId ? detectionSettings.filter(r => r.channelId === templateChannelId) : []
+      const newSettingRows = propagateSettings && templateRows.length > 0
+        ? templateRows.map(t => ({ ...t, id: generateId(), detectionSettingId: generateId(), channelId: newChannelRow.id }))
+        : [buildDetectionSettingRow(newChannelRow.id, null)]
+
+      setChannels(prev => [...prev, newChannelRow])
+      setDetectionSettings(prev => [...prev, ...newSettingRows])
+      setActiveRowIds(prev => [...prev, ...newSettingRows.map(r => r.id)])
+    } catch (err) {
+      alert('Add channel failed: ' + err.message)
+    } finally {
+      setIsLoading(false)
+      setLoadingMessage('Processing...')
+    }
+  }
+
+  const handleDeleteChannelRow = async (targetIndex) => {
+    const targetChannel = channels[targetIndex]
+    if (!targetChannel) return
+
+    if (channels.length <= 1) {
+      alert("Cannot delete an image's only channel — delete the image instead.")
+      return
+    }
+
+    const confirmDelete = window.confirm(`Delete channel "${targetChannel.channelName}"? This also deletes all of its detection settings and annotations.`)
+    if (!confirmDelete) return
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/delete-channel`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_id: targetChannel.id }),
+        credentials: 'include',
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => null)
+        throw new Error(err?.error || 'Delete failed')
+      }
+    } catch (e) {
+      alert('Delete failed: ' + e.message)
+      return
+    }
+
+    const removedSettingIds = new Set(detectionSettings.filter(r => r.channelId === targetChannel.id).map(r => r.id))
+    const remainingChannels = channels.filter((_, i) => i !== targetIndex)
+    const remainingSettings = detectionSettings.filter(r => r.channelId !== targetChannel.id)
+
+    setChannels(remainingChannels)
+    setDetectionSettings(remainingSettings)
+    setActiveRowIds(prevActive => prevActive.filter(id => !removedSettingIds.has(id)))
+    setAnnotations(prevAnnos => prevAnnos.filter(ann => ann.channel_id !== targetChannel.id))
+    setBoxes(prevBoxes => prevBoxes.filter(box => box.channel_id !== targetChannel.id))
+
+    if (selectedChannelId === targetChannel.id) {
+      const nextChannel = remainingChannels.find(c => c.isBaseChannel) || remainingChannels[0]
+      if (nextChannel) {
+        setSelectedChannelId(nextChannel.id)
+        setImageURL(nextChannel.channelUrl)
+        const firstSetting = remainingSettings.find(r => r.channelId === nextChannel.id)
+        setSelectedDetectionSettingId(firstSetting ? firstSetting.id : null)
+      } else {
+        setSelectedChannelId(null)
+        setSelectedDetectionSettingId(null)
+      }
+    }
+  }
+
+  const handleSelectChannel = (id) => {
+    setSelectedChannelId(id)
+    setCurrentClass(0)
+    const channel = channels.find(c => c.id === id)
+    if (channel?.channelUrl) {
+      setImageURL(channel.channelUrl)
+    }
+    const firstSetting = detectionSettings.find(r => r.channelId === id)
+    setSelectedDetectionSettingId(firstSetting ? firstSetting.id : null)
+  }
+
+  const handleSelectDetectionSetting = (channelId, id) => {
+    setSelectedDetectionSettingId(id)
+    setCurrentClass(0)
+    // Selecting a setting from a different channel's nested menu also switches the viewed channel.
+    if (channelId !== selectedChannelId) {
+      setSelectedChannelId(channelId)
+      const channel = channels.find(c => c.id === channelId)
+      if (channel?.channelUrl) setImageURL(channel.channelUrl)
+    }
+  }
+
+  // Adds a new detection-setting row to one channel. When propagating, a
+  // matching blank row is appended to every other channel too, so every
+  // channel's Nth row stays the same pipeline.
+  const handleAddDetectionSetting = (channelId) => {
+    const newRow = buildDetectionSettingRow(channelId, null)
+    let newRows = [newRow]
+    if (propagateSettings) {
+      newRows = [
+        newRow,
+        ...channels.filter(c => c.id !== channelId).map(c => ({ ...newRow, id: generateId(), detectionSettingId: generateId(), channelId: c.id }))
+      ]
+    }
+    setDetectionSettings(prev => [...prev, ...newRows])
+    setActiveRowIds(prev => [...prev, ...newRows.map(r => r.id)])
+    setSelectedDetectionSettingId(newRow.id)
+    setSelectedChannelId(channelId)
+    const channel = channels.find(c => c.id === channelId)
+    if (channel?.channelUrl) setImageURL(channel.channelUrl)
+  }
+
+  // Deletes one detection-setting row. When propagating, the row at the same
+  // position gets deleted from every channel too, keeping positions aligned.
+  const handleDeleteDetectionSetting = async (channelId, rowId) => {
+    const channelRows = detectionSettings.filter(r => r.channelId === channelId)
+    const targetIndex = channelRows.findIndex(r => r.id === rowId)
+    if (targetIndex === -1) return
+
+    let targets = [{ channelId, id: rowId, detectionSettingId: channelRows[targetIndex].detectionSettingId }]
+    if (propagateSettings) {
+      targets = []
+      detectionSettingsByChannel().forEach((rows, cId) => {
+        if (rows[targetIndex]) targets.push({ channelId: cId, id: rows[targetIndex].id, detectionSettingId: rows[targetIndex].detectionSettingId })
+      })
+    }
+
+    for (const t of targets) {
+      const isPersisted = annotations.some(a => a.id === t.id)
+      if (!isPersisted) continue
       try {
         const res = await fetch(`${API_BASE_URL}/delete-annotation`, {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image_id: imageID, detection_setting_id: targetRow.id }),
+          body: JSON.stringify({ channel_id: t.channelId, detection_setting_id: t.detectionSettingId }),
           credentials: 'include',
         })
         if (!res.ok) throw new Error('Delete failed')
       } catch (e) {
-        alert('Delete failed: ' + (e.response?.data?.error || e.message))
+        alert('Delete failed: ' + e.message)
         return
       }
     }
 
-    setDetectionSettings((prevRows) => prevRows.filter((_, i) => i !== targetIndex))
-    setActiveRowIds((prevActive) => prevActive.filter(id => id !== targetRow.id))
-    setAnnotations(prevAnnos => prevAnnos.filter(ann =>
-      ann.detection_setting_id !== targetRow.id &&
-      ann.id !== targetRow.id &&
-      ann.annotation_id !== targetRow.id
-    ))
-    setBoxes(prevBoxes => prevBoxes.filter(box => box.annotation_id !== targetRow.id))
-  }
-  const handleSelectRow = (id) => {
-    setSelectedRowId(id)
-    setCurrentClass(0)
+    const targetIds = new Set(targets.map(t => t.id))
+    setDetectionSettings(prev => prev.filter(r => !targetIds.has(r.id)))
+    setActiveRowIds(prev => prev.filter(id => !targetIds.has(id)))
+    setAnnotations(prev => prev.filter(a => !targetIds.has(a.id)))
+    setBoxes(prev => prev.filter(b => !targetIds.has(b.annotation_id)))
+
+    if (targetIds.has(selectedDetectionSettingId)) {
+      const remaining = detectionSettings.filter(r => r.channelId === selectedChannelId && !targetIds.has(r.id))
+      setSelectedDetectionSettingId(remaining[0]?.id ?? null)
+    }
   }
 
-  const selectedRow = detectionSettings.find(r => r.id === selectedRowId)
+  // Toggles whether a channel's image layer and annotations show in the overlay view.
+  const handleToggleChannelVisibility = (channelId) => {
+    setChannels(prev => prev.map(c => c.id === channelId ? { ...c, visible: !c.visible } : c))
+  }
+
+  async function commitChannelRename(index) {
+    const channel = channels[index]
+    setChannelRenameIndex(null)
+    if (!channel) return
+    const trimmed = channelNameDraft.trim()
+    if (!trimmed || trimmed === channel.channelName) return
+
+    setChannels(prev => prev.map((c, i) => i === index ? { ...c, channelName: trimmed } : c))
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/update-channel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_id: channel.id, name: trimmed }),
+        credentials: 'include',
+      })
+      if (!res.ok) throw new Error('Rename failed')
+    } catch (e) {
+      alert('Rename failed: ' + e.message)
+      setChannels(prev => prev.map((c, i) => i === index ? { ...c, channelName: channel.channelName } : c))
+    }
+  }
+
+  const selectedRow = detectionSettings.find(r => r.id === selectedDetectionSettingId)
   const selectedRowModel = models.find(m => m.id === selectedRow?.selectedModelId)
   const selectedRowClasses = selectedRowModel?.label_set?.labels || []
   const [activeRowIds, setActiveRowIds] = useState([detectionSettings[0]?.id].filter(Boolean))
+
+  // "Overlay channels" composites every visible channel (tinted by its assigned
+  // color) onto the canvas; otherwise only the currently selected channel is shown.
+  const visibleChannelIds = new Set(channels.filter(c => c.visible !== false).map(c => c.id))
+  const canvasLayers = overlayChannels
+    ? channels.filter(c => visibleChannelIds.has(c.id)).map(c => ({ id: c.id, src: c.channelUrl, color: c.channelColor }))
+    : (selectedChannelId ? [{ id: selectedChannelId, src: imageURL, color: null }] : [])
 
   useEffect(() => {
     console.log(detectionSettings)
@@ -2298,74 +2549,107 @@ export default function CellAnnotationTool() {
                 </Fragment>
               )}
             </PopupState>
-            <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
-              <Checkbox
-                checked={showLabels}
-                onChange={(e) => setShowLabels(e.target.checked)}
-                size='small'
-                sx={{ p: 0, mr: 0.5 }}
-              />
-              <Typography variant='body2'>Show labels</Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.5 }}>
+              <Typography variant='subtitle2' sx={{ fontWeight: 'bold' }}>Channels</Typography>
+              <IconButton
+                size="small"
+                color="primary"
+                onClick={(e) => setChannelsViewSettingsAnchor(e.currentTarget)}
+              >
+                <SettingsIcon fontSize="small" />
+              </IconButton>
             </Box>
+            <Popover
+              open={Boolean(channelsViewSettingsAnchor)}
+              anchorEl={channelsViewSettingsAnchor}
+              onClose={() => setChannelsViewSettingsAnchor(null)}
+              anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+            >
+              <Box sx={{ p: 1.5, display: 'flex', flexDirection: 'column', minWidth: 260 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
+                  <Checkbox
+                    checked={showLabels}
+                    onChange={(e) => setShowLabels(e.target.checked)}
+                    size='small'
+                    sx={{ p: 0, mr: 0.5 }}
+                  />
+                  <Typography variant='body2'>Show labels</Typography>
+                </Box>
+                <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
+                  <Checkbox
+                    checked={propagateSettings}
+                    onChange={(e) => setPropagateSettings(e.target.checked)}
+                    size='small'
+                    sx={{ p: 0, mr: 0.5 }}
+                  />
+                  <Typography variant='body2'>Propagate detection settings to all channels</Typography>
+                </Box>
+                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                  <Checkbox
+                    checked={overlayChannels}
+                    onChange={(e) => setOverlayChannels(e.target.checked)}
+                    size='small'
+                    sx={{ p: 0, mr: 0.5 }}
+                  />
+                  <Typography variant='body2'>Overlay channels</Typography>
+                </Box>
+              </Box>
+            </Popover>
+            <input
+              type="file"
+              accept=".tiff,.tif"
+              ref={channelFileInputRef}
+              style={{ display: 'none' }}
+              onChange={handleAddChannelFile}
+            />
             <RowMenu
-              rows={detectionSettings}
-              onAdd={handleAddRow}
-              onDelete={handleDeleteRow}
-              onChange={handleRowChange}
-              selectedRowId={selectedRowId}
-              onSelect={handleSelectRow}
-              renderRowTemplate={(row, index, handleFieldChange) => {
-                const currentModelData = models.find(m => m.id === row.selectedModelId)
-                const isStardistRow = currentModelData?.name?.toLowerCase().includes('stardist') ?? false
-                const availableLabels = currentModelData?.label_set?.labels || []
-                const isVisible = activeRowIds.includes(row.id)
+              rows={channels}
+              onAdd={handleAddChannelClick}
+              onDelete={handleDeleteChannelRow}
+              onChange={() => {}}
+              selectedRowId={selectedChannelId}
+              onSelect={handleSelectChannel}
+              renderRowTemplate={(channelRow, index) => {
+                const channelDetectionRows = detectionSettings.filter(r => r.channelId === channelRow.id)
+                const modelNames = channelDetectionRows
+                  .map(r => models.find(m => m.id === r.selectedModelId)?.name)
+                  .filter(Boolean)
+                const isChannelVisible = channelRow.visible !== false
 
                 return (
-                  <Box 
-                    display="flex" 
-                    flexDirection="row" 
-                    alignItems="center" 
-                    gap={1} 
-                    width="100%"
-                    sx={{ 
-                      opacity: isVisible ? 1 : 0.5, // Dim the inner contents if hidden
-                      transition: 'opacity 0.15s ease-in-out'
-                    }}
-                  >
-                    {/* Visibility Toggle Eye (Acts like an illustration program layer checkbox) */}
-                    <IconButton
-                      size="small"
-                      onClick={(e) => {
-                        e.stopPropagation() // Vital: stops the row from getting highlighted/selected on eye click
-                        handleToggleRowVisibility(row.id)
-                      }}
-                      sx={{ mr: 0.5, flexShrink: 0, color: isVisible ? 'primary.main' : 'text.disabled' }}
-                    >
-                      {isVisible ? <VisibilityIcon fontSize="small" /> : <VisibilityOffIcon fontSize="small" />}
-                    </IconButton>
-                    
-                    <Box display="flex" flexDirection="column" sx={{ flexGrow: 1, minWidth: 0 }}>
-                      {/* Model name — double-click to open dropdown */}
-                      {modelDropdownIndex === index ? (
-                        <FormControl size="small" sx={{ minWidth: 100 }} onClick={e => e.stopPropagation()}>
-                          <Select
-                            open
-                            value={row.selectedModelId}
-                            onChange={(e) => {
-                              handleFieldChange('selectedModelId', e.target.value)
-                              setModelDropdownIndex(null)
-                            }}
-                            onClose={() => setModelDropdownIndex(null)}
-                            variant="standard"
-                            sx={{ fontSize: '0.875rem', fontWeight: 500 }}
-                          >
-                            {models.map((model) => (
-                              <MenuItem key={model.id} value={model.id}>
-                                {model.name}
-                              </MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
+                  <Box display="flex" flexDirection="row" alignItems="center" gap={1} width="100%">
+                    {/* Visibility toggle — whether this channel appears in the overlay view */}
+                    <Tooltip title={isChannelVisible ? 'Hide in overlay' : 'Show in overlay'} arrow>
+                      <IconButton
+                        size="small"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleToggleChannelVisibility(channelRow.id)
+                        }}
+                        sx={{ mr: 0.5, flexShrink: 0, color: isChannelVisible ? 'primary.main' : 'text.disabled' }}
+                      >
+                        {isChannelVisible ? <VisibilityIcon fontSize="small" /> : <VisibilityOffIcon fontSize="small" />}
+                      </IconButton>
+                    </Tooltip>
+
+                    <Box display="flex" flexDirection="column" sx={{ flexGrow: 1, minWidth: 0, opacity: isChannelVisible ? 1 : 0.5 }}>
+                      {/* Channel name — double-click to rename */}
+                      {channelRenameIndex === index ? (
+                        <TextField
+                          autoFocus
+                          size="small"
+                          variant="standard"
+                          value={channelNameDraft}
+                          onChange={(e) => setChannelNameDraft(e.target.value)}
+                          onBlur={() => commitChannelRename(index)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') commitChannelRename(index)
+                            if (e.key === 'Escape') setChannelRenameIndex(null)
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          sx={{ maxWidth: 160 }}
+                        />
                       ) : (
                         <Typography
                           variant="body2"
@@ -2373,179 +2657,255 @@ export default function CellAnnotationTool() {
                           noWrap
                           onDoubleClick={(e) => {
                             e.stopPropagation()
-                            setModelDropdownIndex(index)
+                            setChannelRenameIndex(index)
+                            setChannelNameDraft(channelRow.channelName || '')
                           }}
-                          sx={{ minWidth: 60, cursor: 'text', px: 0.5, borderRadius: 0.5, '&:hover': { bgcolor: 'action.focus' } }}
+                          sx={{ cursor: 'text', px: 0.5, borderRadius: 0.5, '&:hover': { bgcolor: 'action.focus' } }}
                         >
-                          {currentModelData?.name || 'No model'}
+                          {channelRow.channelName || 'Channel'}
+                          {channelRow.isBaseChannel && (
+                            <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
+                              (base)
+                            </Typography>
+                          )}
                         </Typography>
                       )}
 
-                      {/* Sublabel — double-click to edit inline */}
-                      {editingSublabelIndex === index ? (
-                        <TextField
-                          autoFocus
-                          size="small"
-                          variant="standard"
-                          value={sublabelDraft}
-                          onChange={(e) => setSublabelDraft(e.target.value)}
-                          onBlur={() => {
-                            handleFieldChange('rowSublabel', sublabelDraft)
-                            setEditingSublabelIndex(null)
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              handleFieldChange('rowSublabel', sublabelDraft)
-                              setEditingSublabelIndex(null)
-                            }
-                            if (e.key === 'Escape') setEditingSublabelIndex(null)
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                          sx={{ maxWidth: 120 }}
-                        />
-                      ) : (
-                        <Typography
-                          variant="body2"
-                          color="text.secondary"
-                          noWrap
-                          onDoubleClick={(e) => {
-                            e.stopPropagation()
-                            setEditingSublabelIndex(index)
-                            setSublabelDraft(row.rowSublabel || '')
-                          }}
-                          sx={{ flexGrow: 1, cursor: 'text', px: 0.5, borderRadius: 0.5, '&:hover': { bgcolor: 'action.focus' } }}
-                        >
-                          {row.rowSublabel || '...'}
-                        </Typography>
-                      )}
+                      {/* Summary of this channel's detection settings — edited via the nested menu */}
+                      <Typography variant="caption" color="text.secondary" noWrap sx={{ px: 0.5 }}>
+                        {modelNames.length > 0 ? modelNames.join(', ') : 'No detection settings'}
+                      </Typography>
                     </Box>
 
-                    {/* Settings button */}
+                    {/* Overlay tint color — frontend-only for now, used when "Overlay channels" is on */}
+                    <Tooltip title="Overlay color" arrow>
+                      <input
+                        type="color"
+                        value={channelRow.channelColor}
+                        onChange={(e) => {
+                          const newColor = e.target.value
+                          setChannels(prev => prev.map((c, i) => i === index ? { ...c, channelColor: newColor } : c))
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                          width: '20px',
+                          height: '20px',
+                          padding: 0,
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          backgroundColor: 'transparent',
+                          flexShrink: 0,
+                        }}
+                      />
+                    </Tooltip>
+
+                    {/* Settings button — opens this channel's detection-settings menu */}
                     <IconButton
                       size="small"
                       onClick={(e) => {
                         e.stopPropagation()
-                        setSettingsRowIndex(index)
-                        setSettingsAnchor(e.currentTarget)
+                        setChannelSettingsChannelId(channelRow.id)
+                        setChannelSettingsAnchor(e.currentTarget)
                       }}
                       sx={{ flexShrink: 0 }}
                     >
                       <SettingsIcon fontSize="small" />
                     </IconButton>
 
-                    {/* Settings popover */}
-                    {settingsRowIndex === index && (
+                    {/* Nested RowMenu of this channel's detection settings */}
+                    {channelSettingsChannelId === channelRow.id && (
                       <Popover
-                        open={Boolean(settingsAnchor) && settingsRowIndex === index}
-                        anchorEl={settingsAnchor}
-                        onClose={() => { setSettingsAnchor(null); setSettingsRowIndex(null) }}
-                        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+                        open={Boolean(channelSettingsAnchor) && channelSettingsChannelId === channelRow.id}
+                        anchorEl={channelSettingsAnchor}
+                        onClose={() => { setChannelSettingsAnchor(null); setChannelSettingsChannelId(null) }}
+                        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
                         transformOrigin={{ vertical: 'top', horizontal: 'left' }}
                         onClick={(e) => e.stopPropagation()}
                       >
-                        <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 280 }}>
-                          <FormControl fullWidth size="small">
-                            <InputLabel>Model</InputLabel>
-                            <Select
-                              value={row.selectedModelId}
-                              label="Model"
-                              onChange={(e) => handleFieldChange('selectedModelId', e.target.value)}
-                            >
-                              {models.map((model) => (
-                                <MenuItem key={model.id} value={model.id}>
-                                  {model.name}
-                                </MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          <FormControl fullWidth size="small" disabled={!row.selectedModelId}>
-                            <InputLabel>Classes</InputLabel>
-                            <Select
-                              multiple
-                              value={row.selectedClasses}
-                              label="Classes"
-                              onChange={(e) => handleFieldChange('selectedClasses', e.target.value)}
-                              input={<OutlinedInput label="Classes" />}
-                              renderValue={(selected) => (
-                                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                                  {selected.map((value) => {
-                                    const labelObj = availableLabels.find(l => l.name === value)
-                                    return (
-                                      <Chip
-                                        key={value}
-                                        label={value}
-                                        size="small"
-                                        style={{ backgroundColor: labelObj?.color, color: '#fff', fontWeight: 'bold' }}
-                                      />
-                                    )
-                                  })}
+                        <Box sx={{ p: 1.5, minWidth: 320, maxWidth: 380 }}>
+                          <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
+                            Detection Settings — {channelRow.channelName}
+                          </Typography>
+                          <RowMenu
+                            rows={channelDetectionRows}
+                            onAdd={() => handleAddDetectionSetting(channelRow.id)}
+                            onDelete={(idx) => handleDeleteDetectionSetting(channelRow.id, channelDetectionRows[idx].id)}
+                            onChange={(idx, field, value) => handleDetectionSettingChange(channelRow.id, channelDetectionRows[idx].id, field, value)}
+                            selectedRowId={selectedDetectionSettingId}
+                            onSelect={(id) => handleSelectDetectionSetting(channelRow.id, id)}
+                            renderRowTemplate={(settingRow, settingIndex, handleFieldChange) => {
+                              const currentModelData = models.find(m => m.id === settingRow.selectedModelId)
+                              const isStardistRow = currentModelData?.name?.toLowerCase().includes('stardist') ?? false
+                              const availableLabels = currentModelData?.label_set?.labels || []
+                              const isVisible = activeRowIds.includes(settingRow.id)
+
+                              return (
+                                <Box
+                                  display="flex"
+                                  flexDirection="row"
+                                  alignItems="center"
+                                  gap={1}
+                                  width="100%"
+                                  sx={{
+                                    opacity: isVisible ? 1 : 0.5, // Dim the inner contents if hidden
+                                    transition: 'opacity 0.15s ease-in-out'
+                                  }}
+                                >
+                                  {/* Visibility Toggle Eye (Acts like an illustration program layer checkbox) */}
+                                  <IconButton
+                                    size="small"
+                                    onClick={(e) => {
+                                      e.stopPropagation() // Vital: stops the row from getting highlighted/selected on eye click
+                                      handleToggleRowVisibility(settingRow.id)
+                                    }}
+                                    sx={{ mr: 0.5, flexShrink: 0, color: isVisible ? 'primary.main' : 'text.disabled' }}
+                                  >
+                                    {isVisible ? <VisibilityIcon fontSize="small" /> : <VisibilityOffIcon fontSize="small" />}
+                                  </IconButton>
+
+                                  <Box display="flex" flexDirection="column" sx={{ flexGrow: 1, minWidth: 0 }}>
+                                    <Typography variant="body2" fontWeight={500} noWrap sx={{ px: 0.5 }}>
+                                      {currentModelData?.name || 'No model'}
+                                    </Typography>
+                                    <Typography variant="caption" color="text.secondary" noWrap sx={{ px: 0.5 }}>
+                                      {settingRow.rowSublabel || '...'}
+                                    </Typography>
+                                  </Box>
+
+                                  {/* Settings button */}
+                                  <IconButton
+                                    size="small"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setSettingsRowId(settingRow.id)
+                                      setSettingsAnchor(e.currentTarget)
+                                    }}
+                                    sx={{ flexShrink: 0 }}
+                                  >
+                                    <SettingsIcon fontSize="small" />
+                                  </IconButton>
+
+                                  {/* Settings popover */}
+                                  {settingsRowId === settingRow.id && (
+                                    <Popover
+                                      open={Boolean(settingsAnchor) && settingsRowId === settingRow.id}
+                                      anchorEl={settingsAnchor}
+                                      onClose={() => { setSettingsAnchor(null); setSettingsRowId(null) }}
+                                      anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+                                      transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 280 }}>
+                                        <FormControl fullWidth size="small">
+                                          <InputLabel>Model</InputLabel>
+                                          <Select
+                                            value={settingRow.selectedModelId}
+                                            label="Model"
+                                            onChange={(e) => handleFieldChange('selectedModelId', e.target.value)}
+                                          >
+                                            {models.map((model) => (
+                                              <MenuItem key={model.id} value={model.id}>
+                                                {model.name}
+                                              </MenuItem>
+                                            ))}
+                                          </Select>
+                                        </FormControl>
+                                        <FormControl fullWidth size="small" disabled={!settingRow.selectedModelId}>
+                                          <InputLabel>Classes</InputLabel>
+                                          <Select
+                                            multiple
+                                            value={settingRow.selectedClasses}
+                                            label="Classes"
+                                            onChange={(e) => handleFieldChange('selectedClasses', e.target.value)}
+                                            input={<OutlinedInput label="Classes" />}
+                                            renderValue={(selected) => (
+                                              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                                                {selected.map((value) => {
+                                                  const labelObj = availableLabels.find(l => l.name === value)
+                                                  return (
+                                                    <Chip
+                                                      key={value}
+                                                      label={value}
+                                                      size="small"
+                                                      style={{ backgroundColor: labelObj?.color, color: '#fff', fontWeight: 'bold' }}
+                                                    />
+                                                  )
+                                                })}
+                                              </Box>
+                                            )}
+                                          >
+                                            {availableLabels.map((label) => (
+                                              <MenuItem key={label.name} value={label.name}>
+                                                {label.name}
+                                              </MenuItem>
+                                            ))}
+                                          </Select>
+                                        </FormControl>
+                                        <TextField
+                                          label="Sublabel"
+                                          size="small"
+                                          value={settingRow.rowSublabel || ''}
+                                          onChange={(e) => handleFieldChange('rowSublabel', e.target.value)}
+                                        />
+                                        <TextField
+                                          label="Threshold (0-1)"
+                                          type="number"
+                                          size="small"
+                                          inputProps={{ step: '0.1', min: '0', max: '1' }}
+                                          value={settingRow.rowThreshold}
+                                          onChange={(e) => {
+                                            let val = parseFloat(e.target.value)
+                                            if (val > 1) val = 1
+                                            if (val < 0) val = 0
+                                            handleFieldChange('rowThreshold', isNaN(val) ? '' : val)
+                                          }}
+                                        />
+                                        {isStardistRow ? (
+                                          <>
+                                            <TextField
+                                              label="Minimum Cell Diameter"
+                                              type="number"
+                                              size="small"
+                                              inputProps={{ step: '1' }}
+                                              value={settingRow.rowMinDiameter}
+                                              onChange={(e) => {
+                                                const val = parseInt(e.target.value, 10)
+                                                handleFieldChange('rowMinDiameter', isNaN(val) ? '' : val)
+                                              }}
+                                            />
+                                            <TextField
+                                              label="Maximum Cell Diameter"
+                                              type="number"
+                                              size="small"
+                                              inputProps={{ step: '1' }}
+                                              value={settingRow.rowMaxDiameter}
+                                              onChange={(e) => {
+                                                const val = parseInt(e.target.value, 10)
+                                                handleFieldChange('rowMaxDiameter', isNaN(val) ? '' : val)
+                                              }}
+                                            />
+                                          </>
+                                        ) : (
+                                          <TextField
+                                            label="Cell Diameter"
+                                            type="number"
+                                            size="small"
+                                            inputProps={{ step: '1' }}
+                                            value={settingRow.rowDiameter}
+                                            onChange={(e) => {
+                                              const val = parseInt(e.target.value, 10)
+                                              handleFieldChange('rowDiameter', isNaN(val) ? '' : val)
+                                            }}
+                                          />
+                                        )}
+                                      </Box>
+                                    </Popover>
+                                  )}
                                 </Box>
-                              )}
-                            >
-                              {availableLabels.map((label) => (
-                                <MenuItem key={label.name} value={label.name}>
-                                  {label.name}
-                                </MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          <TextField
-                            label="Sublabel"
-                            size="small"
-                            value={row.rowSublabel || ''}
-                            onChange={(e) => handleFieldChange('rowSublabel', e.target.value)}
-                          />
-                          <TextField
-                            label="Threshold (0-1)"
-                            type="number"
-                            size="small"
-                            inputProps={{ step: '0.1', min: '0', max: '1' }}
-                            value={row.rowThreshold}
-                            onChange={(e) => {
-                              let val = parseFloat(e.target.value)
-                              if (val > 1) val = 1
-                              if (val < 0) val = 0
-                              handleFieldChange('rowThreshold', isNaN(val) ? '' : val)
+                              )
                             }}
                           />
-                          {isStardistRow ? (
-                            <>
-                              <TextField
-                                label="Minimum Cell Diameter"
-                                type="number"
-                                size="small"
-                                inputProps={{ step: '1' }}
-                                value={row.rowMinDiameter}
-                                onChange={(e) => {
-                                  const val = parseInt(e.target.value, 10)
-                                  handleFieldChange('rowMinDiameter', isNaN(val) ? '' : val)
-                                }}
-                              />
-                              <TextField
-                                label="Maximum Cell Diameter"
-                                type="number"
-                                size="small"
-                                inputProps={{ step: '1' }}
-                                value={row.rowMaxDiameter}
-                                onChange={(e) => {
-                                  const val = parseInt(e.target.value, 10)
-                                  handleFieldChange('rowMaxDiameter', isNaN(val) ? '' : val)
-                                }}
-                              />
-                            </>
-                          ) : (
-                            <TextField
-                              label="Cell Diameter"
-                              type="number"
-                              size="small"
-                              inputProps={{ step: '1' }}
-                              value={row.rowDiameter}
-                              onChange={(e) => {
-                                const val = parseInt(e.target.value, 10)
-                                handleFieldChange('rowDiameter', isNaN(val) ? '' : val)
-                              }}
-                            />
-                          )}
                         </Box>
                       </Popover>
                     )}
@@ -3158,7 +3518,7 @@ export default function CellAnnotationTool() {
             </Typography>
           </Box>
           <Box sx={{ flexGrow: 1, display: 'flex', justifyContent: 'center', bgcolor: '#111' }}>
-            <ImageCanvas src={imageURL} boxes={boxes} onAddBox={handleAddBox}
+            <ImageCanvas layers={canvasLayers} boxes={overlayChannels ? boxes.filter(b => visibleChannelIds.has(b.channel_id)) : boxes.filter(b => b.channel_id === selectedChannelId)} onAddBox={handleAddBox}
               onRemoveBox={handleRemoveBox} isCropping={isCropping} onCrop={handleCrop}
               currentClass={currentClass} classes={classes} imageSize={imageSize}
               brightness={brightness} contrast={contrast}
