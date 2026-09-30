@@ -129,11 +129,14 @@ def run_stardist_subprocess(image_path, model_path, image_width, image_height,
 
     return yolo_output
 
-def resolve_detection_setting(user_id, weights_id, params, detection_setting_id=None):
+def resolve_detection_setting(user_id, weights_id, params, detection_setting_id=None, *, preserve_existing=False):
     """
     Finds or creates the DetectionSetting record for a row, given its
     detection_setting_id (which may be a real id, a stale id, or a frontend
     temp id) plus the settings to use for this run.
+
+    With preserve_existing=True, changed parameters resolve to a matching/new
+    setting rather than mutating a record shared by other channels.
 
     Returns (setting, params_changed). params_changed is True when a row with
     a real existing id was resolved but its stored params differed from the
@@ -146,11 +149,17 @@ def resolve_detection_setting(user_id, weights_id, params, detection_setting_id=
     if setting:
         # Row already has a real settings record - update it if the values changed.
         params_changed = setting.weights_id != weights_id or setting.params != params
-        if params_changed:
-            setting.weights_id = weights_id
-            setting.params = params
-            flag_modified(setting, "params")
-        return setting, params_changed
+        if params_changed and preserve_existing:
+            # Batch rows can share this id while requesting different settings.
+            # Resolve a matching/new record below instead of changing the model
+            # and labels associated with another channel's saved annotations.
+            setting = None
+        else:
+            if params_changed:
+                setting.weights_id = weights_id
+                setting.params = params
+                flag_modified(setting, "params")
+            return setting, params_changed
 
     # No record for this id - look for an existing duplicate before creating one.
     candidates = DetectionSetting.query.filter_by(user_id=user_id, weights_id=weights_id).all()
@@ -1782,7 +1791,8 @@ def batch_detect():
             }
 
             setting, params_changed = resolve_detection_setting(
-                g.user.id, model_id, params, row.get('detection_setting_id')
+                g.user.id, model_id, params, row.get('detection_setting_id'),
+                preserve_existing=True,
             )
 
             resolved_rows.append({
@@ -1830,6 +1840,7 @@ def batch_detect():
                         row_results.append({
                             "detection_setting_id": setting.id,
                             "channel_id": channel.id,
+                            "channel_order": r["channel_order"],
                             "skipped": True,
                             "count_detected": existing.count_detected
                         })
@@ -1865,6 +1876,7 @@ def batch_detect():
                     row_results.append({
                         "detection_setting_id": setting.id,
                         "channel_id": channel.id,
+                        "channel_order": r["channel_order"],
                         "skipped": False,
                         "count_detected": len(converted_annotations)
                     })
@@ -2365,4 +2377,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5001, debug=True, threaded=True)

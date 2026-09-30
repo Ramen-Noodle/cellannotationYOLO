@@ -564,7 +564,7 @@ export default function CellAnnotationTool() {
       channelId,
       detectionSettingId: existingAnnotation?.detection_setting_id ?? generateId(),
       selectedModelId: existingAnnotation?.weights_id ?? (defaultModel ? defaultModel.id : ''),
-      selectedClasses: labels.length ? labels.map(l => l.name) : defaultClasses,
+      selectedClasses: existingAnnotation?.selected_classes ?? (labels.length ? labels.map(l => l.name) : defaultClasses),
       rowThreshold: existingAnnotation?.threshold ?? 0.5,
       rowDiameter: existingAnnotation?.cell_diameter ?? 34,
       rowMinDiameter: existingAnnotation?.min_cell_diameter ?? 7,
@@ -625,15 +625,15 @@ export default function CellAnnotationTool() {
         // Group boxes by the Annotation's own id, not detection_setting_id -
         // the latter can be shared across channels (see buildDetectionSettingRow).
         const rowId = modelObj.id
-        const labels = modelObj.labels.labels
+        const labels = modelObj.labels?.labels || []
 
         const detectedBoxes = (modelObj.annotations_detected || []).map((box) => ({
           ...box,
           annotation_id: rowId,
           channel_id: channelId,
           is_detected: true,
-          name: labels[box.class].name,
-          color: labels[box.class].color,
+          name: labels[box.class]?.name ?? `Class ${box.class}`,
+          color: labels[box.class]?.color ?? '#ffffff',
           renderStyle: 'dashed'
         }))
 
@@ -642,8 +642,8 @@ export default function CellAnnotationTool() {
           annotation_id: rowId,
           channel_id: channelId,
           is_detected: false,
-          name: labels[box.class].name,
-          color: labels[box.class].color,
+          name: labels[box.class]?.name ?? `Class ${box.class}`,
+          color: labels[box.class]?.color ?? '#ffffff',
           renderStyle: 'solid'
         }))
 
@@ -668,6 +668,7 @@ export default function CellAnnotationTool() {
       }
     } catch (e) {
       console.error('Annotation load failed:', e.message)
+      alert(`Could not display saved annotations: ${e.message}`)
     }
   }
 
@@ -1281,17 +1282,26 @@ export default function CellAnnotationTool() {
       }
       const data = await res.json()
 
-      // Rows selected via a local temp id get resolved to a real backend id
-      // on their first run - patch that back into local state.
-      for (const { request_row_id, detection_setting_id } of data.resolved_settings || []) {
-        if (request_row_id && detection_setting_id && request_row_id !== detection_setting_id) {
-          setDetectionSettings(prev => prev.map(r => r.id === request_row_id ? { ...r, detectionSettingId: detection_setting_id } : r))
-        }
-      }
+      // Batch drafts may differ from the sidebar row they originated from.
+      // Reconcile batch state only; reload the current image from saved records.
+      const resolvedIds = new Map((data.resolved_settings || []).map(item =>
+        [item.request_row_id, item.detection_setting_id]))
+      setBatchDetectionSettings(prev => prev.map(row => resolvedIds.has(row.id)
+        ? { ...row, detectionSettingId: resolvedIds.get(row.id), batchDraft: false }
+        : row))
 
-      const failures = (data.results || []).filter(r => !r.success)
-        .map(r => `${imageSets.find(s => s.id === batchImageSetId)?.images?.find(img => img.id === r.image_id)?.name || r.image_id}: ${r.error}`)
-      alert(`Batch complete: ${data.succeeded}/${data.total} images processed${data.failed > 0 ? `, ${data.failed} failed` : ''}; ${data.missing_channel_rows || 0} rows skipped for missing channels.${failures.length ? '\n' + failures.join('\n') : ''}`)
+      const batchImages = imageSets.find(s => s.id === batchImageSetId)?.images || []
+      const details = (data.results || []).map(result => {
+        const imageName = batchImages.find(img => img.id === result.image_id)?.name || result.image_id
+        if (!result.success) return `${imageName}: failed — ${result.error}`
+        const rows = (result.rows || []).map(row => {
+          const channel = Number.isInteger(row.channel_order) ? `C${row.channel_order + 1}` : row.channel_id || 'Channel'
+          if (row.reason === 'missing_channel') return `${channel}: skipped (missing channel)`
+          return `${channel}: ${row.count_detected ?? 0} boxes${row.skipped ? ' (kept existing)' : ' saved'}`
+        })
+        return `${imageName}: ${rows.join('; ')}`
+      })
+      alert(`Batch complete: ${data.succeeded}/${data.total} images processed; ${data.failed} failed.\n${details.join('\n')}`)
 
       if (imageID) {
         await renderAnnotations(imageID, selectedChannelId)
