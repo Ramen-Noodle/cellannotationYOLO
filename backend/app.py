@@ -129,11 +129,14 @@ def run_stardist_subprocess(image_path, model_path, image_width, image_height,
 
     return yolo_output
 
-def resolve_detection_setting(user_id, weights_id, params, detection_setting_id=None):
+def resolve_detection_setting(user_id, weights_id, params, detection_setting_id=None, *, preserve_existing=False):
     """
     Finds or creates the DetectionSetting record for a row, given its
     detection_setting_id (which may be a real id, a stale id, or a frontend
     temp id) plus the settings to use for this run.
+
+    With preserve_existing=True, changed parameters resolve to a matching/new
+    setting rather than mutating a record shared by other channels.
 
     Returns (setting, params_changed). params_changed is True when a row with
     a real existing id was resolved but its stored params differed from the
@@ -146,11 +149,17 @@ def resolve_detection_setting(user_id, weights_id, params, detection_setting_id=
     if setting:
         # Row already has a real settings record - update it if the values changed.
         params_changed = setting.weights_id != weights_id or setting.params != params
-        if params_changed:
-            setting.weights_id = weights_id
-            setting.params = params
-            flag_modified(setting, "params")
-        return setting, params_changed
+        if params_changed and preserve_existing:
+            # Batch rows can share this id while requesting different settings.
+            # Resolve a matching/new record below instead of changing the model
+            # and labels associated with another channel's saved annotations.
+            setting = None
+        else:
+            if params_changed:
+                setting.weights_id = weights_id
+                setting.params = params
+                flag_modified(setting, "params")
+            return setting, params_changed
 
     # No record for this id - look for an existing duplicate before creating one.
     candidates = DetectionSetting.query.filter_by(user_id=user_id, weights_id=weights_id).all()
@@ -1362,6 +1371,7 @@ def load_annotations():
             "min_cell_diameter": params.get("min_cell_diameter"),
             "max_cell_diameter": params.get("max_cell_diameter"),
             "sublabel": params.get("sublabel"),
+            "selected_classes": params.get("selected_classes"),
             "annotations_detected": ann.annotations_detected,  # SQLAlchemy parses JSON columns automatically
             "annotations_drawn": ann.annotations_drawn,
             "count_detected": ann.count_detected,
@@ -1750,11 +1760,14 @@ def batch_detect():
         if not image_set:
             return jsonify({"error": "Image set not found or unauthorized"}), 404
 
-        # Resolve every requested row's DetectionSetting up front so the full
-        # "active" set (for cleanup) and each row's force_rerun flag are known
-        # before any image is touched.
+        # Resolve settings before processing images; row identity and channel
+        # position stay separate from the shared DetectionSetting identity.
         resolved_rows = []
         for row in requested_rows:
+            channel_order = row.get('channel_order')
+            if type(channel_order) is not int or channel_order < 0:
+                db.session.rollback()
+                return jsonify({"error": "Each detection row requires a non-negative integer channel_order"}), 400
             model_id = row.get('model_id')
             model_record = Weights.query.filter_by(id=model_id, user_id=g.user.id).first()
             if not model_record:
@@ -1778,11 +1791,13 @@ def batch_detect():
             }
 
             setting, params_changed = resolve_detection_setting(
-                g.user.id, model_id, params, row.get('id')
+                g.user.id, model_id, params, row.get('detection_setting_id'),
+                preserve_existing=True,
             )
 
             resolved_rows.append({
                 "request_row_id": row.get('id'),
+                "channel_order": channel_order,
                 "setting": setting,
                 "model_record": model_record,
                 "threshold": threshold,
@@ -1794,41 +1809,45 @@ def batch_detect():
                 "force_rerun": params_changed,
             })
 
-        db.session.commit()
-        active_setting_ids = {r["setting"].id for r in resolved_rows}
+        # A shared setting may occur on multiple channels. If any occurrence
+        # changed it, all selected occurrences must rerun under the new params.
+        changed_setting_ids = {r["setting"].id for r in resolved_rows if r["force_rerun"]}
+        for row in resolved_rows:
+            row["force_rerun"] = row["setting"].id in changed_setting_ids
 
+        db.session.commit()
         image_results = []
         for image_record in image_set.images:
-            # Batch-detect targets each image's base channel only for now;
-            # per-channel batch-detect is deferred to a later pass.
-            base_channel = image_record.base_channel
-            if not base_channel:
-                image_results.append({
-                    "image_id": image_record.id,
-                    "success": False,
-                    "error": "Image has no channels"
-                })
-                continue
-
+            channels_by_order = {c.order_index: c for c in image_record.channels}
             row_results = []
-            deleted_setting_ids = []
             try:
                 for r in resolved_rows:
                     setting = r["setting"]
+                    channel = channels_by_order.get(r["channel_order"])
+                    if channel is None:
+                        row_results.append({
+                            "detection_setting_id": setting.id,
+                            "channel_order": r["channel_order"],
+                            "skipped": True,
+                            "reason": "missing_channel",
+                        })
+                        continue
                     existing = Annotation.query.filter_by(
-                        user_id=g.user.id, channel_id=base_channel.id, detection_setting_id=setting.id
+                        user_id=g.user.id, channel_id=channel.id, detection_setting_id=setting.id
                     ).first()
 
                     if existing and existing.file_path and not overwrite and not r["force_rerun"]:
                         row_results.append({
                             "detection_setting_id": setting.id,
+                            "channel_id": channel.id,
+                            "channel_order": r["channel_order"],
                             "skipped": True,
                             "count_detected": existing.count_detected
                         })
                         continue
 
                     yolo_string, converted_annotations = execute_detection(
-                        base_channel, r["model_record"], r["threshold"], r["cell_diameter"], r["sublabel"],
+                        channel, r["model_record"], r["threshold"], r["cell_diameter"], r["sublabel"],
                         r["selected_classes"], min_cell_diameter=r["min_cell_diameter"],
                         max_cell_diameter=r["max_cell_diameter"]
                     )
@@ -1836,7 +1855,7 @@ def batch_detect():
                     target_record = existing
                     if not target_record:
                         target_record = Annotation(
-                            id=str(uuid.uuid4()), user_id=g.user.id, channel_id=base_channel.id,
+                            id=str(uuid.uuid4()), user_id=g.user.id, channel_id=channel.id,
                             detection_setting_id=setting.id
                         )
                         db.session.add(target_record)
@@ -1856,32 +1875,17 @@ def batch_detect():
 
                     row_results.append({
                         "detection_setting_id": setting.id,
+                        "channel_id": channel.id,
+                        "channel_order": r["channel_order"],
                         "skipped": False,
                         "count_detected": len(converted_annotations)
                     })
-
-                # Cleanup: when overwrite is set, this image should only carry
-                # annotations for rows in this batch run - delete anything left
-                # over from other rows. When overwrite is False, leave other
-                # rows' results alone.
-                if overwrite:
-                    stale = Annotation.query.filter(
-                        Annotation.user_id == g.user.id,
-                        Annotation.channel_id == base_channel.id,
-                        ~Annotation.detection_setting_id.in_(active_setting_ids)
-                    ).all()
-                    for ann in stale:
-                        if ann.file_path and os.path.exists(ann.file_path):
-                            os.remove(ann.file_path)
-                        deleted_setting_ids.append(ann.detection_setting_id)
-                        db.session.delete(ann)
 
                 db.session.commit()
                 image_results.append({
                     "image_id": image_record.id,
                     "success": True,
                     "rows": row_results,
-                    "deleted_setting_ids": deleted_setting_ids
                 })
 
             except Exception as e:
@@ -1899,6 +1903,10 @@ def batch_detect():
                 {"request_row_id": r["request_row_id"], "detection_setting_id": r["setting"].id}
                 for r in resolved_rows
             ],
+            "missing_channel_rows": sum(
+                1 for result in image_results for row in result.get("rows", [])
+                if row.get("reason") == "missing_channel"
+            ),
             "total": len(image_results),
             "succeeded": sum(1 for r in image_results if r["success"]),
             "failed": sum(1 for r in image_results if not r["success"]),

@@ -39,6 +39,7 @@ import MetricsChart from '../components/MetricsChart'
 import CellCalibrator from '../components/CellCalibrator'
 import GalleryMenu from '../components/GalleryMenu'
 import RowMenu from '../components/RowMenu'
+import BatchDetectionRows, { batchRowError } from '../components/BatchDetectionRows'
 
 // Seeded per-user on account creation (see User.setup_filesystem in the
 // backend) - not deletable. There's no is_default flag in the API response
@@ -119,6 +120,9 @@ export default function CellAnnotationTool() {
   const [batchOverwrite, setBatchOverwrite] = useState(true)
   const [batchDetectionSettings, setBatchDetectionSettings] = useState([])
   const [batchDetectionSettingsLoading, setBatchDetectionSettingsLoading] = useState(false)
+  const [batchChannelGroups, setBatchChannelGroups] = useState([])
+  const [batchLoadError, setBatchLoadError] = useState('')
+  const batchLoadVersion = useRef(0)
 
   const fileKey = (file) => `${file.name}-${file.size}-${file.lastModified}`
   // State for fine tuning
@@ -481,9 +485,12 @@ export default function CellAnnotationTool() {
   function annotationToRow(modelObj) {
     const labels = modelObj.labels?.labels || []
     return {
-      id: modelObj.detection_setting_id,
+      id: modelObj.id,
+      detectionSettingId: modelObj.detection_setting_id,
+      channelId: modelObj.channel_id,
+      channelOrder: modelObj.channelOrder,
       selectedModelId: modelObj.weights_id,
-      selectedClasses: labels.map(l => l.name),
+      selectedClasses: modelObj.selected_classes ?? labels.map(l => l.name),
       rowThreshold: modelObj.threshold ?? 0.5,
       rowDiameter: modelObj.cell_diameter ?? 34,
       rowMinDiameter: modelObj.min_cell_diameter ?? 7,
@@ -497,32 +504,34 @@ export default function CellAnnotationTool() {
   // of only whatever the currently active image happens to have.
   async function fetchImageSetDetectionRows(setId) {
     const set = imageSets.find(s => s.id === setId)
-    if (!set || !set.images || set.images.length === 0) return []
-
-    const perImageResults = await Promise.all(
-      set.images.map(async (img) => {
-        try {
-          const res = await fetch(`${API_BASE_URL}/load-annotations`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image_id: img.id }),
-            credentials: 'include',
-          })
-          if (!res.ok) return []
-          const data = await res.json()
-          return data.annotations || []
-        } catch (e) {
-          console.error(`Failed to load annotations for image ${img.id}:`, e.message)
-          return []
-        }
-      })
-    )
-
+    if (!set?.images?.length) return { rows: [], groups: [] }
+    const perImageResults = await Promise.all(set.images.map(async img => {
+      const options = {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_id: img.id }), credentials: 'include',
+      }
+      const [res, channelRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/load-annotations`, options),
+        fetch(`${API_BASE_URL}/load-channels`, options),
+      ])
+      if (!res.ok || !channelRes.ok) throw new Error(`Could not load ${img.name || img.id}. Please select the set again to retry.`)
+      const [data, channelList] = await Promise.all([res.json(), channelRes.json()])
+      return { channelList, annotations: (data.annotations || []).map(a => ({
+        ...a, channelOrder: channelList.find(c => c.id === a.channel_id)?.order_index,
+      })) }
+    }))
+    const groups = new Map()
     const rowsById = new Map()
-    for (const modelObj of perImageResults.flat()) {
-      rowsById.set(modelObj.detection_setting_id, annotationToRow(modelObj))
+    for (const image of perImageResults) {
+      for (const order of new Set(image.channelList.map(c => c.order_index))) {
+        if (!groups.has(order)) groups.set(order, { order, count: 0, total: set.images.length })
+        groups.get(order).count++
+      }
+      for (const annotation of image.annotations) {
+        rowsById.set(`${annotation.channelOrder}:${annotation.detection_setting_id}`, annotationToRow(annotation))
+      }
     }
-    return Array.from(rowsById.values())
+    return { rows: Array.from(rowsById.values()), groups: Array.from(groups.values()).sort((a, b) => a.order - b.order) }
   }
 
   // Builds a "channel row" for the per-image RowMenu - one row per channel,
@@ -531,6 +540,7 @@ export default function CellAnnotationTool() {
     return {
       id: channel.id,
       channelName: channel.name,
+      orderIndex: channel.order_index,
       channelUrl: `${API_BASE_URL}${channel.url}?t=${new Date().getTime()}`,
       isBaseChannel: channel.is_base,
       // Frontend-only tint for the overlay view - not persisted to the backend (yet).
@@ -554,7 +564,7 @@ export default function CellAnnotationTool() {
       channelId,
       detectionSettingId: existingAnnotation?.detection_setting_id ?? generateId(),
       selectedModelId: existingAnnotation?.weights_id ?? (defaultModel ? defaultModel.id : ''),
-      selectedClasses: labels.length ? labels.map(l => l.name) : defaultClasses,
+      selectedClasses: existingAnnotation?.selected_classes ?? (labels.length ? labels.map(l => l.name) : defaultClasses),
       rowThreshold: existingAnnotation?.threshold ?? 0.5,
       rowDiameter: existingAnnotation?.cell_diameter ?? 34,
       rowMinDiameter: existingAnnotation?.min_cell_diameter ?? 7,
@@ -615,15 +625,15 @@ export default function CellAnnotationTool() {
         // Group boxes by the Annotation's own id, not detection_setting_id -
         // the latter can be shared across channels (see buildDetectionSettingRow).
         const rowId = modelObj.id
-        const labels = modelObj.labels.labels
+        const labels = modelObj.labels?.labels || []
 
         const detectedBoxes = (modelObj.annotations_detected || []).map((box) => ({
           ...box,
           annotation_id: rowId,
           channel_id: channelId,
           is_detected: true,
-          name: labels[box.class].name,
-          color: labels[box.class].color,
+          name: labels[box.class]?.name ?? `Class ${box.class}`,
+          color: labels[box.class]?.color ?? '#ffffff',
           renderStyle: 'dashed'
         }))
 
@@ -632,8 +642,8 @@ export default function CellAnnotationTool() {
           annotation_id: rowId,
           channel_id: channelId,
           is_detected: false,
-          name: labels[box.class].name,
-          color: labels[box.class].color,
+          name: labels[box.class]?.name ?? `Class ${box.class}`,
+          color: labels[box.class]?.color ?? '#ffffff',
           renderStyle: 'solid'
         }))
 
@@ -658,6 +668,7 @@ export default function CellAnnotationTool() {
       }
     } catch (e) {
       console.error('Annotation load failed:', e.message)
+      alert(`Could not display saved annotations: ${e.message}`)
     }
   }
 
@@ -1234,6 +1245,7 @@ export default function CellAnnotationTool() {
 
     const detectionRows = batchDetectionSettings.filter(r => batchSelectedRowIds.includes(r.id))
     if (detectionRows.length === 0) return alert('Please select at least one detection row.')
+    if (detectionRows.some(row => batchRowError(row, models))) return alert('Please correct the selected row settings.')
 
     setBatchDetectModalOpen(false)
     setIsLoading(true)
@@ -1245,11 +1257,13 @@ export default function CellAnnotationTool() {
         overwrite: batchOverwrite,
         detection_settings: detectionRows.map(row => ({
           id: row.id,
+          detection_setting_id: row.detectionSettingId,
+          channel_order: row.channelOrder,
           model_id: row.selectedModelId,
-          threshold: row.rowThreshold,
-          cell_diameter: row.rowDiameter,
-          min_cell_diameter: row.rowMinDiameter,
-          max_cell_diameter: row.rowMaxDiameter,
+          threshold: Number(row.rowThreshold),
+          cell_diameter: Number(row.rowDiameter),
+          min_cell_diameter: Number(row.rowMinDiameter),
+          max_cell_diameter: Number(row.rowMaxDiameter),
           sublabel: row.rowSublabel,
           selected_classes: row.selectedClasses,
         })),
@@ -1268,20 +1282,29 @@ export default function CellAnnotationTool() {
       }
       const data = await res.json()
 
-      // Rows selected via a local temp id get resolved to a real backend id
-      // on their first run - patch that back into local state.
-      for (const { request_row_id, detection_setting_id } of data.resolved_settings || []) {
-        if (request_row_id && detection_setting_id && request_row_id !== detection_setting_id) {
-          setDetectionSettings(prev => prev.map(r => r.id === request_row_id ? { ...r, id: detection_setting_id } : r))
-          setBatchSelectedRowIds(prev => prev.map(id => id === request_row_id ? detection_setting_id : id))
-          setActiveRowIds(prev => prev.map(id => id === request_row_id ? detection_setting_id : id))
-        }
-      }
+      // Batch drafts may differ from the sidebar row they originated from.
+      // Reconcile batch state only; reload the current image from saved records.
+      const resolvedIds = new Map((data.resolved_settings || []).map(item =>
+        [item.request_row_id, item.detection_setting_id]))
+      setBatchDetectionSettings(prev => prev.map(row => resolvedIds.has(row.id)
+        ? { ...row, detectionSettingId: resolvedIds.get(row.id), batchDraft: false }
+        : row))
 
-      alert(`Batch complete: ${data.succeeded}/${data.total} images succeeded${data.failed > 0 ? `, ${data.failed} failed` : ''}.`)
+      const batchImages = imageSets.find(s => s.id === batchImageSetId)?.images || []
+      const details = (data.results || []).map(result => {
+        const imageName = batchImages.find(img => img.id === result.image_id)?.name || result.image_id
+        if (!result.success) return `${imageName}: failed — ${result.error}`
+        const rows = (result.rows || []).map(row => {
+          const channel = Number.isInteger(row.channel_order) ? `C${row.channel_order + 1}` : row.channel_id || 'Channel'
+          if (row.reason === 'missing_channel') return `${channel}: skipped (missing channel)`
+          return `${channel}: ${row.count_detected ?? 0} boxes${row.skipped ? ' (kept existing)' : ' saved'}`
+        })
+        return `${imageName}: ${rows.join('; ')}`
+      })
+      alert(`Batch complete: ${data.succeeded}/${data.total} images processed; ${data.failed} failed.\n${details.join('\n')}`)
 
       if (imageID) {
-        await renderAnnotations(imageID)
+        await renderAnnotations(imageID, selectedChannelId)
       }
     } catch (err) {
       console.error(err)
@@ -1508,13 +1531,13 @@ export default function CellAnnotationTool() {
 
       const removedRows = detectionSettings.filter(r => r.selectedModelId === model.id)
       const removedRowIds = removedRows.map(r => r.id)
-      // batchDetectionSettings/batchSelectedRowIds are keyed by detection_setting_id (see annotationToRow), not row id.
-      const removedDetectionSettingIds = removedRows.map(r => r.detectionSettingId)
+      const removedBatchRowIds = batchDetectionSettings.filter(r => r.selectedModelId === model.id).map(r => r.id)
+      setBatchDetectionSettings(prev => prev.filter(r => r.selectedModelId !== model.id))
+      setBatchSelectedRowIds(prev => prev.filter(id => !removedBatchRowIds.includes(id)))
 
       if (removedRowIds.length > 0) {
         setDetectionSettings(prev => prev.filter(r => !removedRowIds.includes(r.id)))
         setActiveRowIds(prev => prev.filter(id => !removedRowIds.includes(id)))
-        setBatchSelectedRowIds(prev => prev.filter(id => !removedDetectionSettingIds.includes(id)))
         setSelectedDetectionSettingId(prev => removedRowIds.includes(prev) ? null : prev)
         setAnnotations(prevAnnos => prevAnnos.filter(ann => !removedRowIds.includes(ann.id)))
         setBoxes(prevBoxes => prevBoxes.filter(box => !removedRowIds.includes(box.annotation_id)))
@@ -1594,33 +1617,77 @@ export default function CellAnnotationTool() {
   const [exportIncludeConfidence, setExportIncludeConfidence] = useState(false)
   const [clearModalOpen, setClearModalOpen] = useState(false)
   const [batchDetectModalOpen, setBatchDetectModalOpen] = useState(false)
+  function currentBatchRows() {
+    return detectionSettings.map(row => ({
+      ...row,
+      channelOrder: channels.find(c => c.id === row.channelId)?.orderIndex,
+    }))
+  }
+
   function handleOpenBatchDetectModal() {
-    // Seed with the sidebar's current rows (includes any unsaved drafts) so
-    // they're selectable even before an image set is chosen below.
-    setBatchDetectionSettings(detectionSettings)
-    setBatchSelectedRowIds(detectionSettings.map(r => r.id))
+    batchLoadVersion.current++
+    setBatchDetectionSettings([])
+    setBatchSelectedRowIds([])
+    setBatchChannelGroups([])
+    setBatchLoadError('')
+    setBatchDetectionSettingsLoading(false)
     setBatchImageSetId('')
     setBatchOverwrite(true)
     setBatchDetectModalOpen(true)
   }
 
   async function handleSelectBatchImageSet(setId) {
+    const version = ++batchLoadVersion.current
     setBatchImageSetId(setId)
     setBatchDetectionSettingsLoading(true)
+    setBatchLoadError('')
+    setBatchDetectionSettings([])
+    setBatchSelectedRowIds([])
+    setBatchChannelGroups([])
     try {
-      const setRows = await fetchImageSetDetectionRows(setId)
-      // Union with the sidebar's current rows so a freshly drafted (not yet
-      // run anywhere) setting stays selectable alongside the set's existing ones.
-      const mergedById = new Map(detectionSettings.map(r => [r.id, r]))
-      for (const row of setRows) mergedById.set(row.id, row)
+      const { rows: setRows, groups } = await fetchImageSetDetectionRows(setId)
+      if (version !== batchLoadVersion.current) return
+      const mergedById = new Map(setRows.map(r => [`${r.channelOrder}:${r.detectionSettingId}`, r]))
+      for (const row of currentBatchRows()) {
+        if (groups.some(g => g.order === row.channelOrder)) mergedById.set(`${row.channelOrder}:${row.detectionSettingId}`, row)
+      }
       const merged = Array.from(mergedById.values())
+      setBatchChannelGroups(groups)
       setBatchDetectionSettings(merged)
       setBatchSelectedRowIds(merged.map(r => r.id))
+    } catch (error) {
+      if (version === batchLoadVersion.current) setBatchLoadError(error.message)
     } finally {
-      setBatchDetectionSettingsLoading(false)
+      if (version === batchLoadVersion.current) setBatchDetectionSettingsLoading(false)
     }
   }
-  
+
+  function addBatchRow(channelOrder) {
+    const row = { ...buildDetectionSettingRow(null, null), channelOrder, batchDraft: true }
+    setBatchDetectionSettings(prev => [...prev, row])
+    setBatchSelectedRowIds(prev => [...prev, row.id])
+  }
+
+  function updateBatchRow(id, field, value) {
+    // Editing a shared saved setting creates a draft; other images and channels
+    // retain their original configuration until this new setting is run.
+    const draftId = generateId()
+    setBatchDetectionSettings(prev => prev.map(row => {
+      if (row.id !== id) return row
+      const updated = { ...row, [field]: value, batchDraft: true,
+        detectionSettingId: row.batchDraft ? row.detectionSettingId : draftId }
+      if (field === 'selectedModelId') {
+        updated.selectedClasses = models.find(m => m.id === value)?.label_set?.labels?.map(l => l.name) || []
+      }
+      return updated
+    }))
+  }
+
+  function removeBatchRow(id) {
+    setBatchDetectionSettings(prev => prev.filter(row => row.id !== id))
+    setBatchSelectedRowIds(prev => prev.filter(rowId => rowId !== id))
+  }
+
   // const [images] = useState([
   //   { url: 'https://picsum.photos/200/300?random=1', id: 1 },
   //   { url: 'https://picsum.photos/200/300?random=2', id: 2 },
@@ -2952,7 +3019,7 @@ export default function CellAnnotationTool() {
                 <Box
                   sx={{
                     width: '100%',
-                    maxWidth: 500,
+                    maxWidth: 760,
                     bgcolor: 'background.paper',
                     borderRadius: 2,
                     boxShadow: 24,
@@ -3031,74 +3098,21 @@ export default function CellAnnotationTool() {
                     </Box>
                   )}
 
-                  {/* Detection Rows */}
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Detection Rows
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>Detection by channel</Typography>
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+                    Channels match by position (C1 to C1, C2 to C2). Missing channels are skipped.
+                    Rows stay in this dialog until Run Batch. Changing the image set resets these drafts.
+                    Removing a row here does not delete saved annotations.
                   </Typography>
-                  {batchDetectionSettingsLoading ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                      Loading detection settings for this image set...
-                    </Typography>
-                  ) : batchDetectionSettings.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                      {batchImageSetId
-                        ? 'No detection settings found on this image set. Add rows in the sidebar first.'
-                        : 'No detection rows configured. Add rows in the sidebar, or select an image set below.'}
-                    </Typography>
-                  ) : (
-                    <Box sx={{ mb: 3 }}>
-                      {batchDetectionSettings.map((row) => {
-                        const rowModel = models.find(m => m.id === row.selectedModelId)
-                        const isChecked = batchSelectedRowIds.includes(row.id)
-                        const isStardist = rowModel?.name?.toLowerCase().includes('stardist') ?? false
-                        return (
-                          <Box
-                            key={row.id}
-                            display="flex"
-                            alignItems="center"
-                            sx={{
-                              px: 1.5,
-                              py: 1,
-                              mb: 0.5,
-                              borderRadius: 1,
-                              border: '1px solid',
-                              borderColor: isChecked ? 'primary.main' : 'divider',
-                              bgcolor: isChecked ? 'primary.50' : 'transparent',
-                              cursor: 'pointer',
-                              transition: 'all 0.15s ease',
-                            }}
-                            onClick={() =>
-                              setBatchSelectedRowIds(prev =>
-                                isChecked ? prev.filter(id => id !== row.id) : [...prev, row.id]
-                              )
-                            }
-                          >
-                            <Checkbox
-                              checked={isChecked}
-                              size="small"
-                              sx={{ p: 0, mr: 1.5 }}
-                              onClick={e => e.stopPropagation()}
-                              onChange={() =>
-                                setBatchSelectedRowIds(prev =>
-                                  isChecked ? prev.filter(id => id !== row.id) : [...prev, row.id]
-                                )
-                              }
-                            />
-                            <Box sx={{ flexGrow: 1 }}>
-                              <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                                {rowModel?.name || 'Unknown model'}
-                                {row.rowSublabel ? ` · ${row.rowSublabel}` : ''}
-                              </Typography>
-                              <Typography variant="caption" color="text.secondary">
-                                Threshold {row.rowThreshold} · Ø {isStardist ? `${row.rowMinDiameter}-${row.rowMaxDiameter}` : row.rowDiameter}px
-                                {row.selectedClasses?.length > 0 ? ` · ${row.selectedClasses.join(', ')}` : ''}
-                              </Typography>
-                            </Box>
-                          </Box>
-                        )
-                      })}
-                    </Box>
-                  )}
+                  {batchLoadError && <Typography role="alert" color="error">{batchLoadError}</Typography>}
+                  {batchDetectionSettingsLoading ? <Typography>Loading channels and settings...</Typography> :
+                    !batchImageSetId ? <Typography>Select an image set to configure detection.</Typography> :
+                    <BatchDetectionRows groups={batchChannelGroups} rows={batchDetectionSettings} models={models}
+                      selectedIds={batchSelectedRowIds}
+                      onToggle={id => setBatchSelectedRowIds(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id])}
+                      onChange={updateBatchRow} onAdd={addBatchRow} onRemove={removeBatchRow} />}
+                  {batchImageSetId && !batchDetectionSettingsLoading && !batchLoadError && !batchChannelGroups.length &&
+                    <Typography>This image set has no channels to detect.</Typography>}
 
                   <FormControlLabel
                     sx={{ mb: 1 }}
@@ -3114,7 +3128,7 @@ export default function CellAnnotationTool() {
                         <Typography variant="body2">Overwrite existing detections</Typography>
                         <Typography variant="caption" color="text.secondary">
                           {batchOverwrite
-                            ? 'Overwrites all existing annotations for images in this batch.'
+                            ? 'Replaces detected boxes for selected channel/settings pairs; preserves manual boxes and other rows.'
                             : 'Leaves annotations in place (unless that row\'s settings changed).'}
                         </Typography>
                       </Box>
@@ -3130,7 +3144,7 @@ export default function CellAnnotationTool() {
                     </Button>
                     <Button
                       variant="contained"
-                      disabled={!batchImageSetId || batchSelectedRowIds.length === 0}
+                      disabled={batchDetectionSettingsLoading || !batchImageSetId || batchSelectedRowIds.length === 0 || batchDetectionSettings.some(r => batchSelectedRowIds.includes(r.id) && (!Number.isInteger(r.channelOrder) || batchRowError(r, models)))}
                       onClick={handleBatchDetect}
                     >
                       Run Batch ({batchSelectedRowIds.length} row{batchSelectedRowIds.length !== 1 ? 's' : ''})
