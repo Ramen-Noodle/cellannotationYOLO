@@ -21,7 +21,7 @@ function tintToCanvas(source, color, width, height) {
 }
 
 export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCropping,
-    onCrop, currentClass, classes, imageSize, brightness, contrast, scale, onScaleChange, showLabels = true, currentSet }) {
+    onCrop, currentClass, classes, imageSize, brightness, contrast, scale, onScaleChange, showLabels = true, currentSet, readOnly = false }) {
   const canvasRef = useRef(null)
   const imagesRef = useRef({})       // layerId -> loaded Image (non-tiled)
   const tintCacheRef = useRef({})    // layerId -> { color, sourceImg, canvas } (non-tiled)
@@ -305,6 +305,8 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
       setLastPan({ x: e.clientX, y: e.clientY })
       return
     }
+
+    if (readOnly) return
 
     // left click → draw box
     const rect = canvasRef.current.getBoundingClientRect()
