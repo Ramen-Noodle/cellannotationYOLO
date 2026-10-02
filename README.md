@@ -97,3 +97,40 @@ The application will start on port **5001**. You can access it in your web brows
 * **Internal Server:** `http://<YOUR_SERVER_IP>:3000`
 
 > **Note:** The web interface will only be able to access user data and most app functionality while app.py is running
+
+## Annotation export contract
+
+Exports from the React/backend application now return a ZIP for both individual
+images and image sets. Each image includes a `<image-id>.metadata.json` sidecar.
+Text filenames use stable image/annotation IDs to avoid collisions between images,
+channels, or settings with identical names; human-readable names are in metadata.
+
+All text boxes are normalized `center_x center_y width height` relative to the
+full image dimensions, including after manual saves and ROI masking. Database
+annotation JSON is authoritative; historical TXT files are not read by export.
+Boxes crossing image edges are clipped; invalid/non-finite or entirely external
+boxes cause an error rather than silently corrupting the output.
+
+Class-number mode produces one TXT per detection record, with model-local class
+IDs. Class-name mode combines records in one TXT. The sidecar maps each record to
+its text filename and one-based line numbers and includes channel ID/name/order,
+model ID/name, the model's class mapping, detection settings, image dimensions,
+and normalized annotations with their detected/manual origin. Do not infer
+biological channel identity from class names or assume that class IDs have the
+same meaning across models. Empty records and images are retained in exports.
+
+Without confidence enabled, TXT rows have five fields. With confidence enabled,
+the sixth field is a probability in [0, 1] or the literal `null` when unavailable.
+This optional six-field format is an analysis extension, not a YOLO training label.
+Metadata always retains available confidence as a JSON number or null. Legacy
+100 sentinels are unknown. StarDist's old synthetic 1.0 is also exported as unknown;
+this change does not claim to recover per-instance probabilities or change inference.
+
+Regression tests (no model weights or ML runtime required):
+
+```bash
+python -m unittest discover -s backend -p 'test_annotation_export.py' -v
+```
+
+The tests exercise serialization and extracted route functions with mocked request,
+database, and detector boundaries. They do not replace a full application smoke test.

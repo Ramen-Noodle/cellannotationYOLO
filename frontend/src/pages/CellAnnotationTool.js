@@ -944,8 +944,6 @@ export default function CellAnnotationTool() {
           const annotationsDetected = modelObj.annotations_detected || []
           const annotationsDrawn = modelObj.annotations_drawn || []
 
-          if (annotationsDetected.length === 0 && annotationsDrawn.length === 0) return null
-
           const row = detectionSettings.find(r => r.id === rowId)
           if (!row) {
             console.warn(`No detection-setting row found for annotation group ${rowId}, skipping`)
@@ -968,7 +966,7 @@ export default function CellAnnotationTool() {
         })
         .filter(Boolean)
 
-      if (payload.length === 0) return
+      if (payload.length === 0) return true
 
       const res = await fetch(`${API_BASE_URL}/save-annotations`, {
         method: 'POST',
@@ -997,8 +995,10 @@ export default function CellAnnotationTool() {
       }
 
       console.log('Saved annotations successfully')
+      return true
     } catch(e) {
       alert('Save failed: ' + (e.response?.data?.error || e.message))
+      return false
     } finally {
       setIsLoading(false)
     }
@@ -1021,8 +1021,8 @@ export default function CellAnnotationTool() {
 
       // Only the currently active image can have unsaved edits sitting in the
       // canvas, so flush those before export to avoid downloading a stale file.
-      if (!isImageSet && exportImageId === imageID) {
-        await saveAnnotations()
+      if (isImageSet || exportImageId === imageID) {
+        if (!(await saveAnnotations())) throw new Error('Save failed; export cancelled')
       }
 
       const res = await fetch(`${API_BASE_URL}/export-annotations`, {
@@ -1043,16 +1043,14 @@ export default function CellAnnotationTool() {
       const a = document.createElement('a')
       a.href = url
 
-      // Class-number exports can produce multiple files even for a single image,
-      // so the server decides .txt vs .zip per request; read the name it picked
-      // back off the response instead of re-deriving it here.
+      // All exports include annotation text plus per-image metadata in a ZIP.
+      // Use the server's download name when the response header is available.
       const disposition = res.headers.get('Content-Disposition') || ''
       const filenameMatch = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/)
       const baseName = isImageSet
         ? (imageSets.find(s => s.id === exportImageSetId)?.name || 'image_set')
         : (imageList.find(img => img.id === exportImageId)?.name || imageName).replace(/\.[^.]+$/, '')
-      // Class-number format always zips (one file per detection setting), even for a single image
-      const fallbackExtension = isImageSet || exportLabelFormat === 'number' ? 'zip' : 'txt'
+      const fallbackExtension = 'zip' // Includes per-image metadata for every export
       a.download = filenameMatch ? decodeURIComponent(filenameMatch[1]) : `${baseName}.${fallbackExtension}`
 
       document.body.appendChild(a)
@@ -2530,7 +2528,7 @@ export default function CellAnnotationTool() {
                       <Box>
                         <Typography variant="body1" sx={{ fontWeight: 500 }}>Include confidence</Typography>
                         <Typography variant="caption" color="text.secondary">
-                          Appends a confidence score to each line (100 if unavailable)
+                          Appends a confidence score to each line (null if unavailable)
                         </Typography>
                       </Box>
                     }
