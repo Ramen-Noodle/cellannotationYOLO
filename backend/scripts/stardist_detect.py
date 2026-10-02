@@ -79,7 +79,7 @@ def predictions_to_yolo(
         width    = (max_c - min_c) / image_width
         height   = (max_r - min_r) / image_height
         lines.append(
-            f"0 {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f} 1.0000"
+            f"0 {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
         )
     return "\n".join(lines)
 
