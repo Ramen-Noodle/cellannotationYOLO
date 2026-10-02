@@ -105,7 +105,10 @@ images and image sets. Each image includes a `<image-id>.metadata.json` sidecar.
 Text filenames use stable image/annotation IDs to avoid collisions between images,
 channels, or settings with identical names; human-readable names are in metadata.
 
-All text boxes are normalized `center_x center_y width height` relative to the
+Every exported TXT row starts with a separate channel column (`C1`, `C2`, `C3`, etc.),
+using the UI channel order plus one. Metadata maps these labels to channel names
+and IDs; a number does not imply an RGB color or fluorophore. Text boxes are
+normalized `center_x center_y width height` relative to the
 full image dimensions, including after manual saves and ROI masking. Database
 annotation JSON is authoritative; historical TXT files are not read by export.
 Boxes crossing image edges are clipped; invalid/non-finite or entirely external
@@ -119,9 +122,13 @@ and normalized annotations with their detected/manual origin. Do not infer
 biological channel identity from class names or assume that class IDs have the
 same meaning across models. Empty records and images are retained in exports.
 
-Without confidence enabled, TXT rows have five fields. With confidence enabled,
-the sixth field is a probability in [0, 1] or the literal `null` when unavailable.
-This optional six-field format is an analysis extension, not a YOLO training label.
+Without confidence enabled, TXT rows have six fields:
+`channel class center_x center_y width height`. With confidence enabled, the
+seventh field is a probability in [0, 1] or the literal `null` when unavailable.
+For example: `C2 neuron 0.120000 0.480000 0.040000 0.160000 0.750000`.
+This channel-aware format is an analysis export, not a YOLO training label.
+Class-number mode retains model-local numeric class IDs in the second column.
+Internal saved annotation files and the training workflow do not add a channel column.
 Metadata always retains available confidence as a JSON number or null. Legacy
 100 sentinels are unknown. StarDist's old synthetic 1.0 is also exported as unknown;
 this change does not claim to recover per-instance probabilities or change inference.
@@ -134,3 +141,23 @@ python -m unittest discover -s backend -p 'test_annotation_export.py' -v
 
 The tests exercise serialization and extracted route functions with mocked request,
 database, and detector boundaries. They do not replace a full application smoke test.
+
+
+### Inspecting merged results in the UI
+
+Open the matching image, then use Upload Annotations to select the extracted TXT
+file. The channel-aware importer accepts named or numeric classes and optional
+confidence using the export columns above. `C1`, `C2`, etc. follow the image's UI
+channel order. A merged cell can use `C1+C2` (or `C1+C2+C3`) in the channel column;
+it is drawn once and appears when any participating channel is visible.
+
+The imported file is a view-only preview with its filename and cell count shown
+above the canvas. It supports the existing channel visibility controls and pan/zoom.
+Return to annotations restores the original detection display. Import does not
+replace saved annotations or guess how an imported class maps to a detector model.
+Save/download are disabled during preview; switching images clears the preview.
+Numeric class IDs are displayed literally. Unknown channels, invalid coordinates,
+and invalid confidence values fail with a line number before changing the preview.
+The existing unprefixed numeric YOLO import remains available for manual editing.
+
+Importer regression tests (Node 18+): `node --test test_annotation_import.mjs`.

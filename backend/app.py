@@ -1,6 +1,6 @@
 import sys
 import json
-from annotation_export import annotation_rows, yolo_line, serialize_annotations
+from annotation_export import annotation_rows, yolo_line, serialize_annotations, channel_label
 from werkzeug.utils import secure_filename  # ADD THIS AT TOP OF FILE
 from flask import Flask, request, jsonify, send_from_directory, send_file, g
 import os
@@ -829,6 +829,7 @@ def _image_export(image_record, user_id, label_format, include_confidence):
     """Build text files plus lossless row metadata from authoritative database boxes."""
     files, runs, combined = {}, [], []
     for channel in image_record.channels:
+        channel_token = channel_label(channel)
         records = Annotation.query.filter_by(channel_id=channel.id, user_id=user_id).all()
         for record in records:
             setting = record.detection_setting
@@ -841,7 +842,7 @@ def _image_export(image_record, user_id, label_format, include_confidence):
             if model and 'stardist' in model.name.lower():
                 for row in rows:
                     row['confidence'] = None
-            filename = f'{image_record.id}_{record.id}.txt' if label_format == 'number' else f'{image_record.id}.txt'
+            filename = f'{image_record.id}_{channel_token}_{record.id}.txt' if label_format == 'number' else f'{image_record.id}.txt'
             line_numbers = []
             lines = []
             for row in rows:
@@ -849,17 +850,18 @@ def _image_export(image_record, user_id, label_format, include_confidence):
                 class_name = labels[class_idx]['name'] if 0 <= class_idx < len(labels) else f'class{class_idx}'
                 label = f'{class_name}_{sublabel}' if sublabel else class_name
                 if label_format == 'name':
-                    # Names are convenience labels. Channel/model identity is in the sidecar.
-                    combined.append(yolo_line(row, label, include_confidence))
+                    # Keep the channel visible in the TXT, not only in metadata.
+                    combined.append(f'{channel_token} ' + yolo_line(row, label, include_confidence))
                     line_numbers.append(len(combined))
                 else:
-                    lines.append(yolo_line(row, include_confidence=include_confidence))
+                    lines.append(f'{channel_token} ' + yolo_line(row, include_confidence=include_confidence))
                     line_numbers.append(len(lines))
             if label_format == 'number':
                 files[filename] = '\n'.join(lines)
             runs.append({
                 'annotation_id': record.id, 'channel_id': channel.id,
                 'channel_name': channel.name, 'channel_order': channel.order_index,
+                'channel_label': channel_token,
                 'detection_setting_id': setting.id if setting else None,
                 'model_id': model.id if model else None, 'model_name': model.name if model else None,
                 'class_mapping': labels, 'settings': params,
@@ -868,12 +870,15 @@ def _image_export(image_record, user_id, label_format, include_confidence):
     if label_format == 'name':
         files[f'{image_record.id}.txt'] = '\n'.join(combined)
     metadata = {
-        'schema_version': 1, 'image_id': image_record.id,
+        'schema_version': 2, 'image_id': image_record.id,
         'image_name': image_record.base_channel.name if image_record.base_channel else None,
         'width': image_record.width, 'height': image_record.height,
         'coordinates': 'normalized_center_x_center_y_width_height',
+        'columns': ['channel', 'class', 'center_x', 'center_y', 'width', 'height']
+                   + (['confidence'] if include_confidence else []),
         'label_format': label_format, 'missing_confidence': None,
-        'channels': [{'id': c.id, 'name': c.name, 'order': c.order_index} for c in image_record.channels],
+        'channels': [{'id': c.id, 'name': c.name, 'order': c.order_index,
+                      'label': channel_label(c)} for c in image_record.channels],
         'runs': runs,
     }
     files[f'{image_record.id}.metadata.json'] = json.dumps(metadata, indent=2, allow_nan=False)

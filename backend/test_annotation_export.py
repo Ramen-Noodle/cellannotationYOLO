@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import MagicMock
 import zipfile
 
-from annotation_export import annotation_rows, normalized_box, serialize_annotations, yolo_line
+from annotation_export import annotation_rows, normalized_box, serialize_annotations, yolo_line, channel_label
 
 
 def load_functions(names, namespace):
@@ -41,6 +41,7 @@ class ExportTests(unittest.TestCase):
         self.Annotation.query.filter_by.return_value.all.return_value = [self.record]
         self.ns = load_functions({'_image_export', 'export_annotations', 'save_annotations', 'execute_detection', 'upload_cropped_file'}, {
             'annotation_rows': annotation_rows, 'yolo_line': yolo_line,
+            'channel_label': channel_label,
             'serialize_annotations': serialize_annotations, 'json': json,
             'Annotation': self.Annotation, 'Weights': object, 'db': self.db,
             'io': io, 'zipfile': zipfile, 'os': os,
@@ -64,7 +65,7 @@ class ExportTests(unittest.TestCase):
 
     def test_export_ignores_stale_files(self):
         files = self.ns['_image_export'](self.image, 'user', 'number', True)
-        self.assertEqual(files['image1_run1.txt'], '0 0.120000 0.480000 0.040000 0.160000 0.750000')
+        self.assertEqual(files['image1_C1_run1.txt'], 'C1 0 0.120000 0.480000 0.040000 0.160000 0.750000')
         meta = json.loads(files['image1.metadata.json'])
         self.assertEqual(meta['runs'][0]['class_mapping'], [{'name': 'neuron'}])
 
@@ -75,12 +76,27 @@ class ExportTests(unittest.TestCase):
         self.assertEqual([r['channel_id'] for r in meta['runs']], ['channel1', 'channel2'])
         self.assertEqual([r['line_numbers'] for r in meta['runs']], [[1], [2]])
         self.assertEqual(len(files['image1.txt'].splitlines()), 2)
+        self.assertEqual([line.split()[:2] for line in files['image1.txt'].splitlines()],
+                         [['C1', 'neuron'], ['C2', 'neuron']])
+        self.assertEqual(meta['columns'][0], 'channel')
 
     def test_stardist_legacy_score_is_unknown(self):
         self.model.name = 'StarDist'
         self.box['confidence'] = 1.0
         files = self.ns['_image_export'](self.image, 'user', 'number', True)
-        self.assertTrue(files['image1_run1.txt'].endswith(' null'))
+        self.assertTrue(files['image1_C1_run1.txt'].endswith(' null'))
+
+    def test_channel_column_in_both_formats_with_three_channels(self):
+        self.image.channels += [NS(id='channel2', name='same', order_index=1),
+                                NS(id='channel3', name='same', order_index=2)]
+        for label_format in ('name', 'number'):
+            for confidence in (False, True):
+                files = self.ns['_image_export'](self.image, 'user', label_format, confidence)
+                rows = [line.split() for path, text in files.items() if path.endswith('.txt')
+                        for line in text.splitlines()]
+                self.assertEqual([r[0] for r in rows], ['C1', 'C2', 'C3'])
+                self.assertTrue(all(len(r) == (7 if confidence else 6) for r in rows))
+                self.assertTrue(all(r[1] == ('neuron' if label_format == 'name' else '0') for r in rows))
 
     def test_manual_and_empty_records(self):
         self.record.annotations_detected = []
@@ -89,7 +105,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(rows[0]['source'], 'manual')
         self.record.annotations_drawn = []
         files = self.ns['_image_export'](self.image, 'user', 'number', False)
-        self.assertEqual(files['image1_run1.txt'], '')
+        self.assertEqual(files['image1_C1_run1.txt'], '')
         self.assertEqual(json.loads(files['image1.metadata.json'])['runs'][0]['annotations'], [])
 
     def test_export_archive_and_ownership(self):
@@ -139,14 +155,14 @@ class ExportTests(unittest.TestCase):
         self.assertTrue(text.endswith('0.750000'))
         self.record.annotations_detected = boxes
         self.assertEqual(serialize_annotations(self.record, 1000, 500), text)
-        self.assertEqual(self.ns['_image_export'](self.image, 'user', 'number', True)['image1_run1.txt'], text)
+        self.assertEqual(self.ns['_image_export'](self.image, 'user', 'number', True)['image1_C1_run1.txt'], 'C1 ' + text)
 
     def test_multiple_settings_do_not_collide(self):
         second = NS(**(vars(self.record) | {'id': 'run2'}))
         self.Annotation.query.filter_by.return_value.all.return_value = [self.record, second]
         files = self.ns['_image_export'](self.image, 'user', 'number', False)
-        self.assertIn('image1_run1.txt', files)
-        self.assertIn('image1_run2.txt', files)
+        self.assertIn('image1_C1_run1.txt', files)
+        self.assertIn('image1_C1_run2.txt', files)
 
     def test_crop_preserves_full_image_coordinates_and_confidence(self):
         self.channel.original_path = 'unused.tiff'
