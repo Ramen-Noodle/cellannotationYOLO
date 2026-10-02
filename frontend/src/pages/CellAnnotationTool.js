@@ -32,6 +32,7 @@ import AppBar from '@mui/material/AppBar'
 
 import SideMenu from '../components/SideMenu'
 import ImageCanvas from '../components/ImageCanvas'
+import { parseChannelAnnotations, visibleImportedBoxes } from './annotationImport.mjs'
 import TabMenu from '../components/TabMenu'
 import ColorMenu from '../components/ColorMenu'
 import AdjustableSlider from '../components/AdjustableSlider'
@@ -67,6 +68,10 @@ export default function CellAnnotationTool() {
   const [imageList, setImageList] = useState([])
   const [imageSets, setImageSets] = useState([])
   const [imageID, setImageID] = useState('')
+  const [importedPreview, setImportedPreview] = useState(null)
+  const importImageRef = useRef(imageID)
+  importImageRef.current = imageID
+  useEffect(() => { setImportedPreview(null) }, [imageID])
   const [imageURL, setImageURL] = useState('')
   const [imageName, setImageName] = useState('')
   const [imageSize, setImageSize] = useState({width: 0, height: 0})
@@ -1077,10 +1082,24 @@ export default function CellAnnotationTool() {
     }
 
     const reader = new FileReader()
+    const targetImageId = imageID
     
     reader.onload = e => {
 
       const yoloData = e.target.result
+      if (importImageRef.current !== targetImageId) return
+      const firstLine = yoloData.split(/\r?\n/).find(line => line.trim() && !line.trim().startsWith('#')) || ''
+      if (!firstLine || /^C/.test(firstLine.trim())) {
+        try {
+          const imported = parseChannelAnnotations(yoloData, imageSize, channels)
+          setImportedPreview({ imageId: imageID, filename: file.name, boxes: imported })
+          setIsCropping(false)
+        } catch (error) {
+          alert(`Import failed: ${error.message}`)
+        }
+        return
+      }
+      setImportedPreview(null)
       const lines = yoloData.split('\n')
 
       setAnnotations_old([])
@@ -1114,6 +1133,7 @@ export default function CellAnnotationTool() {
     }
 
     reader.readAsText(file)
+    reader.onerror = () => alert('Could not read the annotation file.')
   }
 
   function detectCellDiameter() { //TODO: Update
@@ -2351,6 +2371,7 @@ export default function CellAnnotationTool() {
               <IconButton 
                 color="primary" 
                 onClick={saveAnnotations}
+                disabled={!!importedPreview}
                 sx={{ p: 1.5 }}
               >
                 <SaveAsIcon />
@@ -2372,6 +2393,7 @@ export default function CellAnnotationTool() {
             {/* 2. EXPORT ANNOTATIONS (Triggers new Configuration Modal) */}
             <Tooltip title="Download Options" arrow>
               <IconButton
+                disabled={!!importedPreview}
                 color="primary"
                 onClick={() => {
                   // Default to the currently active image on open
@@ -3528,9 +3550,19 @@ export default function CellAnnotationTool() {
             <Typography variant='body2' sx={{ color: '#ccc', fontFamily: 'monospace' }}>
               {imageName || 'No image loaded'}
             </Typography>
+            {importedPreview && importedPreview.imageId === imageID && (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography variant="body2" sx={{ color: '#fff' }}>
+                  Preview: {importedPreview.filename} ({importedPreview.boxes.length} cells; view only)
+                </Typography>
+                <Button onClick={() => setImportedPreview(null)}>Return to annotations</Button>
+              </Box>
+            )}
           </Box>
           <Box sx={{ flexGrow: 1, display: 'flex', justifyContent: 'center', bgcolor: '#111' }}>
-            <ImageCanvas layers={canvasLayers} boxes={overlayChannels ? boxes.filter(b => visibleChannelIds.has(b.channel_id)) : boxes.filter(b => b.channel_id === selectedChannelId)} onAddBox={handleAddBox}
+            <ImageCanvas layers={canvasLayers} readOnly={!!importedPreview} boxes={importedPreview && importedPreview.imageId === imageID
+              ? visibleImportedBoxes(importedPreview.boxes, overlayChannels, visibleChannelIds, selectedChannelId)
+              : overlayChannels ? boxes.filter(b => visibleChannelIds.has(b.channel_id)) : boxes.filter(b => b.channel_id === selectedChannelId)} onAddBox={handleAddBox}
               onRemoveBox={handleRemoveBox} isCropping={isCropping} onCrop={handleCrop}
               currentClass={currentClass} classes={classes} imageSize={imageSize}
               brightness={brightness} contrast={contrast}
