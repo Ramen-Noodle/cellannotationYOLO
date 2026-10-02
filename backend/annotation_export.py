@@ -5,6 +5,11 @@ Database JSON is authoritative: legacy annotation text files have mixed units.
 import math
 
 
+def channel_label(channel):
+    """Readable channel identity without guessing a fluorophore from its position."""
+    return f'C{channel.order_index + 1}'
+
+
 def normalized_box(box, width, height):
     width, height = float(width), float(height)
     values = [float(box[key]) for key in ('x', 'y', 'w', 'h')]
