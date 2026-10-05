@@ -1566,6 +1566,8 @@ def detect():
     max_cell_diameter = float(data.get('max_cell_diameter', 17))
     sublabel = data.get('sublabel', '')
     selected_classes = data.get('selected_classes', None)
+    retain_annotation_keys = data.get('retain_annotation_keys') or []
+    finalize_selection = bool(data.get('finalize_selection', False))
 
     try:
         channel = Channel.query.join(ImageRecord).filter(
@@ -1603,7 +1605,32 @@ def detect():
         target_record.annotations_detected = converted_annotations
         target_record.count_detected = len(converted_annotations)
         flag_modified(target_record, "annotations_detected")
+
+        if finalize_selection:
+            retained_keys = {
+                (item.get('channel_id'), item.get('detection_setting_id'))
+                for item in retain_annotation_keys
+                if item.get('channel_id') and item.get('detection_setting_id')
+            }
+            retained_keys.add((channel_id, target_record.detection_setting_id))
+            image_channels = Channel.query.filter_by(image_id=channel.image_id).all()
+            old_records = Annotation.query.filter(
+                Annotation.user_id == g.user.id,
+                Annotation.channel_id.in_([c.id for c in image_channels]),
+            ).all()
+            obsolete_paths = []
+            for record in old_records:
+                if (record.channel_id, record.detection_setting_id) not in retained_keys:
+                    if record.file_path:
+                        obsolete_paths.append(record.file_path)
+                    db.session.delete(record)
+
         db.session.commit()
+
+        if finalize_selection:
+            for obsolete_path in obsolete_paths:
+                if os.path.exists(obsolete_path):
+                    os.remove(obsolete_path)
 
         return jsonify({
             "annotations": converted_annotations,
@@ -1627,12 +1654,8 @@ def batch_detect():
 
     image_set_id = data['image_set_id']
     requested_rows = data['detection_settings']
-    # When True (default), re-running a row overwrites any existing results for it.
-    # When False, an image/row pair that already has results is left untouched -
-    # UNLESS that row's config changed since it last ran (see force_rerun below),
-    # since silently keeping results computed under stale settings would be worse
-    # than the redundant work overwrite=False is meant to save.
-    overwrite = data.get('overwrite', True)
+    # Each successful image run replaces its complete annotation selection.
+    # Older clients may send overwrite=False; batch no longer preserves old rows.
 
     if not isinstance(requested_rows, list) or len(requested_rows) == 0:
         return jsonify({"error": "detection_settings must be a non-empty list"}), 400
@@ -1672,7 +1695,7 @@ def batch_detect():
                 "selected_classes": selected_classes,
             }
 
-            setting, params_changed = resolve_detection_setting(
+            setting, _ = resolve_detection_setting(
                 g.user.id, model_id, params, row.get('detection_setting_id'),
                 preserve_existing=True,
             )
@@ -1688,20 +1711,16 @@ def batch_detect():
                 "max_cell_diameter": max_cell_diameter,
                 "sublabel": sublabel,
                 "selected_classes": selected_classes,
-                "force_rerun": params_changed,
             })
-
-        # A shared setting may occur on multiple channels. If any occurrence
-        # changed it, all selected occurrences must rerun under the new params.
-        changed_setting_ids = {r["setting"].id for r in resolved_rows if r["force_rerun"]}
-        for row in resolved_rows:
-            row["force_rerun"] = row["setting"].id in changed_setting_ids
 
         db.session.commit()
         image_results = []
         for image_record in image_set.images:
             channels_by_order = {c.order_index: c for c in image_record.channels}
             row_results = []
+            new_paths = set()
+            obsolete_paths = set()
+            retained_ids = set()
             try:
                 for r in resolved_rows:
                     setting = r["setting"]
@@ -1718,16 +1737,6 @@ def batch_detect():
                         user_id=g.user.id, channel_id=channel.id, detection_setting_id=setting.id
                     ).first()
 
-                    if existing and existing.file_path and not overwrite and not r["force_rerun"]:
-                        row_results.append({
-                            "detection_setting_id": setting.id,
-                            "channel_id": channel.id,
-                            "channel_order": r["channel_order"],
-                            "skipped": True,
-                            "count_detected": existing.count_detected
-                        })
-                        continue
-
                     yolo_string, converted_annotations = execute_detection(
                         channel, r["model_record"], r["threshold"], r["cell_diameter"], r["sublabel"],
                         r["selected_classes"], min_cell_diameter=r["min_cell_diameter"],
@@ -1743,14 +1752,23 @@ def batch_detect():
                         db.session.add(target_record)
                         db.session.flush()
 
-                    if not target_record.file_path:
-                        annotation_dir = g.user.get_path('annotations')
-                        target_record.file_path = os.path.join('data', annotation_dir, f'{target_record.id}.txt')
-
+                    # Write to a fresh file so a later row failure cannot alter
+                    # the files referenced by the previous database state.
+                    if target_record.file_path:
+                        obsolete_paths.add(target_record.file_path)
+                    annotation_dir = g.user.get_path('annotations')
+                    target_record.file_path = os.path.join(
+                        'data', annotation_dir, f'{target_record.id}_{uuid.uuid4()}.txt'
+                    )
+                    new_paths.add(target_record.file_path)
                     os.makedirs(os.path.dirname(target_record.file_path), exist_ok=True)
                     with open(target_record.file_path, 'w') as f:
                         f.write(yolo_string)
 
+                    retained_ids.add(target_record.id)
+                    target_record.annotations_drawn = []
+                    target_record.count_drawn = 0
+                    flag_modified(target_record, "annotations_drawn")
                     target_record.annotations_detected = converted_annotations
                     target_record.count_detected = len(converted_annotations)
                     flag_modified(target_record, "annotations_detected")
@@ -1763,6 +1781,19 @@ def batch_detect():
                         "count_detected": len(converted_annotations)
                     })
 
+                # Remove unchecked/deleted settings on every channel, including
+                # channels with no selected rows. Never delete shared settings.
+                old_records = Annotation.query.filter(
+                    Annotation.user_id == g.user.id,
+                    Annotation.channel_id.in_([c.id for c in image_record.channels]),
+                ).all()
+                for record in old_records:
+                    if record.id not in retained_ids:
+                        if record.file_path:
+                            obsolete_paths.add(record.file_path)
+                        db.session.delete(record)
+
+                current_paths = {record.file_path for record in old_records if record.id in retained_ids}
                 db.session.commit()
                 image_results.append({
                     "image_id": image_record.id,
@@ -1772,11 +1803,27 @@ def batch_detect():
 
             except Exception as e:
                 db.session.rollback()
+                for path in new_paths:
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except OSError:
+                        app.logger.exception("Could not remove unused batch file %s", path)
                 image_results.append({
                     "image_id": image_record.id,
                     "success": False,
                     "error": str(e)
                 })
+
+            else:
+                # Database replacement succeeded. File cleanup cannot turn that
+                # successful run into a reported detection failure.
+                for path in obsolete_paths - current_paths:
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except OSError:
+                        app.logger.exception("Could not remove obsolete batch file %s", path)
 
         return jsonify({
             "status": "complete",
