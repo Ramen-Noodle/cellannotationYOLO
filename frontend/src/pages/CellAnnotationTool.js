@@ -26,6 +26,7 @@ import VisibilityIcon from '@mui/icons-material/Visibility'
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff'
 import SaveIcon from '@mui/icons-material/Save'
 import CropIcon from '@mui/icons-material/Crop'
+import MergeTypeIcon from '@mui/icons-material/MergeType'
 import Tooltip from '@mui/material/Tooltip'
 import CircularProgress from '@mui/material/CircularProgress'
 import AppBar from '@mui/material/AppBar'
@@ -40,6 +41,7 @@ import MetricsChart from '../components/MetricsChart'
 import CellCalibrator from '../components/CellCalibrator'
 import GalleryMenu from '../components/GalleryMenu'
 import RowMenu from '../components/RowMenu'
+import MergeAnnotationsModal from '../components/MergeAnnotationsModal'
 import BatchDetectionRows, { batchRowError } from '../components/BatchDetectionRows'
 
 // Seeded per-user on account creation (see User.setup_filesystem in the
@@ -122,7 +124,6 @@ export default function CellAnnotationTool() {
   const [showLabels, setShowLabels] = useState(true)
   const [batchImageSetId, setBatchImageSetId] = useState('')
   const [batchSelectedRowIds, setBatchSelectedRowIds] = useState([])
-  const [batchOverwrite, setBatchOverwrite] = useState(true)
   const [batchDetectionSettings, setBatchDetectionSettings] = useState([])
   const [batchDetectionSettingsLoading, setBatchDetectionSettingsLoading] = useState(false)
   const [batchChannelGroups, setBatchChannelGroups] = useState([])
@@ -615,13 +616,13 @@ export default function CellAnnotationTool() {
         annosByChannel.get(a.channel_id).push(a)
       })
 
-      // Every channel gets at least one settings row - a blank default one if
-      // it has never been detected/saved - so the nested menu is never empty.
+      // Seed defaults only for a completely unannotated image. If saved rows
+      // exist, keep other channels empty rather than resurrecting removed rules.
       const settingRows = channelRows.flatMap(c => {
         const channelAnnos = annosByChannel.get(c.id) || []
         return channelAnnos.length > 0
           ? channelAnnos.map(a => buildDetectionSettingRow(c.id, a))
-          : [buildDetectionSettingRow(c.id, null)]
+          : (annoList.length === 0 ? [buildDetectionSettingRow(c.id, null)] : [])
       })
       setDetectionSettings(settingRows)
 
@@ -1168,7 +1169,14 @@ export default function CellAnnotationTool() {
     setLoadingMessage('Detecting cells — large images can take several minutes...')
 
     try {
-      for (const row of detectionSettings) {
+      const rowsToRun = detectionSettings.filter(row => row.selectedModelId)
+      if (rowsToRun.length === 0) {
+        alert('Select at least one detection row with a model.')
+        return
+      }
+      const resolvedRetainKeys = []
+      for (let rowIndex = 0; rowIndex < rowsToRun.length; rowIndex += 1) {
+        const row = rowsToRun[rowIndex]
         if (!row.selectedModelId) continue
 
         // rowId is this row's stable local identity (never changes - see
@@ -1185,7 +1193,9 @@ export default function CellAnnotationTool() {
           min_cell_diameter: row.rowMinDiameter,
           max_cell_diameter: row.rowMaxDiameter,
           sublabel: row.rowSublabel,
-          selected_classes: row.selectedClasses
+          selected_classes: row.selectedClasses,
+          retain_annotation_keys: resolvedRetainKeys,
+          finalize_selection: rowIndex === rowsToRun.length - 1,
         }
 
         try {
@@ -1208,6 +1218,10 @@ export default function CellAnnotationTool() {
 
           const newAnnotations = data.annotations
           const resolvedSettingId = data.detection_setting_id
+          resolvedRetainKeys.push({
+            channel_id: channelId,
+            detection_setting_id: resolvedSettingId,
+          })
           const newBoxes = newAnnotations.map(box => ({
             ...box,
             annotation_id: rowId,
@@ -1252,6 +1266,9 @@ export default function CellAnnotationTool() {
           alert('Detection failed: ' + e.message)
         }
       }
+      // The final detect call removes rows that were not part of this run.
+      // Reload so the canvas and row menu reflect the database selection.
+      await renderAnnotations(imageID, selectedChannelId)
     } finally {
       setIsLoading(false)
       setLoadingMessage('Processing...')
@@ -1272,7 +1289,6 @@ export default function CellAnnotationTool() {
     try {
       const payload = {
         image_set_id: batchImageSetId,
-        overwrite: batchOverwrite,
         detection_settings: detectionRows.map(row => ({
           id: row.id,
           detection_setting_id: row.detectionSettingId,
@@ -1627,6 +1643,7 @@ export default function CellAnnotationTool() {
   const [annotationModalOpen, setAnnotationModalOpen] = useState(false)
 
   const [exportModalOpen, setExportModalOpen] = useState(false)
+  const [mergeModalOpen, setMergeModalOpen] = useState(false)
   // Mutually exclusive: exactly one of these is non-null at a time.
   // Whichever one is set determines the export scope ("image" vs "image set").
   const [exportImageId, setExportImageId] = useState('')
@@ -1650,7 +1667,6 @@ export default function CellAnnotationTool() {
     setBatchLoadError('')
     setBatchDetectionSettingsLoading(false)
     setBatchImageSetId('')
-    setBatchOverwrite(true)
     setBatchDetectModalOpen(true)
   }
 
@@ -2390,6 +2406,14 @@ export default function CellAnnotationTool() {
               </IconButton>
             </Tooltip>
 
+            <Tooltip title="Merge Annotations" arrow>
+              <IconButton color="primary" aria-label="Merge annotations"
+                onClick={() => setMergeModalOpen(true)} sx={{ p: 1.5 }}>
+                <MergeTypeIcon />
+              </IconButton>
+            </Tooltip>
+            <MergeAnnotationsModal open={mergeModalOpen} onClose={() => setMergeModalOpen(false)} />
+
             {/* 2. EXPORT ANNOTATIONS (Triggers new Configuration Modal) */}
             <Tooltip title="Download Options" arrow>
               <IconButton
@@ -3122,7 +3146,7 @@ export default function CellAnnotationTool() {
                   <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
                     Channels match by position (C1 to C1, C2 to C2). Missing channels are skipped.
                     Rows stay in this dialog until Run Batch. Changing the image set resets these drafts.
-                    Removing a row here does not delete saved annotations.
+                    Removed or unchecked rules are deleted from the image set when the batch succeeds.
                   </Typography>
                   {batchLoadError && <Typography role="alert" color="error">{batchLoadError}</Typography>}
                   {batchDetectionSettingsLoading ? <Typography>Loading channels and settings...</Typography> :
@@ -3134,26 +3158,11 @@ export default function CellAnnotationTool() {
                   {batchImageSetId && !batchDetectionSettingsLoading && !batchLoadError && !batchChannelGroups.length &&
                     <Typography>This image set has no channels to detect.</Typography>}
 
-                  <FormControlLabel
-                    sx={{ mb: 1 }}
-                    control={
-                      <Checkbox
-                        size="small"
-                        checked={batchOverwrite}
-                        onChange={(e) => setBatchOverwrite(e.target.checked)}
-                      />
-                    }
-                    label={
-                      <Box>
-                        <Typography variant="body2">Overwrite existing detections</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {batchOverwrite
-                            ? 'Replaces detected boxes for selected channel/settings pairs; preserves manual boxes and other rows.'
-                            : 'Leaves annotations in place (unless that row\'s settings changed).'}
-                        </Typography>
-                      </Box>
-                    }
-                  />
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                    Running batch detection replaces all saved annotations for each successfully processed image.
+                    Only the checked rules remain. Unchecked rules, removed rules, and manually drawn annotations are deleted,
+                    including those on channels with no checked rules. Failed images keep their previous annotations.
+                  </Typography>
 
                   <Divider sx={{ mb: 2 }} />
 
