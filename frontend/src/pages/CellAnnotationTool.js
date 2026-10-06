@@ -33,7 +33,7 @@ import AppBar from '@mui/material/AppBar'
 
 import SideMenu from '../components/SideMenu'
 import ImageCanvas from '../components/ImageCanvas'
-import { parseChannelAnnotations, visibleImportedBoxes } from './annotationImport.mjs'
+import { parseChannelAnnotations, visibleImportedBoxes } from '../utils/annotationImport.mjs'
 import TabMenu from '../components/TabMenu'
 import ColorMenu from '../components/ColorMenu'
 import AdjustableSlider from '../components/AdjustableSlider'
@@ -55,7 +55,7 @@ const CHANNEL_COLOR_PALETTE = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF0
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5001'
+  const API_BASE_URL = 'http://10.80.24.12:5002'
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('Processing...')
@@ -2071,6 +2071,30 @@ export default function CellAnnotationTool() {
     console.log(detectionSettings)
   }, [detectionSettings])
 
+  function handleMergeApply(mergedBoxes) {
+    setBoxes(mergedBoxes)
+    setAnnotations(previous => previous.map(annotation => {
+      const updateRawBox = rawBox => {
+        const mergedBox = mergedBoxes.find(box => (
+          box.annotation_id === annotation.id &&
+          box.channel_id === annotation.channel_id &&
+          Number(box.x) === Number(rawBox.x) &&
+          Number(box.y) === Number(rawBox.y) &&
+          Number(box.w ?? box.width) === Number(rawBox.w ?? rawBox.width) &&
+          Number(box.h ?? box.height) === Number(rawBox.h ?? rawBox.height)
+        ))
+        return mergedBox
+          ? { ...rawBox, class: mergedBox.class ?? rawBox.class }
+          : null
+      }
+      return {
+        ...annotation,
+        annotations_detected: (annotation.annotations_detected || []).map(updateRawBox).filter(Boolean),
+        annotations_drawn: (annotation.annotations_drawn || []).map(updateRawBox).filter(Boolean),
+      }
+    }))
+  }
+
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', overflow: 'hidden' }}>
       
@@ -2412,7 +2436,14 @@ export default function CellAnnotationTool() {
                 <MergeTypeIcon />
               </IconButton>
             </Tooltip>
-            <MergeAnnotationsModal open={mergeModalOpen} onClose={() => setMergeModalOpen(false)} />
+            <MergeAnnotationsModal
+              open={mergeModalOpen}
+              onClose={() => setMergeModalOpen(false)}
+              boxes={boxes}
+              channels={channels}
+              annotations={annotations}
+              onApply={handleMergeApply}
+            />
 
             {/* 2. EXPORT ANNOTATIONS (Triggers new Configuration Modal) */}
             <Tooltip title="Download Options" arrow>
