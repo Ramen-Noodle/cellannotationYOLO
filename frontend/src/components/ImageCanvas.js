@@ -21,7 +21,7 @@ function tintToCanvas(source, color, width, height) {
 }
 
 export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCropping,
-    onCrop, currentClass, classes, imageSize, brightness, contrast, scale, onScaleChange, showLabels = true, currentSet, readOnly = false }) {
+    onCrop, currentClass, classes, imageSize, brightness, contrast, scale, onScaleChange, showLabels = true, currentSet, readOnly = false, viewportSize }) {
   const canvasRef = useRef(null)
   const imagesRef = useRef({})       // layerId -> loaded Image (non-tiled)
   const tintCacheRef = useRef({})    // layerId -> { color, sourceImg, canvas } (non-tiled)
@@ -117,7 +117,7 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
   useEffect(() => {
     draw()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scale, offset, boxes, currentBox, classes, brightness, contrast, windowSize, layerLoadVersion, layersKey, showLabels])
+  }, [scale, offset, boxes, currentBox, classes, brightness, contrast, windowSize, viewportSize, layerLoadVersion, layersKey, showLabels])
 
   const getLabelTextColor = (hex) => {
     const r = parseInt(hex.slice(1, 3), 16)
@@ -452,8 +452,8 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
   return (
     <canvas
       ref={canvasRef}
-      width={window.innerWidth}
-      height={window.innerHeight}
+      width={viewportSize?.width ?? windowSize.width}
+      height={viewportSize?.height ?? windowSize.height}
       style={{
         cursor: isPanning ? 'grabbing': canDraw ? 'crosshair': 'not-allowed',
         background: 'rgba(0, 0, 0, 1)',

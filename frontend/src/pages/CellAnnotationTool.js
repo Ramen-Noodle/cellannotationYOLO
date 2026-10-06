@@ -1,5 +1,11 @@
+import ImageSetsModal from '../components/modals/ImageSetsModal'
+import ExportAnnotationsModal from '../components/modals/ExportAnnotationsModal'
+import BatchDetectionModal from '../components/modals/BatchDetectionModal'
+import CustomModelUploadModal from '../components/modals/CustomModelUploadModal'
+import TrainModelModal from '../components/modals/TrainModelModal'
+import ManageModelsModal from '../components/modals/ManageModelsModal'
 import { useState, useEffect, useRef, Fragment } from 'react'
-import { Box, Button, Typography, Divider, Modal, IconButton, FormControlLabel, Checkbox, Popover, Paper, Select, FormControl, InputLabel, OutlinedInput, Chip, RadioGroup, Radio } from '@mui/material'
+import { Box, Button, Typography, IconButton, Checkbox, Popover, Paper, Select, FormControl, InputLabel, OutlinedInput, Chip } from '@mui/material'
 import PopupState, { bindTrigger, bindMenu } from 'material-ui-popup-state'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import Menu from '@mui/material/Menu'
@@ -8,9 +14,9 @@ import Stack from '@mui/material/Stack'
 import TextField from '@mui/material/TextField'
 import DownloadIcon from '@mui/icons-material/Download'
 import SettingsIcon from '@mui/icons-material/Settings'
-import AddIcon from '@mui/icons-material/Add'
+
 import DeleteIcon from '@mui/icons-material/Delete'
-import CloseIcon from '@mui/icons-material/Close'
+
 import FolderOpenIcon from '@mui/icons-material/FolderOpen'
 import ImageSearch from '@mui/icons-material/ImageSearch'
 import ScreenSearchDesktop from '@mui/icons-material/ScreenSearchDesktop'
@@ -39,10 +45,11 @@ import ColorMenu from '../components/ColorMenu'
 import AdjustableSlider from '../components/AdjustableSlider'
 import MetricsChart from '../components/MetricsChart'
 import CellCalibrator from '../components/CellCalibrator'
-import GalleryMenu from '../components/GalleryMenu'
+import GalleryMenu from '../components/modals/GalleryMenu'
 import RowMenu from '../components/RowMenu'
-import MergeAnnotationsModal from '../components/MergeAnnotationsModal'
-import BatchDetectionRows, { batchRowError } from '../components/BatchDetectionRows'
+import MergeAnnotationsModal from '../components/modals/MergeAnnotationsModal'
+import MergePreviewModal from '../components/modals/MergePreviewModal'
+import { batchRowError } from '../components/BatchDetectionRows'
 
 // Seeded per-user on account creation (see User.setup_filesystem in the
 // backend) - not deletable. There's no is_default flag in the API response
@@ -609,6 +616,8 @@ export default function CellAnnotationTool() {
 
       const channelRows = channelList.map(buildChannelRow)
       setChannels(channelRows)
+      setMergedLayer(null)
+      setMergePreview(null)
 
       const annosByChannel = new Map()
       annoList.forEach(a => {
@@ -1093,6 +1102,8 @@ export default function CellAnnotationTool() {
       if (!firstLine || /^C/.test(firstLine.trim())) {
         try {
           const imported = parseChannelAnnotations(yoloData, imageSize, channels)
+          setMergedLayer(previous => previous ? { ...previous, visible: false } : null)
+          setChannels(previous => previous.map(c => ({ ...c, visible: true })))
           setImportedPreview({ imageId: imageID, filename: file.name, boxes: imported })
           setIsCropping(false)
         } catch (error) {
@@ -1602,6 +1613,14 @@ export default function CellAnnotationTool() {
   }
 
   const [channels, setChannels] = useState([])
+  const [mergedLayer, setMergedLayer] = useState(null)
+  const [mergePreview, setMergePreview] = useState(null)
+  const mergedActive = mergedLayer?.imageId === imageID && mergedLayer.visible
+  useEffect(() => {
+    setMergedLayer(null)
+    setMergePreview(null)
+    setMergeModalOpen(false)
+  }, [imageID])
   const [selectedChannelId, setSelectedChannelId] = useState(null)
   const [selectedDetectionSettingId, setSelectedDetectionSettingId] = useState(null)
   // Which channel's nested detection-settings menu is open (settings gear on a channel row)
@@ -1878,6 +1897,7 @@ export default function CellAnnotationTool() {
         ? templateRows.map(t => ({ ...t, id: generateId(), detectionSettingId: generateId(), channelId: newChannelRow.id }))
         : [buildDetectionSettingRow(newChannelRow.id, null)]
 
+      setMergedLayer(previous => previous ? { ...previous, visible: false } : null)
       setChannels(prev => [...prev, newChannelRow])
       setDetectionSettings(prev => [...prev, ...newSettingRows])
       setActiveRowIds(prev => [...prev, ...newSettingRows.map(r => r.id)])
@@ -1922,6 +1942,8 @@ export default function CellAnnotationTool() {
     const remainingSettings = detectionSettings.filter(r => r.channelId !== targetChannel.id)
 
     setChannels(remainingChannels)
+    setMergedLayer(null)
+    setMergePreview(null)
     setDetectionSettings(remainingSettings)
     setActiveRowIds(prevActive => prevActive.filter(id => !removedSettingIds.has(id)))
     setAnnotations(prevAnnos => prevAnnos.filter(ann => ann.channel_id !== targetChannel.id))
@@ -1942,6 +1964,14 @@ export default function CellAnnotationTool() {
   }
 
   const handleSelectChannel = (id) => {
+    if (id === mergedLayer?.id) {
+      setMergedLayer(previous => ({ ...previous, visible: true }))
+      setChannels(previous => previous.map(c => ({ ...c, visible: false })))
+      setImportedPreview(null)
+      return
+    }
+    setMergedLayer(previous => previous ? { ...previous, visible: false } : null)
+    setChannels(previous => previous.map(c => c.id === id ? { ...c, visible: true } : c))
     setSelectedChannelId(id)
     setCurrentClass(0)
     const channel = channels.find(c => c.id === id)
@@ -1953,6 +1983,7 @@ export default function CellAnnotationTool() {
   }
 
   const handleSelectDetectionSetting = (channelId, id) => {
+    handleSelectChannel(channelId)
     setSelectedDetectionSettingId(id)
     setCurrentClass(0)
     // Selecting a setting from a different channel's nested menu also switches the viewed channel.
@@ -2029,7 +2060,25 @@ export default function CellAnnotationTool() {
 
   // Toggles whether a channel's image layer and annotations show in the overlay view.
   const handleToggleChannelVisibility = (channelId) => {
-    setChannels(prev => prev.map(c => c.id === channelId ? { ...c, visible: !c.visible } : c))
+    if (channelId === mergedLayer?.id) {
+      const show = !mergedLayer.visible
+      setMergedLayer(previous => ({ ...previous, visible: show }))
+      if (show) {
+        setChannels(previous => previous.map(c => ({ ...c, visible: false })))
+        setImportedPreview(null)
+      }
+      return
+    }
+    const channel = channels.find(c => c.id === channelId)
+    if (!channel) return
+    const show = channel.visible === false
+    if (show) {
+      setMergedLayer(previous => previous ? { ...previous, visible: false } : null)
+      setSelectedChannelId(channelId)
+      setImageURL(channel.channelUrl)
+      setSelectedDetectionSettingId(detectionSettings.find(r => r.channelId === channelId)?.id ?? null)
+    }
+    setChannels(previous => previous.map(c => c.id === channelId ? { ...c, visible: show } : c))
   }
 
   async function commitChannelRename(index) {
@@ -2063,37 +2112,39 @@ export default function CellAnnotationTool() {
   // "Overlay channels" composites every visible channel (tinted by its assigned
   // color) onto the canvas; otherwise only the currently selected channel is shown.
   const visibleChannelIds = new Set(channels.filter(c => c.visible !== false).map(c => c.id))
-  const canvasLayers = overlayChannels
+  const canvasLayers = mergedActive ? mergedLayer.layers : overlayChannels
     ? channels.filter(c => visibleChannelIds.has(c.id)).map(c => ({ id: c.id, src: c.channelUrl, color: c.channelColor }))
-    : (selectedChannelId ? [{ id: selectedChannelId, src: imageURL, color: null }] : [])
+    : (selectedChannelId && visibleChannelIds.has(selectedChannelId) ? [{ id: selectedChannelId, src: imageURL, color: null }] : [])
 
   useEffect(() => {
     console.log(detectionSettings)
   }, [detectionSettings])
 
-  function handleMergeApply(mergedBoxes) {
-    setBoxes(mergedBoxes)
-    setAnnotations(previous => previous.map(annotation => {
-      const updateRawBox = rawBox => {
-        const mergedBox = mergedBoxes.find(box => (
-          box.annotation_id === annotation.id &&
-          box.channel_id === annotation.channel_id &&
-          Number(box.x) === Number(rawBox.x) &&
-          Number(box.y) === Number(rawBox.y) &&
-          Number(box.w ?? box.width) === Number(rawBox.w ?? rawBox.width) &&
-          Number(box.h ?? box.height) === Number(rawBox.h ?? rawBox.height)
-        ))
-        return mergedBox
-          ? { ...rawBox, class: mergedBox.class ?? rawBox.class }
-          : null
-      }
-      return {
-        ...annotation,
-        annotations_detected: (annotation.annotations_detected || []).map(updateRawBox).filter(Boolean),
-        annotations_drawn: (annotation.annotations_drawn || []).map(updateRawBox).filter(Boolean),
-      }
-    }))
+  function buildMergeResult(mergedBoxes) {
+    return {
+      id: `merged:${imageID}`, imageId: imageID, channelName: 'Merged annotations', visible: true,
+      boxes: mergedBoxes.map(box => ({ ...box, channel_ids: box.channel_ids || [box.channel_id] })),
+      layers: channels.map(c => ({ id: c.id, src: c.channelUrl, color: c.channelColor })),
+      imageSize: { ...imageSize },
+    }
   }
+
+  function showMergePreview(mergedBoxes) {
+    setMergePreview(buildMergeResult(mergedBoxes))
+    setMergeModalOpen(false)
+  }
+
+  function commitMerge(result) {
+    if (!result || result.imageId !== imageID) return
+    setMergedLayer(result)
+    setChannels(previous => previous.map(c => ({ ...c, visible: false })))
+    setImportedPreview(null)
+    setMergePreview(null)
+    setMergeModalOpen(false)
+    setIsCropping(false)
+  }
+
+  const channelMenuRows = mergedLayer?.imageId === imageID ? [...channels, mergedLayer] : channels
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', overflow: 'hidden' }}>
@@ -2246,124 +2297,23 @@ export default function CellAnnotationTool() {
                 <CollectionsIcon />
               </IconButton>
             </Tooltip>
-            <Modal
-              open={imageSetsMenuOpen}
-              onClose={() => setImageSetsMenuOpen(false)}
-              aria-labelledby="image-sets-modal-title"
-              sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-            >
-              <Box
-                sx={{
-                  position: 'relative',
-                  width: '100%',
-                  maxWidth: 550,
-                  bgcolor: 'background.paper',
-                  borderRadius: 2,
-                  boxShadow: 24,
-                  p: 3,
-                  outline: 'none',
-                  maxHeight: '85vh',
-                  overflowY: 'auto'
-                }}
-              >
-                {/* Modal Header */}
-                <Box display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-                  <Typography id="image-sets-modal-title" variant="h6" sx={{ fontWeight: 'bold' }}>
-                    Manage Image Sets
-                  </Typography>
-                  <IconButton onClick={() => setImageSetsMenuOpen(false)} size="small">
-                    <CloseIcon />
-                  </IconButton>
-                </Box>
-
-                <Divider sx={{ mb: 2 }} />
-
-                {/* Content Window containing RowMenu */}
-                <RowMenu 
-                  rows={imageSets}
-                  headers={["Set Name", "Total Images"]}
-                  gridTemplateColumns="3fr 1fr"
-                  onAdd={handleCreateImageSet}
-                  onDelete={handleDeleteImageSet}
-                  onChange={() => {}}
-                  onSelect={handleSelectImageSet}
-                  renderRowTemplate={(row) => (
-                    <Box display="grid" gridTemplateColumns="3fr 1fr" gap={2} alignItems="center">
-                      <Typography variant="body1" sx={{ fontWeight: 500, minWidth: 0, noWrap: true }}>
-                        {row.name}
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        {row.image_count} items
-                      </Typography>
-                    </Box>
-                  )}
-                />
-                
-                <GalleryMenu 
-                  open={setViewMenuOpen}
-                  handleClose={() => setSetViewMenuOpen(false)}
-                  title={activeImageSet ? `Image Set: ${activeImageSet.name}` : 'Image Set Gallery'}
-                  images={activeImageSet?.images || []}
-                  onImageClick={handleLoadImage}
-                  
-                  renderHeaderActions={() => (
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      startIcon={<AddIcon />}
-                      onClick={() => setAddImagesSelectionOpen(true)}
-                    >
-                      Add Images
-                    </Button>
-                  )}
-
-                  renderActions={(img) => (
-                    <IconButton 
-                      size="small" 
-                      sx={{ color: '#F87171', '&:hover': { color: '#EF4444' } }}
-                      onClick={(e) => {
-                        e.stopPropagation() 
-                        handleRemoveImageFromSet(img.id)
-                      }}
-                    >
-                      <DeleteIcon fontSize="small" />
-                    </IconButton>
-                  )}
-                />
-                
-                <GalleryMenu
-                  open={addImagesSelectionOpen}
-                  handleClose={() => setAddImagesSelectionOpen(false)}
-                  title="Select Images to Add to Set"
-                  images={imageList}
-                  onImageClick={(img) => {
-                    handleAddImageToSet(img)
-                  }}
-                
-                  renderActions={(img) => {
-                    const currentImages = activeImageSet?.images || []
-                    const isAlreadyInSet = currentImages.some(item => item.id === img.id)
-                    
-                    return isAlreadyInSet ? (
-                      <Typography variant="caption" sx={{ color: '#4ADE80', px: 1, fontWeight: 'bold' }}>
-                        Added
-                      </Typography>
-                    ) : (
-                      <IconButton 
-                        size="small" 
-                        sx={{ color: '#60A5FA', '&:hover': { color: '#3B82F6' } }}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleAddImageToSet(img)
-                        }}
-                      >
-                        <AddIcon fontSize="small" />
-                      </IconButton>
-                    )
-                  }}
-                />
-              </Box>
-            </Modal>
+            <ImageSetsModal
+              imageSetsMenuOpen={imageSetsMenuOpen}
+              setImageSetsMenuOpen={setImageSetsMenuOpen}
+              imageSets={imageSets}
+              handleCreateImageSet={handleCreateImageSet}
+              handleDeleteImageSet={handleDeleteImageSet}
+              handleSelectImageSet={handleSelectImageSet}
+              setViewMenuOpen={setViewMenuOpen}
+              setSetViewMenuOpen={setSetViewMenuOpen}
+              activeImageSet={activeImageSet}
+              handleLoadImage={handleLoadImage}
+              setAddImagesSelectionOpen={setAddImagesSelectionOpen}
+              handleRemoveImageFromSet={handleRemoveImageFromSet}
+              addImagesSelectionOpen={addImagesSelectionOpen}
+              imageList={imageList}
+              handleAddImageToSet={handleAddImageToSet}
+            />
 
             <Tooltip title="Crop Image" arrow>
               <IconButton 
@@ -2411,7 +2361,7 @@ export default function CellAnnotationTool() {
               <IconButton 
                 color="primary" 
                 onClick={saveAnnotations}
-                disabled={!!importedPreview}
+                disabled={!!importedPreview || !!mergedActive}
                 sx={{ p: 1.5 }}
               >
                 <SaveAsIcon />
@@ -2442,13 +2392,18 @@ export default function CellAnnotationTool() {
               boxes={boxes}
               channels={channels}
               annotations={annotations}
-              onApply={handleMergeApply}
+              onPreview={showMergePreview}
+              onMerge={mergedBoxes => commitMerge(buildMergeResult(mergedBoxes))}
             />
+
+            <MergePreviewModal preview={mergePreview}
+              onClose={() => { setMergePreview(null); setMergeModalOpen(true) }}
+              onMerge={commitMerge} brightness={brightness} contrast={contrast} showLabels={showLabels} />
 
             {/* 2. EXPORT ANNOTATIONS (Triggers new Configuration Modal) */}
             <Tooltip title="Download Options" arrow>
               <IconButton
-                disabled={!!importedPreview}
+                disabled={!!importedPreview || !!mergedActive}
                 color="primary"
                 onClick={() => {
                   // Default to the currently active image on open
@@ -2461,179 +2416,24 @@ export default function CellAnnotationTool() {
                 <FileDownloadIcon />
               </IconButton>
             </Tooltip>
-            <Modal
-              open={exportModalOpen}
-              onClose={() => setExportModalOpen(false)}
-              aria-labelledby="export-modal-title"
-              sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-            >
-              <Box
-                sx={{
-                  width: '100%',
-                  maxWidth: 400,
-                  bgcolor: 'background.paper',
-                  borderRadius: 2,
-                  boxShadow: 24,
-                  p: 3,
-                  outline: 'none'
-                }}
-              >
-                <Box display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-                  <Typography id="export-modal-title" variant="h6" sx={{ fontWeight: 'bold' }}>
-                    Export Options
-                  </Typography>
-                  <IconButton onClick={() => setExportModalOpen(false)} size="small">
-                    <CloseIcon />
-                  </IconButton>
-                </Box>
-
-                <Divider sx={{ mb: 2 }} />
-
-                <Stack spacing={2.5}>
-                  {/* Export target: exactly one of an image or an image set */}
-                  <FormControl>
-                    <Typography variant="body2" sx={{ fontWeight: 500, mb: 0.5 }}>
-                      Export
-                    </Typography>
-                    <RadioGroup
-                      row
-                      value={exportImageSetId !== null ? 'imageSet' : 'image'}
-                      onChange={(e) => {
-                        if (e.target.value === 'imageSet') {
-                          setExportImageId(null)
-                          setExportImageSetId('')
-                        } else {
-                          setExportImageSetId(null)
-                          setExportImageId(imageID)
-                        }
-                      }}
-                    >
-                      <FormControlLabel value="image" control={<Radio size="small" />} label="Image" />
-                      <FormControlLabel value="imageSet" control={<Radio size="small" />} label="Image Set" />
-                    </RadioGroup>
-                  </FormControl>
-
-                  {exportImageSetId !== null ? (
-                    <FormControl fullWidth size="small">
-                      <InputLabel id="export-image-set-label">Image Set</InputLabel>
-                      <Select
-                        labelId="export-image-set-label"
-                        label="Image Set"
-                        value={exportImageSetId}
-                        displayEmpty
-                        onChange={(e) => setExportImageSetId(e.target.value)}
-                      >
-                        {imageSets.length === 0 ? (
-                          <MenuItem value="" disabled>No image sets available</MenuItem>
-                        ) : (
-                          imageSets.map((set) => (
-                            <MenuItem key={set.id} value={set.id}>{set.name}</MenuItem>
-                          ))
-                        )}
-                      </Select>
-                    </FormControl>
-                  ) : (
-                    <FormControl fullWidth size="small">
-                      <InputLabel id="export-image-label">Image</InputLabel>
-                      <Select
-                        labelId="export-image-label"
-                        label="Image"
-                        value={exportImageId}
-                        displayEmpty
-                        onChange={(e) => setExportImageId(e.target.value)}
-                      >
-                        {imageList.length === 0 ? (
-                          <MenuItem value="" disabled>No images available</MenuItem>
-                        ) : (
-                          imageList.map((img) => (
-                            <MenuItem key={img.id} value={img.id}>{img.name}</MenuItem>
-                          ))
-                        )}
-                      </Select>
-                    </FormControl>
-                  )}
-
-                  <Divider />
-
-                  <FormControlLabel
-                    control={
-                      <Checkbox
-                        checked={annotationsOnly}
-                        onChange={(e) => setAnnotationsOnly(e.target.checked)}
-                      />
-                    }
-                    label={
-                      <Box>
-                        <Typography variant="body1" sx={{ fontWeight: 500 }}>Export annotations only</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          Leaves behind the base normalized image file stream
-                        </Typography>
-                      </Box>
-                    }
-                  />
-
-                  <Divider />
-
-                  {/* Label format: class name (merged per image) vs class number (split per detection setting) */}
-                  <FormControl>
-                    <Typography variant="body2" sx={{ fontWeight: 500, mb: 0.5 }}>
-                      Label format
-                    </Typography>
-                    <RadioGroup
-                      row
-                      value={exportLabelFormat}
-                      onChange={(e) => setExportLabelFormat(e.target.value)}
-                    >
-                      <FormControlLabel value="name" control={<Radio size="small" />} label="Class name" />
-                      <FormControlLabel value="number" control={<Radio size="small" />} label="Class number" />
-                    </RadioGroup>
-                    <Typography variant="caption" color="text.secondary">
-                      {exportLabelFormat === 'name'
-                        ? 'One merged file per image, labeled by class name'
-                        : 'One file per detection setting, labeled by raw class index'}
-                    </Typography>
-                  </FormControl>
-
-                  <FormControlLabel
-                    control={
-                      <Checkbox
-                        checked={exportIncludeConfidence}
-                        onChange={(e) => setExportIncludeConfidence(e.target.checked)}
-                      />
-                    }
-                    label={
-                      <Box>
-                        <Typography variant="body1" sx={{ fontWeight: 500 }}>Include confidence</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          Appends a confidence score to each line (null if unavailable)
-                        </Typography>
-                      </Box>
-                    }
-                  />
-
-                  {/* Action Buttons */}
-                  <Box display="flex" gap={1.5} justifyContent="flex-end" sx={{ mt: 1 }}>
-                    <Button 
-                      variant="outlined" 
-                      onClick={() => setExportModalOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      variant="contained"
-                      startIcon={<FileDownloadIcon />}
-                      disabled={exportImageSetId !== null ? !exportImageSetId : !exportImageId}
-                      onClick={() => {
-                        exportAnnotations()
-                        setExportModalOpen(false)
-                      }}
-                    >
-                      Download Package
-                    </Button>
-                  </Box>
-                </Stack>
-              </Box>
-            </Modal>
+            <ExportAnnotationsModal
+              exportModalOpen={exportModalOpen}
+              setExportModalOpen={setExportModalOpen}
+              exportImageSetId={exportImageSetId}
+              setExportImageId={setExportImageId}
+              setExportImageSetId={setExportImageSetId}
+              imageID={imageID}
+              imageSets={imageSets}
+              exportImageId={exportImageId}
+              imageList={imageList}
+              annotationsOnly={annotationsOnly}
+              setAnnotationsOnly={setAnnotationsOnly}
+              exportLabelFormat={exportLabelFormat}
+              setExportLabelFormat={setExportLabelFormat}
+              exportIncludeConfidence={exportIncludeConfidence}
+              setExportIncludeConfidence={setExportIncludeConfidence}
+              exportAnnotations={exportAnnotations}
+            />
 
             {/* 4. CLEAR ANNOTATIONS */}
             <Tooltip title="Clear Canvas Annotations" arrow>
@@ -2746,13 +2546,33 @@ export default function CellAnnotationTool() {
               onChange={handleAddChannelFile}
             />
             <RowMenu
-              rows={channels}
+              rows={channelMenuRows}
               onAdd={handleAddChannelClick}
-              onDelete={handleDeleteChannelRow}
+              onDelete={index => {
+                if (channelMenuRows[index]?.id === mergedLayer?.id) {
+                  setMergedLayer(null)
+                  setChannels(previous => previous.map(c => ({ ...c, visible: true })))
+                } else handleDeleteChannelRow(index)
+              }}
               onChange={() => {}}
-              selectedRowId={selectedChannelId}
+              selectedRowId={mergedActive ? mergedLayer.id : selectedChannelId}
               onSelect={handleSelectChannel}
               renderRowTemplate={(channelRow, index) => {
+                if (channelRow.id === mergedLayer?.id) return (
+                  <Box display="flex" alignItems="center" gap={1} width="100%">
+                    <Tooltip title={channelRow.visible ? 'Hide merged layer' : 'Show merged layer'}>
+                      <IconButton size="small" aria-label={channelRow.visible ? 'Hide merged layer' : 'Show merged layer'}
+                        onClick={event => { event.stopPropagation(); handleToggleChannelVisibility(channelRow.id) }}
+                        color={channelRow.visible ? 'primary' : 'default'}>
+                        {channelRow.visible ? <VisibilityIcon fontSize="small" /> : <VisibilityOffIcon fontSize="small" />}
+                      </IconButton>
+                    </Tooltip>
+                    <Box sx={{ opacity: channelRow.visible ? 1 : 0.5 }}>
+                      <Typography variant="body2">Merged annotations</Typography>
+                      <Typography variant="caption" color="text.secondary">All channels · {channelRow.boxes.length} cells · local layer</Typography>
+                    </Box>
+                  </Box>
+                )
                 const channelDetectionRows = detectionSettings.filter(r => r.channelId === channelRow.id)
                 const modelNames = channelDetectionRows
                   .map(r => models.find(m => m.id === r.selectedModelId)?.name)
@@ -3086,132 +2906,24 @@ export default function CellAnnotationTool() {
                   <ScreenSearchDesktop />
                 </IconButton>
               </Tooltip>
-              <Modal
-                open={batchDetectModalOpen}
-                onClose={() => setBatchDetectModalOpen(false)}
-                sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-              >
-                <Box
-                  sx={{
-                    width: '100%',
-                    maxWidth: 760,
-                    bgcolor: 'background.paper',
-                    borderRadius: 2,
-                    boxShadow: 24,
-                    p: 3,
-                    outline: 'none',
-                    maxHeight: '85vh',
-                    overflowY: 'auto',
-                  }}
-                >
-                  {/* Header */}
-                  <Box display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-                    <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
-                      Batch Detection
-                    </Typography>
-                    <IconButton onClick={() => setBatchDetectModalOpen(false)} size="small">
-                      <CloseIcon />
-                    </IconButton>
-                  </Box>
-
-                  <Divider sx={{ mb: 2 }} />
-
-                  {/* Image Set Picker */}
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Image Set
-                  </Typography>
-                  {imageSets.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                      No image sets available. Create one from the image sets menu.
-                    </Typography>
-                  ) : (
-                    <Box sx={{ mb: 3 }}>
-                      {imageSets.map((set) => {
-                        const isSelected = batchImageSetId === set.id
-                        return (
-                          <Box
-                            key={set.id}
-                            display="flex"
-                            alignItems="center"
-                            sx={{
-                              px: 1.5,
-                              py: 1,
-                              mb: 0.5,
-                              borderRadius: 1,
-                              border: '1px solid',
-                              borderColor: isSelected ? 'primary.main' : 'divider',
-                              bgcolor: isSelected ? 'primary.50' : 'transparent',
-                              cursor: 'pointer',
-                              transition: 'all 0.15s ease',
-                            }}
-                            onClick={() => handleSelectBatchImageSet(set.id)}
-                          >
-                            <Box
-                              sx={{
-                                width: 16,
-                                height: 16,
-                                borderRadius: '50%',
-                                border: '2px solid',
-                                borderColor: isSelected ? 'primary.main' : 'text.disabled',
-                                bgcolor: isSelected ? 'primary.main' : 'transparent',
-                                mr: 1.5,
-                                flexShrink: 0,
-                                transition: 'all 0.15s ease',
-                              }}
-                            />
-                            <Box sx={{ flexGrow: 1 }}>
-                              <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                                {set.name}
-                              </Typography>
-                              <Typography variant="caption" color="text.secondary">
-                                {set.image_count} image{set.image_count !== 1 ? 's' : ''}
-                              </Typography>
-                            </Box>
-                          </Box>
-                        )
-                      })}
-                    </Box>
-                  )}
-
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>Detection by channel</Typography>
-                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
-                    Channels match by position (C1 to C1, C2 to C2). Missing channels are skipped.
-                    Rows stay in this dialog until Run Batch. Changing the image set resets these drafts.
-                    Removed or unchecked rules are deleted from the image set when the batch succeeds.
-                  </Typography>
-                  {batchLoadError && <Typography role="alert" color="error">{batchLoadError}</Typography>}
-                  {batchDetectionSettingsLoading ? <Typography>Loading channels and settings...</Typography> :
-                    !batchImageSetId ? <Typography>Select an image set to configure detection.</Typography> :
-                    <BatchDetectionRows groups={batchChannelGroups} rows={batchDetectionSettings} models={models}
-                      selectedIds={batchSelectedRowIds}
-                      onToggle={id => setBatchSelectedRowIds(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id])}
-                      onChange={updateBatchRow} onAdd={addBatchRow} onRemove={removeBatchRow} />}
-                  {batchImageSetId && !batchDetectionSettingsLoading && !batchLoadError && !batchChannelGroups.length &&
-                    <Typography>This image set has no channels to detect.</Typography>}
-
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                    Running batch detection replaces all saved annotations for each successfully processed image.
-                    Only the checked rules remain. Unchecked rules, removed rules, and manually drawn annotations are deleted,
-                    including those on channels with no checked rules. Failed images keep their previous annotations.
-                  </Typography>
-
-                  <Divider sx={{ mb: 2 }} />
-
-                  {/* Footer */}
-                  <Box display="flex" justifyContent="flex-end" gap={1.5}>
-                    <Button variant="outlined" onClick={() => setBatchDetectModalOpen(false)}>
-                      Cancel
-                    </Button>
-                    <Button
-                      variant="contained"
-                      disabled={batchDetectionSettingsLoading || !batchImageSetId || batchSelectedRowIds.length === 0 || batchDetectionSettings.some(r => batchSelectedRowIds.includes(r.id) && (!Number.isInteger(r.channelOrder) || batchRowError(r, models)))}
-                      onClick={handleBatchDetect}
-                    >
-                      Run Batch ({batchSelectedRowIds.length} row{batchSelectedRowIds.length !== 1 ? 's' : ''})
-                    </Button>
-                  </Box>
-                </Box>
-              </Modal>
+              <BatchDetectionModal
+                batchDetectModalOpen={batchDetectModalOpen}
+                setBatchDetectModalOpen={setBatchDetectModalOpen}
+                imageSets={imageSets}
+                batchImageSetId={batchImageSetId}
+                handleSelectBatchImageSet={handleSelectBatchImageSet}
+                batchLoadError={batchLoadError}
+                batchDetectionSettingsLoading={batchDetectionSettingsLoading}
+                batchChannelGroups={batchChannelGroups}
+                batchDetectionSettings={batchDetectionSettings}
+                models={models}
+                batchSelectedRowIds={batchSelectedRowIds}
+                setBatchSelectedRowIds={setBatchSelectedRowIds}
+                updateBatchRow={updateBatchRow}
+                addBatchRow={addBatchRow}
+                removeBatchRow={removeBatchRow}
+                handleBatchDetect={handleBatchDetect}
+              />
             </Box>
 
             <Typography variant='body1' sx={{ pt: 1, fontWeight: 'bold' }}>
@@ -3228,47 +2940,19 @@ export default function CellAnnotationTool() {
                   <DriveFolderUploadIcon />
                 </IconButton>
               </Tooltip>
-              <Modal
-                open={customUploadModalOpen}
-                onClose={cancelCustom}
-              >
-                <Box sx={{...modal_style}}>
-                  <Typography>Load Custom Model</Typography>
-                  <TextField
-                    label="Model Name"
-                    variant="outlined"
-                    fullWidth
-                    value={customModelName}
-                    onChange={(e) => setCustomModelName(e.target.value)}
-                  />
-                  <Button variant='contained' component='label'>
-                    Select File
-                    <input hidden type='file' accept='.pt' onChange={handleChooseCustomModel} />
-                  </Button>
-                  <PopupState variant='popover' popupId='model-popup-menu'>
-                    {(popupState) => (
-                      <Fragment>
-                        <Button variant='contained' {...bindTrigger(popupState)} endIcon={<KeyboardArrowDownIcon />}>
-                          {customModelType || 'Select Type'}
-                        </Button>
-                        <Menu {...bindMenu(popupState)}>
-                          {modelTypes.map((item, index) => (
-                            <MenuItem 
-                              key={index}
-                              onClick={() => {setCustomModelType(item)}}
-                            >
-                                <Typography variant='body1'>{item}</Typography>
-                            </MenuItem>
-                          ))}
-                        </Menu>
-                      </Fragment>
-                    )}
-                  </PopupState>
-                  <Typography>Selected: {customModelFilename}</Typography>
-                  <Button onClick={handleUploadCustomModel}>Confirm</Button>
-                  <Button onClick={cancelCustom}>Cancel</Button>
-                </Box>
-              </Modal>
+              <CustomModelUploadModal
+                customUploadModalOpen={customUploadModalOpen}
+                cancelCustom={cancelCustom}
+                modal_style={modal_style}
+                customModelName={customModelName}
+                setCustomModelName={setCustomModelName}
+                handleChooseCustomModel={handleChooseCustomModel}
+                customModelType={customModelType}
+                modelTypes={modelTypes}
+                setCustomModelType={setCustomModelType}
+                customModelFilename={customModelFilename}
+                handleUploadCustomModel={handleUploadCustomModel}
+              />
               <Tooltip title="Train Model" arrow>
                 <IconButton
                   color="primary"
@@ -3287,291 +2971,30 @@ export default function CellAnnotationTool() {
                   <SettingsIcon />
                 </IconButton>
               </Tooltip>
-              <Modal
-                open={trainModelModalOpen}
-                onClose={handleCloseTrainModelModal}
-                sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-              >
-                <Box
-                  sx={{
-                    width: '100%',
-                    maxWidth: 500,
-                    bgcolor: 'background.paper',
-                    borderRadius: 2,
-                    boxShadow: 24,
-                    p: 3,
-                    outline: 'none',
-                    maxHeight: '85vh',
-                    overflowY: 'auto',
-                  }}
-                >
-                  {/* Header */}
-                  <Box display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-                    <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
-                      Train Model
-                    </Typography>
-                    <IconButton onClick={handleCloseTrainModelModal} size="small">
-                      <CloseIcon />
-                    </IconButton>
-                  </Box>
-
-                  <Divider sx={{ mb: 2 }} />
-
-                  {/* Model Picker */}
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Model
-                  </Typography>
-                  {models.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                      No models available.
-                    </Typography>
-                  ) : (
-                    <Box sx={{ mb: 3 }}>
-                      {models.map((model) => {
-                        const isSelected = trainModelWeightsId === model.id
-                        return (
-                          <Box
-                            key={model.id}
-                            display="flex"
-                            alignItems="center"
-                            sx={{
-                              px: 1.5,
-                              py: 1,
-                              mb: 0.5,
-                              borderRadius: 1,
-                              border: '1px solid',
-                              borderColor: isSelected ? 'primary.main' : 'divider',
-                              bgcolor: isSelected ? 'primary.50' : 'transparent',
-                              cursor: 'pointer',
-                              transition: 'all 0.15s ease',
-                            }}
-                            onClick={() => setTrainModelWeightsId(model.id)}
-                          >
-                            <Box
-                              sx={{
-                                width: 16,
-                                height: 16,
-                                borderRadius: '50%',
-                                border: '2px solid',
-                                borderColor: isSelected ? 'primary.main' : 'text.disabled',
-                                bgcolor: isSelected ? 'primary.main' : 'transparent',
-                                mr: 1.5,
-                                flexShrink: 0,
-                                transition: 'all 0.15s ease',
-                              }}
-                            />
-                            <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                              {model.name}
-                            </Typography>
-                          </Box>
-                        )
-                      })}
-                    </Box>
-                  )}
-
-                  {/* Image Set Picker */}
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Image Set
-                  </Typography>
-                  {imageSets.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                      No image sets available. Create one from the image sets menu.
-                    </Typography>
-                  ) : (
-                    <Box sx={{ mb: 3 }}>
-                      {imageSets.map((set) => {
-                        const isSelected = trainModelImageSetId === set.id
-                        return (
-                          <Box
-                            key={set.id}
-                            display="flex"
-                            alignItems="center"
-                            sx={{
-                              px: 1.5,
-                              py: 1,
-                              mb: 0.5,
-                              borderRadius: 1,
-                              border: '1px solid',
-                              borderColor: isSelected ? 'primary.main' : 'divider',
-                              bgcolor: isSelected ? 'primary.50' : 'transparent',
-                              cursor: 'pointer',
-                              transition: 'all 0.15s ease',
-                            }}
-                            onClick={() => setTrainModelImageSetId(set.id)}
-                          >
-                            <Box
-                              sx={{
-                                width: 16,
-                                height: 16,
-                                borderRadius: '50%',
-                                border: '2px solid',
-                                borderColor: isSelected ? 'primary.main' : 'text.disabled',
-                                bgcolor: isSelected ? 'primary.main' : 'transparent',
-                                mr: 1.5,
-                                flexShrink: 0,
-                                transition: 'all 0.15s ease',
-                              }}
-                            />
-                            <Box sx={{ flexGrow: 1 }}>
-                              <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                                {set.name}
-                              </Typography>
-                              <Typography variant="caption" color="text.secondary">
-                                {set.image_count} image{set.image_count !== 1 ? 's' : ''}
-                              </Typography>
-                            </Box>
-                          </Box>
-                        )
-                      })}
-                    </Box>
-                  )}
-
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Label
-                  </Typography>
-                  <TextField
-                    size="small"
-                    fullWidth
-                    value={trainModelLabel}
-                    onChange={(e) => setTrainModelLabel(e.target.value)}
-                    placeholder="finetuned"
-                    helperText={`Saved as "${(models.find(m => m.id === trainModelWeightsId)?.name) || '<model>'}_${trainModelLabel.trim() || 'finetuned'}". Overwrites a non-default model with the same name.`}
-                    sx={{ mb: 2 }}
-                  />
-
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Pretrain Images
-                  </Typography>
-                  <TextField
-                    size="small"
-                    type="number"
-                    fullWidth
-                    value={numPretrainImages}
-                    onChange={(e) => setNumPretrainImages(parseInt(e.target.value, 10) || 0)}
-                    helperText="Number of curated pretrain images to include from this model's pretrain set."
-                    sx={{ mb: 2 }}
-                  />
-
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Epochs
-                  </Typography>
-                  <TextField
-                    size="small"
-                    type="number"
-                    fullWidth
-                    value={epochs}
-                    onChange={(e) => setEpochs(parseInt(e.target.value, 10) || '')}
-                    sx={{ mb: 2 }}
-                  />
-
-                  <Divider sx={{ mb: 2 }} />
-
-                  {/* Footer */}
-                  <Box display="flex" justifyContent="flex-end" gap={1.5}>
-                    <Button variant="outlined" onClick={handleCloseTrainModelModal}>
-                      Cancel
-                    </Button>
-                    <Button
-                      variant="contained"
-                      disabled={!trainModelWeightsId || !trainModelImageSetId}
-                      onClick={handleTrainModel}
-                    >
-                      Train
-                    </Button>
-                  </Box>
-                </Box>
-              </Modal>
-              <Modal
-                open={manageModelsModalOpen}
-                onClose={handleCloseManageModelsModal}
-                sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-              >
-                <Box
-                  sx={{
-                    width: '100%',
-                    maxWidth: 450,
-                    bgcolor: 'background.paper',
-                    borderRadius: 2,
-                    boxShadow: 24,
-                    p: 3,
-                    outline: 'none',
-                    maxHeight: '85vh',
-                    overflowY: 'auto',
-                  }}
-                >
-                  {/* Header */}
-                  <Box display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-                    <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
-                      Manage Models
-                    </Typography>
-                    <IconButton onClick={handleCloseManageModelsModal} size="small">
-                      <CloseIcon />
-                    </IconButton>
-                  </Box>
-
-                  <Divider sx={{ mb: 2 }} />
-
-                  {models.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                      No models available.
-                    </Typography>
-                  ) : (
-                    <Box sx={{ mb: 2 }}>
-                      {models.map((model) => {
-                        const isDefault = DEFAULT_MODEL_NAMES.includes(model.name)
-                        return (
-                          <Box
-                            key={model.id}
-                            display="flex"
-                            alignItems="center"
-                            sx={{
-                              px: 1.5,
-                              py: 1,
-                              mb: 0.5,
-                              borderRadius: 1,
-                              border: '1px solid',
-                              borderColor: 'divider',
-                            }}
-                          >
-                            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                              <Typography variant="body2" noWrap sx={{ fontWeight: 500 }}>
-                                {model.name}
-                              </Typography>
-                              {isDefault && (
-                                <Typography variant="caption" color="text.secondary">
-                                  Default model
-                                </Typography>
-                              )}
-                            </Box>
-                            <Tooltip title={isDefault ? "Default models can't be deleted" : "Delete model"} arrow>
-                              <span>
-                                <IconButton
-                                  size="small"
-                                  color="error"
-                                  disabled={isDefault}
-                                  onClick={() => handleDeleteModel(model)}
-                                  sx={{ flexShrink: 0 }}
-                                >
-                                  <DeleteIcon fontSize="small" />
-                                </IconButton>
-                              </span>
-                            </Tooltip>
-                          </Box>
-                        )
-                      })}
-                    </Box>
-                  )}
-
-                  <Divider sx={{ mb: 2 }} />
-
-                  {/* Footer */}
-                  <Box display="flex" justifyContent="flex-end">
-                    <Button variant="outlined" onClick={handleCloseManageModelsModal}>
-                      Close
-                    </Button>
-                  </Box>
-                </Box>
-              </Modal>
+              <TrainModelModal
+                trainModelModalOpen={trainModelModalOpen}
+                handleCloseTrainModelModal={handleCloseTrainModelModal}
+                models={models}
+                trainModelWeightsId={trainModelWeightsId}
+                setTrainModelWeightsId={setTrainModelWeightsId}
+                imageSets={imageSets}
+                trainModelImageSetId={trainModelImageSetId}
+                setTrainModelImageSetId={setTrainModelImageSetId}
+                trainModelLabel={trainModelLabel}
+                setTrainModelLabel={setTrainModelLabel}
+                numPretrainImages={numPretrainImages}
+                setNumPretrainImages={setNumPretrainImages}
+                epochs={epochs}
+                setEpochs={setEpochs}
+                handleTrainModel={handleTrainModel}
+              />
+              <ManageModelsModal
+                manageModelsModalOpen={manageModelsModalOpen}
+                handleCloseManageModelsModal={handleCloseManageModelsModal}
+                models={models}
+                DEFAULT_MODEL_NAMES={DEFAULT_MODEL_NAMES}
+                handleDeleteModel={handleDeleteModel}
+              />
             </Box>
           </Box>
         </SideMenu>
@@ -3600,10 +3023,10 @@ export default function CellAnnotationTool() {
             )}
           </Box>
           <Box sx={{ flexGrow: 1, display: 'flex', justifyContent: 'center', bgcolor: '#111' }}>
-            <ImageCanvas layers={canvasLayers} readOnly={!!importedPreview} boxes={importedPreview && importedPreview.imageId === imageID
+            <ImageCanvas layers={canvasLayers} readOnly={!!importedPreview || !!mergedActive} boxes={mergedActive ? mergedLayer.boxes : importedPreview && importedPreview.imageId === imageID
               ? visibleImportedBoxes(importedPreview.boxes, overlayChannels, visibleChannelIds, selectedChannelId)
-              : overlayChannels ? boxes.filter(b => visibleChannelIds.has(b.channel_id)) : boxes.filter(b => b.channel_id === selectedChannelId)} onAddBox={handleAddBox}
-              onRemoveBox={handleRemoveBox} isCropping={isCropping} onCrop={handleCrop}
+              : overlayChannels ? boxes.filter(b => visibleChannelIds.has(b.channel_id)) : boxes.filter(b => b.channel_id === selectedChannelId && visibleChannelIds.has(b.channel_id))} onAddBox={handleAddBox}
+              onRemoveBox={handleRemoveBox} isCropping={isCropping && !mergedActive} onCrop={handleCrop}
               currentClass={currentClass} classes={classes} imageSize={imageSize}
               brightness={brightness} contrast={contrast}
               scale={scale} onScaleChange={setScale} showLabels={showLabels} currentSet={currentModel}/>

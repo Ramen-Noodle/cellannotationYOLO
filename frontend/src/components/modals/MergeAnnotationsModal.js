@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
   Button,
@@ -10,7 +10,7 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import RowMenu from './RowMenu'
+import RowMenu from '../RowMenu'
 
 const emptyRule = (id, options) => ({
   id,
@@ -23,7 +23,7 @@ const emptyRule = (id, options) => ({
 
 const classMatches = (box, classOption) => Boolean(
   classOption && String(box.channel_id) === String(classOption.channelId) &&
-  (box.name === classOption.name || Number(box.class) === Number(classOption.classIndex)),
+  box.name === classOption.name,
 )
 
 const boundsFor = box => ({
@@ -57,39 +57,37 @@ const applyRules = (boxes, rules, options) => rules.reduce((currentBoxes, rule) 
   const outputClass = options.find(item => item.id === rule.outputClass)
   if (!sourceClass || !conditionClass || !outputClass) return currentBoxes
 
-  const boxesToRemove = new Set()
-  const updatedBoxes = currentBoxes.map(sourceBox => {
-    if (!classMatches(sourceBox, sourceClass)) return sourceBox
-    const matchingConditions = currentBoxes.filter(conditionBox => {
-      if (conditionBox === sourceBox) return false
-      if (!classMatches(conditionBox, conditionClass)) return false
-      if (rule.conditionType === 'overlaps_with') {
-        return intersectionOverUnion(sourceBox, conditionBox) >= Number(rule.overlapThreshold || 0)
-      }
-      return isContainedBy(sourceBox, conditionBox)
-    })
-    matchingConditions.forEach(conditionBox => boxesToRemove.add(conditionBox))
-    return matchingConditions.length > 0
-      ? { ...sourceBox, class: outputClass.classIndex ?? sourceBox.class, name: outputClass.name, color: outputClass.color }
-      : sourceBox
-  })
-  return updatedBoxes.filter(box => !boxesToRemove.has(box))
-}, boxes)
-
-const countRuleMatches = (boxes, rules, options) => rules.reduce((count, rule) => {
-  const sourceClass = options.find(item => item.id === rule.sourceClass)
-  const conditionClass = options.find(item => item.id === rule.conditionClass)
-  if (!sourceClass || !conditionClass) return count
-  return count + boxes.filter(sourceBox => {
-    if (!classMatches(sourceBox, sourceClass)) return false
-    return boxes.some(conditionBox => {
-      if (conditionBox === sourceBox || !classMatches(conditionBox, conditionClass)) return false
+  const consumed = new Set(), replacements = new Map()
+  const sameClass = sourceClass.id === conditionClass.id
+  const acrossChannels = String(sourceClass.channelId) !== String(conditionClass.channelId)
+  const area = box => Number(box.w ?? box.width) * Number(box.h ?? box.height)
+  const indices = currentBoxes.map((box, index) => index).sort((a, b) => area(currentBoxes[b]) - area(currentBoxes[a]) || a - b)
+  for (const index of indices) {
+    const sourceBox = currentBoxes[index]
+    if (consumed.has(index) || !classMatches(sourceBox, sourceClass)) continue
+    const matches = indices.filter(i => {
+      if (i === index || consumed.has(i)) return false
+      const candidate = currentBoxes[i]
+      if (!classMatches(candidate, conditionClass)) return false
+      const sourceChannels = sourceBox.channel_ids || [sourceBox.channel_id]
+      const candidateChannels = candidate.channel_ids || [candidate.channel_id]
+      if (acrossChannels && sourceChannels.some(id => candidateChannels.includes(id))) return false
+      const iou = intersectionOverUnion(sourceBox, candidate)
+      if (iou <= 0) return false
       return rule.conditionType === 'overlaps_with'
-        ? intersectionOverUnion(sourceBox, conditionBox) >= Number(rule.overlapThreshold || 0)
-        : isContainedBy(sourceBox, conditionBox)
-    })
-  }).length
-}, 0)
+        ? iou >= Number(rule.overlapThreshold)
+        : isContainedBy(sourceBox, candidate) || (sameClass && isContainedBy(candidate, sourceBox))
+    }).sort((a, b) => intersectionOverUnion(sourceBox, currentBoxes[b]) - intersectionOverUnion(sourceBox, currentBoxes[a]) || a - b)
+    const selected = acrossChannels ? matches.slice(0, 1) : matches
+    if (!selected.length) continue
+    const group = [index, ...selected]
+    group.forEach(i => consumed.add(i))
+    replacements.set(index, { ...sourceBox, class: outputClass.id, name: outputClass.name, color: outputClass.color,
+      channel_id: outputClass.channelId,
+      channel_ids: [...new Set(group.flatMap(i => currentBoxes[i].channel_ids || [currentBoxes[i].channel_id]))] })
+  }
+  return currentBoxes.flatMap((box, index) => replacements.has(index) ? [replacements.get(index)] : consumed.has(index) ? [] : [box])
+}, boxes)
 
 export default function MergeAnnotationsModal({
   open,
@@ -97,26 +95,27 @@ export default function MergeAnnotationsModal({
   boxes = [],
   channels = [],
   annotations = [],
-  onApply,
+  onPreview,
+  onMerge,
 }) {
   const nextRuleId = useRef(2)
   const [rules, setRules] = useState([])
   const [selectedRuleId, setSelectedRuleId] = useState(null)
   const [changedCount, setChangedCount] = useState(null)
-  const annotationOptions = Array.from(new Map([
+  const annotationOptions = useMemo(() => Array.from(new Map([
     ...annotations.flatMap(annotation => (annotation.labels?.labels || []).map(label => {
       const channel = channels.find(item => item.id === annotation.channel_id)
       const channelName = `C${(channel?.orderIndex ?? 0) + 1}`
-      const id = `${annotation.channel_id}|${label.name}|${label.color || ''}`
+      const id = JSON.stringify([String(annotation.channel_id), label.name])
       return [id, { id, channelId: annotation.channel_id, classIndex: annotation.labels.labels.indexOf(label), name: label.name, color: label.color, label: `${channelName} - ${label.name}` }]
     })),
     ...boxes.map(box => {
       const channel = channels.find(item => item.id === box.channel_id)
       const channelName = `C${(channel?.orderIndex ?? 0) + 1}`
-      const id = `${box.channel_id}|${box.name}|${box.color || ''}`
+      const id = JSON.stringify([String(box.channel_id), box.name])
       return [id, { id, channelId: box.channel_id, classIndex: box.class, name: box.name, color: box.color, label: `${channelName} - ${box.name}` }]
     }),
-  ]).values())
+  ]).values()), [annotations, boxes, channels])
 
   useEffect(() => {
     if (!open || annotationOptions.length === 0) return
@@ -125,7 +124,7 @@ export default function MergeAnnotationsModal({
       return [emptyRule(1, annotationOptions)]
     })
     setSelectedRuleId(previous => previous || 1)
-  }, [open, annotationOptions.length])
+  }, [open, annotationOptions])
 
   const addRule = () => {
     const id = nextRuleId.current++
@@ -159,16 +158,21 @@ export default function MergeAnnotationsModal({
     setChangedCount(null)
   }
 
-  const merge = () => {
-    const mergedBoxes = applyRules(boxes, rules, annotationOptions)
-    const changes = mergedBoxes.reduce((count, box, index) => (
-      count + (box.name !== boxes[index]?.name || box.color !== boxes[index]?.color ? 1 : 0)
-    ), 0)
-    onApply?.(mergedBoxes)
-    setChangedCount(changes)
+  const rulesValid = rules.every(rule =>
+    [rule.sourceClass, rule.conditionClass, rule.outputClass].every(id => annotationOptions.some(option => option.id === id)) &&
+    [rule.sourceClass, rule.conditionClass].includes(rule.outputClass) &&
+    (rule.conditionType !== 'overlaps_with' || (rule.overlapThreshold !== '' &&
+      Number.isFinite(Number(rule.overlapThreshold)) && Number(rule.overlapThreshold) >= 0 && Number(rule.overlapThreshold) <= 1)))
+  const mergedBoxes = useMemo(() => open && rulesValid ? applyRules(boxes, rules, annotationOptions) : boxes,
+    [open, rulesValid, boxes, rules, annotationOptions])
+  const removedCount = boxes.length - mergedBoxes.length
+  const canMerge = rulesValid && boxes.length > 0 && rules.length > 0 && annotationOptions.length > 0
+  const merge = (previewOnly) => {
+    if (!canMerge) return
+    if (previewOnly) onPreview?.(mergedBoxes)
+    else onMerge?.(mergedBoxes)
+    setChangedCount(removedCount)
   }
-
-  const matchingCount = countRuleMatches(boxes, rules, annotationOptions)
 
   const classOptions = annotationOptions.map(item => (
     <MenuItem key={item.id} value={item.id}>{item.label}</MenuItem>
@@ -187,7 +191,7 @@ export default function MergeAnnotationsModal({
           <IconButton aria-label="Close merge annotations" onClick={onClose} size="small"><CloseIcon /></IconButton>
         </Box>
         <Typography id="merge-annotations-description" variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Rules apply to the current image as a local preview. The merged annotations are not uploaded to the server.
+          Preview opens the merged result in a separate canvas. Merge creates a merged layer for this image and keeps your original annotations unchanged.
         </Typography>
         {boxes.length === 0 && <Typography variant="body2" sx={{ mb: 1 }}>There are no annotations on this image.</Typography>}
         {annotationOptions.length === 0 && <Typography variant="body2" sx={{ mb: 1 }}>No channel annotation classes are available.</Typography>}
@@ -220,15 +224,19 @@ export default function MergeAnnotationsModal({
             </Stack>
           )} />
         {changedCount !== null && <Typography variant="body2" color="success.main" sx={{ mt: 1 }}>
-          Updated {changedCount} annotation{changedCount === 1 ? '' : 's'} in this image preview.
+          Removed {changedCount} overlapping box{changedCount === 1 ? '' : 'es'}.
         </Typography>}
-        {rules.length > 0 && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-          Current rules match {matchingCount} source annotation{matchingCount === 1 ? '' : 's'}.
+        {!rulesValid && <Typography variant="body2" color="error">Choose available input/output classes and an IoU threshold between 0 and 1.</Typography>}
+        {rules.length > 0 && rulesValid && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+          Current rules remove {removedCount} overlapping box{removedCount === 1 ? '' : 'es'}.
         </Typography>}
         <Box display="flex" justifyContent="flex-end" gap={1} sx={{ mt: 1 }}>
           <Button variant="outlined" onClick={onClose}>Close</Button>
-          <Button variant="contained" onClick={merge} disabled={boxes.length === 0 || rules.length === 0 || annotationOptions.length === 0}>
-            Apply merge preview
+          <Button variant="outlined" onClick={() => merge(true)} disabled={!canMerge}>
+            Preview
+          </Button>
+          <Button variant="contained" onClick={() => merge(false)} disabled={!canMerge}>
+            Merge
           </Button>
         </Box>
       </Box>
