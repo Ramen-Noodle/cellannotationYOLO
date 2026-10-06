@@ -21,7 +21,7 @@ function tintToCanvas(source, color, width, height) {
 }
 
 export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCropping,
-    onCrop, currentClass, classes, imageSize, brightness, contrast, scale, onScaleChange, showLabels = true, currentSet, readOnly = false }) {
+    onCrop, currentClass, classes, imageSize, brightness, contrast, scale, onScaleChange, showLabels = true, currentSet, readOnly = false, viewportSize, initialOffset }) {
   const canvasRef = useRef(null)
   const imagesRef = useRef({})       // layerId -> loaded Image (non-tiled)
   const tintCacheRef = useRef({})    // layerId -> { color, sourceImg, canvas } (non-tiled)
@@ -29,9 +29,15 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
   const tintedTilesRef = useRef({})  // "layerId:tx_ty" -> tinted canvas (tiled)
 
   // pan + zoom state
-  const [offset, setOffset] = useState({ x: 0, y: 0 })
+  const [offset, setOffset] = useState(() => initialOffset || { x: 0, y: 0 })
   const [isPanning, setIsPanning] = useState(false)
   const [lastPan, setLastPan] = useState({ x: 0, y: 0 })
+
+  const initialX = initialOffset?.x
+  const initialY = initialOffset?.y
+  useEffect(() => {
+    if (Number.isFinite(initialX) && Number.isFinite(initialY)) setOffset({ x: initialX, y: initialY })
+  }, [initialX, initialY])
 
   const [boundaries, setboundaries] = useState({
     xMin: 0,
@@ -117,7 +123,7 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
   useEffect(() => {
     draw()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scale, offset, boxes, currentBox, classes, brightness, contrast, windowSize, layerLoadVersion, layersKey, showLabels])
+  }, [scale, offset, boxes, currentBox, classes, brightness, contrast, windowSize, viewportSize, layerLoadVersion, layersKey, showLabels])
 
   const getLabelTextColor = (hex) => {
     const r = parseInt(hex.slice(1, 3), 16)
@@ -300,6 +306,9 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
 
   const handleMouseDown = (e) => {
     if (e.button === 1 || e.button === 2) {
+      e.preventDefault()
+      e.stopPropagation()
+      e.currentTarget.setPointerCapture(e.pointerId)
       // middle or right-click → pan
       setIsPanning(true)
       setLastPan({ x: e.clientX, y: e.clientY })
@@ -331,6 +340,7 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
 			return
 		}
 
+    e.currentTarget.setPointerCapture(e.pointerId)
     setCurrentBox({ x, y, w: 0, h: 0 })
   }
 
@@ -379,7 +389,8 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
     }
   }
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
     if (isPanning) {
       setIsPanning(false)
       return
@@ -432,7 +443,8 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
   }
 
   const handleWheel = (e) => {
-    //e.preventDefault()
+    e.preventDefault()
+    e.stopPropagation()
 
     const delta = e.deltaY < 0 ? 1.1 : 0.9
 
@@ -440,29 +452,42 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
     const mouseX = e.clientX - rect.left
     const mouseY = e.clientY - rect.top
 
-    const newScale = scale * delta;
+    const newScale = Math.max(0.00001, Math.min(100, scale * delta))
+    const ratio = newScale / scale
 
-    const newOffsetX = mouseX - (mouseX - offset.x) * delta
-    const newOffsetY = mouseY - (mouseY - offset.y) * delta
+    const newOffsetX = mouseX - (mouseX - offset.x) * ratio
+    const newOffsetY = mouseY - (mouseY - offset.y) * ratio
 
     onScaleChange(newScale)
     setOffset({ x: newOffsetX, y: newOffsetY })
   }
 
+  // React's wheel listener may be passive; a native listener can prevent page scrolling.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    canvas.addEventListener('wheel', handleWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', handleWheel)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scale, offset, onScaleChange])
+
   return (
     <canvas
       ref={canvasRef}
-      width={window.innerWidth}
-      height={window.innerHeight}
+      width={viewportSize?.width ?? windowSize.width}
+      height={viewportSize?.height ?? windowSize.height}
       style={{
-        cursor: isPanning ? 'grabbing': canDraw ? 'crosshair': 'not-allowed',
+        cursor: isPanning ? 'grabbing' : readOnly ? 'grab' : canDraw ? 'crosshair' : 'not-allowed',
+        display: 'block',
+        touchAction: 'none',
+        userSelect: 'none',
         background: 'rgba(0, 0, 0, 1)',
       }}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onWheel={handleWheel}
-			onContextMenu={(e) => e.preventDefault()}
+      onPointerDown={handleMouseDown}
+      onPointerMove={handleMouseMove}
+      onPointerUp={handleMouseUp}
+      onPointerCancel={() => { setIsPanning(false); setCurrentBox(null) }}
+			onContextMenu={(e) => { e.preventDefault(); e.stopPropagation() }}
     />
   )
 }
