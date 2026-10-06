@@ -2144,7 +2144,7 @@ export default function CellAnnotationTool() {
     setIsCropping(false)
   }
 
-  const channelMenuRows = mergedLayer?.imageId === imageID ? [...channels, mergedLayer] : channels
+  const channelMenuRows = mergedLayer?.imageId === imageID ? [mergedLayer, ...channels] : channels
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', overflow: 'hidden' }}>
@@ -2552,12 +2552,12 @@ export default function CellAnnotationTool() {
                 if (channelMenuRows[index]?.id === mergedLayer?.id) {
                   setMergedLayer(null)
                   setChannels(previous => previous.map(c => ({ ...c, visible: true })))
-                } else handleDeleteChannelRow(index)
+                } else handleDeleteChannelRow(channels.findIndex(c => c.id === channelMenuRows[index]?.id))
               }}
               onChange={() => {}}
               selectedRowId={mergedActive ? mergedLayer.id : selectedChannelId}
               onSelect={handleSelectChannel}
-              renderRowTemplate={(channelRow, index) => {
+              renderRowTemplate={(channelRow) => {
                 if (channelRow.id === mergedLayer?.id) return (
                   <Box display="flex" alignItems="center" gap={1} width="100%">
                     <Tooltip title={channelRow.visible ? 'Hide merged layer' : 'Show merged layer'}>
@@ -2569,10 +2569,10 @@ export default function CellAnnotationTool() {
                     </Tooltip>
                     <Box sx={{ opacity: channelRow.visible ? 1 : 0.5 }}>
                       <Typography variant="body2">Merged annotations</Typography>
-                      <Typography variant="caption" color="text.secondary">All channels · {channelRow.boxes.length} cells · local layer</Typography>
                     </Box>
                   </Box>
                 )
+                const index = channels.findIndex(c => c.id === channelRow.id)
                 const channelDetectionRows = detectionSettings.filter(r => r.channelId === channelRow.id)
                 const modelNames = channelDetectionRows
                   .map(r => models.find(m => m.id === r.selectedModelId)?.name)
