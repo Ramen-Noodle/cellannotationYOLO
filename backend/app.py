@@ -1699,7 +1699,11 @@ def _run_batch_job(job_id, data, user_id):
             with app.test_request_context('/batch-detect', method='POST', json=data):
                 g.user = user
                 response = process_batch_detect()
-                result = response.get_json()
+                status_code = response[1] if isinstance(response, tuple) else response.status_code
+                response_body = response[0] if isinstance(response, tuple) else response
+                result = response_body.get_json()
+                if status_code >= 400:
+                    raise RuntimeError(result.get('error', 'Batch detection failed'))
         _update_batch_job(job_id, status='complete', result=result,
                           current=result.get('total', 0), total=result.get('total', 0),
                           succeeded=result.get('succeeded', 0), failed=result.get('failed', 0))
