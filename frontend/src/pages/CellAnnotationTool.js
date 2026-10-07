@@ -62,7 +62,7 @@ const CHANNEL_COLOR_PALETTE = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF0
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5002'
+  const API_BASE_URL = 'http://10.80.24.12:5001'
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('Processing...')

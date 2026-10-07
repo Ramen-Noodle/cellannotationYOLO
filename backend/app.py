@@ -1671,6 +1671,7 @@ def batch_detect():
         batch_jobs[job_id] = {
             "job_id": job_id, "status": "queued", "current": 0, "total": 0,
             "current_image": None, "succeeded": 0, "failed": 0, "result": None,
+            "user_id": g.user.id,
         }
     data['_batch_job_id'] = job_id
     user_id = g.user.id
@@ -1785,7 +1786,9 @@ def process_batch_detect():
         image_results = []
         _update_batch_job(batch_job_id, total=len(image_set.images))
         for image_index, image_record in enumerate(image_set.images, start=1):
-            _update_batch_job(batch_job_id, current=image_index, current_image=image_record.name)
+            current_channel = image_record.base_channel
+            current_name = current_channel.name if current_channel and current_channel.name else image_record.id
+            _update_batch_job(batch_job_id, current=image_index, current_image=current_name)
             channels_by_order = {c.order_index: c for c in image_record.channels}
             row_results = []
             new_paths = set()
@@ -2376,4 +2379,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5001, debug=True, threaded=True)
