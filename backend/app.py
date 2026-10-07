@@ -1671,6 +1671,8 @@ def batch_detect():
         batch_jobs[job_id] = {
             "job_id": job_id, "status": "queued", "current": 0, "total": 0,
             "current_image": None, "succeeded": 0, "failed": 0, "result": None,
+            "current_channel": None, "current_model": None, "current_row": 0,
+            "total_rows": 0, "current_detections": 0, "total_detections": 0,
             "user_id": g.user.id,
         }
     data['_batch_job_id'] = job_id
@@ -1784,6 +1786,7 @@ def process_batch_detect():
 
         db.session.commit()
         image_results = []
+        _update_batch_job(batch_job_id, total_rows=len(resolved_rows))
         _update_batch_job(batch_job_id, total=len(image_set.images))
         for image_index, image_record in enumerate(image_set.images, start=1):
             current_channel = image_record.base_channel
@@ -1795,7 +1798,7 @@ def process_batch_detect():
             obsolete_paths = set()
             retained_ids = set()
             try:
-                for r in resolved_rows:
+                for row_index, r in enumerate(resolved_rows, start=1):
                     setting = r["setting"]
                     channel = channels_by_order.get(r["channel_order"])
                     if channel is None:
@@ -1806,6 +1809,14 @@ def process_batch_detect():
                             "reason": "missing_channel",
                         })
                         continue
+                    _update_batch_job(
+                        batch_job_id,
+                        current_channel=f"C{r['channel_order'] + 1}",
+                        current_model=r["model_record"].name,
+                        current_row=row_index,
+                        total_rows=len(resolved_rows),
+                        current_detections=0,
+                    )
                     existing = Annotation.query.filter_by(
                         user_id=g.user.id, channel_id=channel.id, detection_setting_id=setting.id
                     ).first()
@@ -1853,6 +1864,11 @@ def process_batch_detect():
                         "skipped": False,
                         "count_detected": len(converted_annotations)
                     })
+                    _update_batch_job(
+                        batch_job_id,
+                        current_detections=len(converted_annotations),
+                        total_detections=sum(row.get("count_detected", 0) for row in row_results),
+                    )
 
                 # Remove unchecked/deleted settings on every channel, including
                 # channels with no selected rows. Never delete shared settings.
@@ -1873,6 +1889,16 @@ def process_batch_detect():
                     "success": True,
                     "rows": row_results,
                 })
+                _update_batch_job(
+                    batch_job_id,
+                    succeeded=sum(1 for result in image_results if result["success"]),
+                    failed=sum(1 for result in image_results if not result["success"]),
+                    total_detections=sum(
+                        row.get("count_detected", 0)
+                        for result in image_results
+                        for row in result.get("rows", [])
+                    ),
+                )
 
             except Exception as e:
                 db.session.rollback()
@@ -1887,6 +1913,11 @@ def process_batch_detect():
                     "success": False,
                     "error": str(e)
                 })
+                _update_batch_job(
+                    batch_job_id,
+                    succeeded=sum(1 for result in image_results if result["success"]),
+                    failed=sum(1 for result in image_results if not result["success"]),
+                )
 
             else:
                 # Database replacement succeeded. File cleanup cannot turn that

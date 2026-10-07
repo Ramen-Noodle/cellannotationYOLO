@@ -1336,8 +1336,15 @@ export default function CellAnnotationTool() {
         const progress = await progressRes.json()
         const total = progress.total || batchImages.length
         const current = progress.current || 0
-        const imageLabel = progress.current_image ? `: ${progress.current_image}` : ''
-        setLoadingMessage(`Processing image ${Math.min(current, total)}/${total}${imageLabel}`)
+        const imageLabel = progress.current_image || 'current image'
+        const channelModel = progress.current_channel && progress.current_model
+          ? `Channel ${progress.current_channel} · ${progress.current_model} · detection row ${progress.current_row || 0}/${progress.total_rows || 0}`
+          : 'Preparing detection'
+        setLoadingMessage(
+          `Processing image ${Math.min(current, total)}/${total}: ${imageLabel}\n` +
+          `${channelModel}\n` +
+          `${progress.current_detections || 0} detections found · ${progress.failed || 0} images failed`,
+        )
         if (progress.status === 'complete') {
           data = progress.result
           break
@@ -2179,7 +2186,7 @@ export default function CellAnnotationTool() {
           zIndex: 9999,
         }}>
           <CircularProgress size={52} thickness={4} sx={{ color: 'white' }} />
-          <p style={{ color: 'white', marginTop: 12, fontSize: 14 }}>{loadingMessage}</p>
+          <p style={{ color: 'white', marginTop: 12, fontSize: 14, whiteSpace: 'pre-line', textAlign: 'center' }}>{loadingMessage}</p>
         </div>
       )}
 
