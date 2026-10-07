@@ -23,6 +23,8 @@ from datetime import timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import datetime
 import atexit
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from tensorflow.python.summary.summary_iterator import summary_iterator
 import glob
 import tensorflow as tf
@@ -56,6 +58,17 @@ from flask_migrate import Migrate
 
 db.init_app(app)
 migrate = Migrate(app, db)
+
+batch_job_executor = ThreadPoolExecutor(max_workers=2)
+batch_jobs = {}
+batch_jobs_lock = threading.Lock()
+
+def _update_batch_job(job_id, **updates):
+    if not job_id:
+        return
+    with batch_jobs_lock:
+        if job_id in batch_jobs:
+            batch_jobs[job_id].update(updates)
 
 @app.before_request
 def ensure_user_session():
@@ -1647,12 +1660,63 @@ def detect():
 def batch_detect():
     if not g.user:
         return jsonify({"error": "No active session"}), 401
+    data = request.get_json()
+    if not data or 'image_set_id' not in data or 'detection_settings' not in data:
+        return jsonify({"error": "Missing image_set_id or detection_settings in request body"}), 400
+    if not isinstance(data['detection_settings'], list) or len(data['detection_settings']) == 0:
+        return jsonify({"error": "detection_settings must be a non-empty list"}), 400
+
+    job_id = str(uuid.uuid4())
+    with batch_jobs_lock:
+        batch_jobs[job_id] = {
+            "job_id": job_id, "status": "queued", "current": 0, "total": 0,
+            "current_image": None, "succeeded": 0, "failed": 0, "result": None,
+        }
+    data['_batch_job_id'] = job_id
+    user_id = g.user.id
+    batch_job_executor.submit(_run_batch_job, job_id, data, user_id)
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+
+@app.route('/batch-detect/progress/<job_id>', methods=['GET'])
+def batch_detect_progress(job_id):
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+    with batch_jobs_lock:
+        job = batch_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Batch job not found"}), 404
+        if job.get('user_id') != g.user.id:
+            return jsonify({"error": "Unauthorized"}), 403
+        return jsonify(dict(job))
+
+
+def _run_batch_job(job_id, data, user_id):
+    _update_batch_job(job_id, status='running', user_id=user_id)
+    try:
+        with app.app_context():
+            user = db.session.get(User, user_id)
+            with app.test_request_context('/batch-detect', method='POST', json=data):
+                g.user = user
+                response = process_batch_detect()
+                result = response.get_json()
+        _update_batch_job(job_id, status='complete', result=result,
+                          current=result.get('total', 0), total=result.get('total', 0),
+                          succeeded=result.get('succeeded', 0), failed=result.get('failed', 0))
+    except Exception as exc:
+        _update_batch_job(job_id, status='failed', error=str(exc))
+
+
+def process_batch_detect():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
 
     data = request.get_json()
     if not data or 'image_set_id' not in data or 'detection_settings' not in data:
         return jsonify({"error": "Missing image_set_id or detection_settings in request body"}), 400
 
     image_set_id = data['image_set_id']
+    batch_job_id = data.get('_batch_job_id')
     requested_rows = data['detection_settings']
     # Each successful image run replaces its complete annotation selection.
     # Older clients may send overwrite=False; batch no longer preserves old rows.
@@ -1715,7 +1779,9 @@ def batch_detect():
 
         db.session.commit()
         image_results = []
-        for image_record in image_set.images:
+        _update_batch_job(batch_job_id, total=len(image_set.images))
+        for image_index, image_record in enumerate(image_set.images, start=1):
+            _update_batch_job(batch_job_id, current=image_index, current_image=image_record.name)
             channels_by_order = {c.order_index: c for c in image_record.channels}
             row_results = []
             new_paths = set()

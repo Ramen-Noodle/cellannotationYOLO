@@ -1295,9 +1295,10 @@ export default function CellAnnotationTool() {
 
     setBatchDetectModalOpen(false)
     setIsLoading(true)
-    setLoadingMessage('Running batch detection — large images can take several minutes each...')
+    setLoadingMessage('Starting batch detection...')
 
     try {
+      const batchImages = imageSets.find(s => s.id === batchImageSetId)?.images || []
       const payload = {
         image_set_id: batchImageSetId,
         detection_settings: detectionRows.map(row => ({
@@ -1314,18 +1315,35 @@ export default function CellAnnotationTool() {
         })),
       }
 
-      const res = await fetch(`${API_BASE_URL}/batch-detect`, {
+      const startRes = await fetch(`${API_BASE_URL}/batch-detect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
         credentials: 'include',
       })
 
-      if (!res.ok) {
-        const errorBody = await res.json().catch(() => null)
+      if (!startRes.ok) {
+        const errorBody = await startRes.json().catch(() => null)
         throw new Error(errorBody?.error || 'Batch detection failed')
       }
-      const data = await res.json()
+      const started = await startRes.json()
+      const jobId = started.job_id
+      let data = null
+      while (true) {
+        await new Promise(resolve => setTimeout(resolve, 500))
+        const progressRes = await fetch(`${API_BASE_URL}/batch-detect/progress/${jobId}`, { credentials: 'include' })
+        if (!progressRes.ok) throw new Error('Unable to read batch detection progress')
+        const progress = await progressRes.json()
+        const total = progress.total || batchImages.length
+        const current = progress.current || 0
+        const imageLabel = progress.current_image ? `: ${progress.current_image}` : ''
+        setLoadingMessage(`Processing image ${Math.min(current, total)}/${total}${imageLabel}`)
+        if (progress.status === 'complete') {
+          data = progress.result
+          break
+        }
+        if (progress.status === 'failed') throw new Error(progress.error || 'Batch detection failed')
+      }
 
       // Batch drafts may differ from the sidebar row they originated from.
       // Reconcile batch state only; reload the current image from saved records.
@@ -1335,7 +1353,6 @@ export default function CellAnnotationTool() {
         ? { ...row, detectionSettingId: resolvedIds.get(row.id), batchDraft: false }
         : row))
 
-      const batchImages = imageSets.find(s => s.id === batchImageSetId)?.images || []
       const details = (data.results || []).map(result => {
         const imageName = batchImages.find(img => img.id === result.image_id)?.name || result.image_id
         if (!result.success) return `${imageName}: failed — ${result.error}`
