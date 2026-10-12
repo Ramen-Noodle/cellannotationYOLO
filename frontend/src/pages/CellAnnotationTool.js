@@ -2425,10 +2425,9 @@ export default function CellAnnotationTool() {
                 <input
                   hidden
                   type="file"
-                  accept=".tiff,.tif"
                   multiple
-                  webkitdirectory=""
-                  directory=""
+                  webkitdirectory="true"
+                  directory="true"
                   onChange={handleUploadFolder}
                 />
               </IconButton>
