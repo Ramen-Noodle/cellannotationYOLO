@@ -78,7 +78,6 @@ export default function CellAnnotationTool() {
   const [imageSets, setImageSets] = useState([])
   const [imageID, setImageID] = useState('')
   const [importedPreview, setImportedPreview] = useState(null)
-  const imageUploadInputRef = useRef(null)
   const folderUploadInputRef = useRef(null)
   const importImageRef = useRef(imageID)
   importImageRef.current = imageID
@@ -2408,20 +2407,9 @@ export default function CellAnnotationTool() {
               <IconButton 
                 color="primary"
                 sx={{ p: 1.5 }}
-                onClick={() => {
-                  const chooseFolder = window.confirm('Choose OK to upload a folder, or Cancel to upload individual TIFF files.')
-                  ;(chooseFolder ? folderUploadInputRef : imageUploadInputRef).current?.click()
-                }}
+                onClick={() => folderUploadInputRef.current?.click()}
               >
                 <FileUploadIcon />
-                <input 
-                  ref={imageUploadInputRef}
-                  hidden 
-                  type="file" 
-                  accept=".tiff,.tif" 
-                  multiple 
-                  onChange={handleUpload}
-                />
                 <input
                   ref={folderUploadInputRef}
                   hidden
