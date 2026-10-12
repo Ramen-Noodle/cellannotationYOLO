@@ -62,7 +62,7 @@ const CHANNEL_COLOR_PALETTE = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF0
 
 export default function CellAnnotationTool() {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5002'
+  const API_BASE_URL = 'http://10.80.24.12:5001'
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('Processing...')
@@ -1295,9 +1295,10 @@ export default function CellAnnotationTool() {
 
     setBatchDetectModalOpen(false)
     setIsLoading(true)
-    setLoadingMessage('Running batch detection — large images can take several minutes each...')
+    setLoadingMessage('Starting batch detection...')
 
     try {
+      const batchImages = imageSets.find(s => s.id === batchImageSetId)?.images || []
       const payload = {
         image_set_id: batchImageSetId,
         detection_settings: detectionRows.map(row => ({
@@ -1314,18 +1315,42 @@ export default function CellAnnotationTool() {
         })),
       }
 
-      const res = await fetch(`${API_BASE_URL}/batch-detect`, {
+      const startRes = await fetch(`${API_BASE_URL}/batch-detect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
         credentials: 'include',
       })
 
-      if (!res.ok) {
-        const errorBody = await res.json().catch(() => null)
+      if (!startRes.ok) {
+        const errorBody = await startRes.json().catch(() => null)
         throw new Error(errorBody?.error || 'Batch detection failed')
       }
-      const data = await res.json()
+      const started = await startRes.json()
+      const jobId = started.job_id
+      let data = null
+      while (true) {
+        await new Promise(resolve => setTimeout(resolve, 500))
+        const progressRes = await fetch(`${API_BASE_URL}/batch-detect/progress/${jobId}`, { credentials: 'include' })
+        if (!progressRes.ok) throw new Error('Unable to read batch detection progress')
+        const progress = await progressRes.json()
+        const total = progress.total || batchImages.length
+        const current = progress.current || 0
+        const imageLabel = progress.current_image || 'current image'
+        const channelModel = progress.current_channel && progress.current_model
+          ? `Channel ${progress.current_channel} · ${progress.current_model} · detection row ${progress.current_row || 0}/${progress.total_rows || 0}`
+          : 'Preparing detection'
+        setLoadingMessage(
+          `Processing image ${Math.min(current, total)}/${total}: ${imageLabel}\n` +
+          `${channelModel}\n` +
+          `${progress.current_detections || 0} detections found · ${progress.failed || 0} images failed`,
+        )
+        if (progress.status === 'complete') {
+          data = progress.result
+          break
+        }
+        if (progress.status === 'failed') throw new Error(progress.error || 'Batch detection failed')
+      }
 
       // Batch drafts may differ from the sidebar row they originated from.
       // Reconcile batch state only; reload the current image from saved records.
@@ -1335,7 +1360,6 @@ export default function CellAnnotationTool() {
         ? { ...row, detectionSettingId: resolvedIds.get(row.id), batchDraft: false }
         : row))
 
-      const batchImages = imageSets.find(s => s.id === batchImageSetId)?.images || []
       const details = (data.results || []).map(result => {
         const imageName = batchImages.find(img => img.id === result.image_id)?.name || result.image_id
         if (!result.success) return `${imageName}: failed — ${result.error}`
@@ -2162,7 +2186,7 @@ export default function CellAnnotationTool() {
           zIndex: 9999,
         }}>
           <CircularProgress size={52} thickness={4} sx={{ color: 'white' }} />
-          <p style={{ color: 'white', marginTop: 12, fontSize: 14 }}>{loadingMessage}</p>
+          <p style={{ color: 'white', marginTop: 12, fontSize: 14, whiteSpace: 'pre-line', textAlign: 'center' }}>{loadingMessage}</p>
         </div>
       )}
 

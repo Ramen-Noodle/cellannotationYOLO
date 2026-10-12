@@ -23,6 +23,8 @@ from datetime import timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import datetime
 import atexit
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from tensorflow.python.summary.summary_iterator import summary_iterator
 import glob
 import tensorflow as tf
@@ -56,6 +58,17 @@ from flask_migrate import Migrate
 
 db.init_app(app)
 migrate = Migrate(app, db)
+
+batch_job_executor = ThreadPoolExecutor(max_workers=2)
+batch_jobs = {}
+batch_jobs_lock = threading.Lock()
+
+def _update_batch_job(job_id, **updates):
+    if not job_id:
+        return
+    with batch_jobs_lock:
+        if job_id in batch_jobs:
+            batch_jobs[job_id].update(updates)
 
 @app.before_request
 def ensure_user_session():
@@ -1647,12 +1660,70 @@ def detect():
 def batch_detect():
     if not g.user:
         return jsonify({"error": "No active session"}), 401
+    data = request.get_json()
+    if not data or 'image_set_id' not in data or 'detection_settings' not in data:
+        return jsonify({"error": "Missing image_set_id or detection_settings in request body"}), 400
+    if not isinstance(data['detection_settings'], list) or len(data['detection_settings']) == 0:
+        return jsonify({"error": "detection_settings must be a non-empty list"}), 400
+
+    job_id = str(uuid.uuid4())
+    with batch_jobs_lock:
+        batch_jobs[job_id] = {
+            "job_id": job_id, "status": "queued", "current": 0, "total": 0,
+            "current_image": None, "succeeded": 0, "failed": 0, "result": None,
+            "current_channel": None, "current_model": None, "current_row": 0,
+            "total_rows": 0, "current_detections": 0, "total_detections": 0,
+            "user_id": g.user.id,
+        }
+    data['_batch_job_id'] = job_id
+    user_id = g.user.id
+    batch_job_executor.submit(_run_batch_job, job_id, data, user_id)
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+
+@app.route('/batch-detect/progress/<job_id>', methods=['GET'])
+def batch_detect_progress(job_id):
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+    with batch_jobs_lock:
+        job = batch_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Batch job not found"}), 404
+        if job.get('user_id') != g.user.id:
+            return jsonify({"error": "Unauthorized"}), 403
+        return jsonify(dict(job))
+
+
+def _run_batch_job(job_id, data, user_id):
+    _update_batch_job(job_id, status='running', user_id=user_id)
+    try:
+        with app.app_context():
+            user = db.session.get(User, user_id)
+            with app.test_request_context('/batch-detect', method='POST', json=data):
+                g.user = user
+                response = process_batch_detect()
+                status_code = response[1] if isinstance(response, tuple) else response.status_code
+                response_body = response[0] if isinstance(response, tuple) else response
+                result = response_body.get_json()
+                if status_code >= 400:
+                    raise RuntimeError(result.get('error', 'Batch detection failed'))
+        _update_batch_job(job_id, status='complete', result=result,
+                          current=result.get('total', 0), total=result.get('total', 0),
+                          succeeded=result.get('succeeded', 0), failed=result.get('failed', 0))
+    except Exception as exc:
+        _update_batch_job(job_id, status='failed', error=str(exc))
+
+
+def process_batch_detect():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
 
     data = request.get_json()
     if not data or 'image_set_id' not in data or 'detection_settings' not in data:
         return jsonify({"error": "Missing image_set_id or detection_settings in request body"}), 400
 
     image_set_id = data['image_set_id']
+    batch_job_id = data.get('_batch_job_id')
     requested_rows = data['detection_settings']
     # Each successful image run replaces its complete annotation selection.
     # Older clients may send overwrite=False; batch no longer preserves old rows.
@@ -1715,14 +1786,19 @@ def batch_detect():
 
         db.session.commit()
         image_results = []
-        for image_record in image_set.images:
+        _update_batch_job(batch_job_id, total_rows=len(resolved_rows))
+        _update_batch_job(batch_job_id, total=len(image_set.images))
+        for image_index, image_record in enumerate(image_set.images, start=1):
+            current_channel = image_record.base_channel
+            current_name = current_channel.name if current_channel and current_channel.name else image_record.id
+            _update_batch_job(batch_job_id, current=image_index, current_image=current_name)
             channels_by_order = {c.order_index: c for c in image_record.channels}
             row_results = []
             new_paths = set()
             obsolete_paths = set()
             retained_ids = set()
             try:
-                for r in resolved_rows:
+                for row_index, r in enumerate(resolved_rows, start=1):
                     setting = r["setting"]
                     channel = channels_by_order.get(r["channel_order"])
                     if channel is None:
@@ -1733,6 +1809,14 @@ def batch_detect():
                             "reason": "missing_channel",
                         })
                         continue
+                    _update_batch_job(
+                        batch_job_id,
+                        current_channel=f"C{r['channel_order'] + 1}",
+                        current_model=r["model_record"].name,
+                        current_row=row_index,
+                        total_rows=len(resolved_rows),
+                        current_detections=0,
+                    )
                     existing = Annotation.query.filter_by(
                         user_id=g.user.id, channel_id=channel.id, detection_setting_id=setting.id
                     ).first()
@@ -1780,6 +1864,11 @@ def batch_detect():
                         "skipped": False,
                         "count_detected": len(converted_annotations)
                     })
+                    _update_batch_job(
+                        batch_job_id,
+                        current_detections=len(converted_annotations),
+                        total_detections=sum(row.get("count_detected", 0) for row in row_results),
+                    )
 
                 # Remove unchecked/deleted settings on every channel, including
                 # channels with no selected rows. Never delete shared settings.
@@ -1800,6 +1889,16 @@ def batch_detect():
                     "success": True,
                     "rows": row_results,
                 })
+                _update_batch_job(
+                    batch_job_id,
+                    succeeded=sum(1 for result in image_results if result["success"]),
+                    failed=sum(1 for result in image_results if not result["success"]),
+                    total_detections=sum(
+                        row.get("count_detected", 0)
+                        for result in image_results
+                        for row in result.get("rows", [])
+                    ),
+                )
 
             except Exception as e:
                 db.session.rollback()
@@ -1814,6 +1913,11 @@ def batch_detect():
                     "success": False,
                     "error": str(e)
                 })
+                _update_batch_job(
+                    batch_job_id,
+                    succeeded=sum(1 for result in image_results if result["success"]),
+                    failed=sum(1 for result in image_results if not result["success"]),
+                )
 
             else:
                 # Database replacement succeeded. File cleanup cannot turn that
@@ -2306,4 +2410,4 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5001, debug=True, threaded=True)
