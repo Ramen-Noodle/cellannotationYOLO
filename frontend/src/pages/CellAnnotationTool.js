@@ -844,12 +844,10 @@ export default function CellAnnotationTool() {
 
       const unmatchedUploads = data.unmatched_uploads || []
       const unmatchedRecords = data.unmatched_records || []
-      const ambiguousUploads = data.ambiguous_uploads || []
       const errors = (data.errors || []).map(item => `${item.file}: ${item.error}`)
       alert([
         `Added ${data.added_count || 0} channel${data.added_count === 1 ? '' : 's'}.`,
         unmatchedUploads.length ? `Uploads without a matching image:\n${unmatchedUploads.join('\n')}` : '',
-        ambiguousUploads.length ? `Uploads with ambiguous matches:\n${ambiguousUploads.map(item => `${item.file} (candidates: ${item.candidates.join(', ')})`).join('\n')}` : '',
         unmatchedRecords.length ? `Images without a matching upload:\n${unmatchedRecords.map(item => item.name).join('\n')}` : '',
         errors.length ? `Uploads that could not be added:\n${errors.join('\n')}` : '',
       ].filter(Boolean).join('\n\n'))
