@@ -1,6 +1,7 @@
 import sys
 import json
 import re
+from difflib import SequenceMatcher
 from annotation_export import annotation_rows, yolo_line, serialize_annotations, channel_label
 from werkzeug.utils import secure_filename  # ADD THIS AT TOP OF FILE
 from flask import Flask, request, jsonify, send_from_directory, send_file, g
@@ -1110,13 +1111,29 @@ def add_channels_to_image_set():
         stem = re.sub(r'\s*\(c\d+\)$', '', stem, flags=re.IGNORECASE)
         return stem.casefold()
 
-    records_by_key = {
-        file_key(f'{image.base_channel.name}{image.base_channel.original_extension}'): image
-        for image in image_set.images if image.base_channel
-    }
+    def filename_score(first, second):
+        first_key = file_key(first)
+        second_key = file_key(second)
+        if not first_key or not second_key:
+            return 0.0
+        if first_key == second_key:
+            return 1.0
+        compact_first = re.sub(r'[^a-z0-9]', '', first_key)
+        compact_second = re.sub(r'[^a-z0-9]', '', second_key)
+        compact_score = SequenceMatcher(None, compact_first, compact_second).ratio()
+        direct_score = SequenceMatcher(None, first_key, second_key).ratio()
+        return max(compact_score, direct_score)
+
+    def record_filename(image):
+        channel = image.base_channel
+        return f'{channel.name}{channel.original_extension}' if channel else image.id
+
+    image_records = [image for image in image_set.images if image.base_channel]
+    records_by_key = {file_key(record_filename(image)): image for image in image_records}
     matched_record_ids = set()
     matched = []
     unmatched_uploads = []
+    ambiguous_uploads = []
     errors = []
     created_paths = []
 
@@ -1125,8 +1142,24 @@ def add_channels_to_image_set():
             upload_name = os.path.basename(file.filename or '')
             image_record = records_by_key.get(file_key(upload_name))
             if not image_record:
-                unmatched_uploads.append(upload_name)
-                continue
+                candidates = sorted(
+                    ((filename_score(upload_name, record_filename(candidate)), candidate) for candidate in image_records
+                     if candidate.id not in matched_record_ids),
+                    key=lambda item: item[0], reverse=True
+                )
+                best_score = candidates[0][0] if candidates else 0.0
+                next_score = candidates[1][0] if len(candidates) > 1 else 0.0
+                if best_score >= 0.78 and best_score - next_score >= 0.08:
+                    image_record = candidates[0][1]
+                elif candidates and best_score >= 0.65:
+                    ambiguous_uploads.append({
+                        'file': upload_name,
+                        'candidates': [record_filename(candidate) for score, candidate in candidates[:3]],
+                    })
+                    continue
+                else:
+                    unmatched_uploads.append(upload_name)
+                    continue
             if image_record.id in matched_record_ids:
                 errors.append({'file': upload_name, 'error': 'Multiple uploads matched the same image record'})
                 continue
@@ -1179,6 +1212,7 @@ def add_channels_to_image_set():
     return jsonify({
         'matched': matched,
         'unmatched_uploads': unmatched_uploads,
+        'ambiguous_uploads': ambiguous_uploads,
         'unmatched_records': unmatched_records,
         'errors': errors,
         'added_count': len(matched),
