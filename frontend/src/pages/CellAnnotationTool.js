@@ -2422,7 +2422,15 @@ export default function CellAnnotationTool() {
             <Tooltip title="Upload a folder or multichannel folder set" arrow>
               <IconButton component="label" color="primary" sx={{ p: 1.5 }}>
                 <DriveFolderUploadIcon />
-                <input hidden type="file" accept=".tiff,.tif" webkitdirectory="true" directory="true" onChange={handleUploadFolder} />
+                <input
+                  hidden
+                  type="file"
+                  accept=".tiff,.tif"
+                  multiple
+                  webkitdirectory=""
+                  directory=""
+                  onChange={handleUploadFolder}
+                />
               </IconButton>
             </Tooltip>
 
