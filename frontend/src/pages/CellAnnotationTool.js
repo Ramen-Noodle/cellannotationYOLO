@@ -78,6 +78,8 @@ export default function CellAnnotationTool() {
   const [imageSets, setImageSets] = useState([])
   const [imageID, setImageID] = useState('')
   const [importedPreview, setImportedPreview] = useState(null)
+  const imageUploadInputRef = useRef(null)
+  const folderUploadInputRef = useRef(null)
   const importImageRef = useRef(imageID)
   importImageRef.current = imageID
   useEffect(() => { setImportedPreview(null) }, [imageID])
@@ -2404,25 +2406,24 @@ export default function CellAnnotationTool() {
 
             <Tooltip title="Upload Images" arrow>
               <IconButton 
-                component="label" 
                 color="primary"
                 sx={{ p: 1.5 }}
+                onClick={() => {
+                  const chooseFolder = window.confirm('Choose OK to upload a folder, or Cancel to upload individual TIFF files.')
+                  ;(chooseFolder ? folderUploadInputRef : imageUploadInputRef).current?.click()
+                }}
               >
                 <FileUploadIcon />
                 <input 
+                  ref={imageUploadInputRef}
                   hidden 
                   type="file" 
                   accept=".tiff,.tif" 
                   multiple 
                   onChange={handleUpload}
                 />
-              </IconButton>
-            </Tooltip>
-
-            <Tooltip title="Upload a folder or multichannel folder set" arrow>
-              <IconButton component="label" color="primary" sx={{ p: 1.5 }}>
-                <DriveFolderUploadIcon />
                 <input
+                  ref={folderUploadInputRef}
                   hidden
                   type="file"
                   multiple
