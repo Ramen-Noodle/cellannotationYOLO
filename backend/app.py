@@ -1122,14 +1122,26 @@ def add_channels_to_image_set():
         compact_second = re.sub(r'[^a-z0-9]', '', second_key)
         compact_score = SequenceMatcher(None, compact_first, compact_second).ratio()
         direct_score = SequenceMatcher(None, first_key, second_key).ratio()
-        return max(compact_score, direct_score)
+        first_tokens = [token for token in re.split(r'[^a-z0-9]+', first_key) if token]
+        second_tokens = [token for token in re.split(r'[^a-z0-9]+', second_key) if token]
+        token_sequence_score = SequenceMatcher(None, first_tokens, second_tokens).ratio()
+        first_token_set = set(first_tokens)
+        second_token_set = set(second_tokens)
+        token_union = first_token_set | second_token_set
+        token_overlap_score = (
+            len(first_token_set & second_token_set) / len(token_union)
+            if len(token_union) >= 2 else 0.0
+        )
+        return max(compact_score, direct_score, token_sequence_score, token_overlap_score)
 
     def record_filename(image):
         channel = image.base_channel
         return f'{channel.name}{channel.original_extension}' if channel else image.id
 
     image_records = [image for image in image_set.images if image.base_channel]
-    records_by_key = {file_key(record_filename(image)): image for image in image_records}
+    records_by_key = {}
+    for image in image_records:
+        records_by_key.setdefault(file_key(record_filename(image)), []).append(image)
     matched_record_ids = set()
     matched = []
     unmatched_uploads = []
@@ -1140,7 +1152,17 @@ def add_channels_to_image_set():
     try:
         for file in files:
             upload_name = os.path.basename(file.filename or '')
-            image_record = records_by_key.get(file_key(upload_name))
+            exact_candidates = [
+                candidate for candidate in records_by_key.get(file_key(upload_name), [])
+                if candidate.id not in matched_record_ids
+            ]
+            image_record = exact_candidates[0] if len(exact_candidates) == 1 else None
+            if len(exact_candidates) > 1:
+                ambiguous_uploads.append({
+                    'file': upload_name,
+                    'candidates': [record_filename(candidate) for candidate in exact_candidates[:3]],
+                })
+                continue
             if not image_record:
                 candidates = sorted(
                     ((filename_score(upload_name, record_filename(candidate)), candidate) for candidate in image_records
@@ -1149,9 +1171,9 @@ def add_channels_to_image_set():
                 )
                 best_score = candidates[0][0] if candidates else 0.0
                 next_score = candidates[1][0] if len(candidates) > 1 else 0.0
-                if best_score >= 0.78 and best_score - next_score >= 0.08:
+                if best_score >= 0.70 and (len(candidates) == 1 or best_score - next_score >= 0.08):
                     image_record = candidates[0][1]
-                elif candidates and best_score >= 0.65:
+                elif candidates and best_score >= 0.60:
                     ambiguous_uploads.append({
                         'file': upload_name,
                         'candidates': [record_filename(candidate) for score, candidate in candidates[:3]],
