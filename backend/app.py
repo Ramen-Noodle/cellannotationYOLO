@@ -1,5 +1,6 @@
 import sys
 import json
+import re
 from annotation_export import annotation_rows, yolo_line, serialize_annotations, channel_label
 from werkzeug.utils import secure_filename  # ADD THIS AT TOP OF FILE
 from flask import Flask, request, jsonify, send_from_directory, send_file, g
@@ -1087,6 +1088,101 @@ def add_channel():
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/add-channels-to-image-set', methods=['POST'])
+def add_channels_to_image_set():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+    image_set_id = request.form.get('image_set_id')
+    files = request.files.getlist('files')
+    if not image_set_id or not files:
+        return jsonify({'error': 'Missing image_set_id or files'}), 400
+
+    image_set = ImageSet.query.filter_by(id=image_set_id, user_id=g.user.id).first()
+    if not image_set:
+        return jsonify({'error': 'Image set not found or unauthorized'}), 404
+
+    def file_key(filename):
+        stem = os.path.splitext(os.path.basename(filename or ''))[0].strip()
+        # Multi-channel uploads name the base channel "sample (C1)" while
+        # companion files are commonly named "sample" or "sample (C2)".
+        stem = re.sub(r'\s*\(c\d+\)$', '', stem, flags=re.IGNORECASE)
+        return stem.casefold()
+
+    records_by_key = {
+        file_key(f'{image.base_channel.name}{image.base_channel.original_extension}'): image
+        for image in image_set.images if image.base_channel
+    }
+    matched_record_ids = set()
+    matched = []
+    unmatched_uploads = []
+    errors = []
+    created_paths = []
+
+    try:
+        for file in files:
+            upload_name = os.path.basename(file.filename or '')
+            image_record = records_by_key.get(file_key(upload_name))
+            if not image_record:
+                unmatched_uploads.append(upload_name)
+                continue
+            if image_record.id in matched_record_ids:
+                errors.append({'file': upload_name, 'error': 'Multiple uploads matched the same image record'})
+                continue
+            ext = os.path.splitext(upload_name)[1].lower()
+            if not ext:
+                errors.append({'file': upload_name, 'error': 'File has no extension'})
+                continue
+            unique_id = str(uuid.uuid4())
+            image_dir = g.user.get_path('images')
+            original_path = os.path.join(image_dir, 'original', f'{unique_id}_orig{ext}')
+            original_save_path = os.path.join('data', original_path)
+            file.save(original_save_path)
+            created_paths.append(original_save_path)
+
+            with Image.open(original_save_path) as img:
+                dimensions = img.size
+            if dimensions != (image_record.width, image_record.height):
+                os.remove(original_save_path)
+                errors.append({'file': upload_name, 'error': f'Channel dimensions {dimensions[0]}x{dimensions[1]} do not match image dimensions {image_record.width}x{image_record.height}'})
+                continue
+
+            normalized_path = os.path.join(image_dir, 'normalized', f'{unique_id}_norm.png')
+            p_low, p_high = normalize_image(original_save_path, os.path.join('data', normalized_path))
+            channel = Channel(
+                id=unique_id,
+                image_id=image_record.id,
+                name=os.path.splitext(upload_name)[0],
+                order_index=(max((c.order_index or 0) for c in image_record.channels) + 1) if image_record.channels else 0,
+                is_base=False,
+                original_extension=ext,
+                original_path=original_path,
+                normalized_path=normalized_path,
+                p_low=int(p_low) if p_low is not None else None,
+                p_high=int(p_high) if p_high is not None else None,
+            )
+            db.session.add(channel)
+            matched_record_ids.add(image_record.id)
+            matched.append({'upload': upload_name, 'image_id': image_record.id, 'channel_id': unique_id})
+
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({'error': str(exc)}), 500
+
+    unmatched_records = [
+        {'image_id': image.id, 'name': f'{image.base_channel.name}{image.base_channel.original_extension}'}
+        for image in image_set.images
+        if image.id not in matched_record_ids and image.base_channel
+    ]
+    return jsonify({
+        'matched': matched,
+        'unmatched_uploads': unmatched_uploads,
+        'unmatched_records': unmatched_records,
+        'errors': errors,
+        'added_count': len(matched),
+    })
 
 
 @app.route('/load-channels', methods=['POST'])

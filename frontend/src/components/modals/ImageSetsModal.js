@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { Modal, Box, Typography, IconButton, Divider, Button } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import RowMenu from '../RowMenu'
@@ -21,7 +22,9 @@ export default function ImageSetsModal({
   addImagesSelectionOpen,
   imageList,
   handleAddImageToSet,
+  handleAddChannelsToImageSet,
 }) {
+  const channelInputRef = useRef(null)
   return (
     <Modal
       open={imageSetsMenuOpen}
@@ -84,14 +87,35 @@ export default function ImageSetsModal({
           onImageClick={handleLoadImage}
           
           renderHeaderActions={() => (
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<AddIcon />}
-              onClick={() => setAddImagesSelectionOpen(true)}
-            >
-              Add Images
-            </Button>
+            <Box display="flex" gap={1}>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<AddIcon />}
+                onClick={() => setAddImagesSelectionOpen(true)}
+              >
+                Add Images
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => channelInputRef.current?.click()}
+              >
+                Add Channels
+              </Button>
+              <input
+                ref={channelInputRef}
+                hidden
+                type="file"
+                multiple
+                webkitdirectory="true"
+                directory="true"
+                onChange={event => {
+                  handleAddChannelsToImageSet(event.target.files)
+                  event.target.value = null
+                }}
+              />
+            </Box>
           )}
     
           renderActions={(img) => (

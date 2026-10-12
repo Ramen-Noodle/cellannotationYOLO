@@ -828,6 +828,41 @@ export default function CellAnnotationTool() {
       .catch(err => console.error("Error adding image to set:", err))
   }
 
+  async function handleAddChannelsToImageSet(fileList) {
+    if (!activeImageSet || !fileList?.length) return
+    setIsLoading(true)
+    setLoadingMessage('Matching channel uploads to image set...')
+    try {
+      const formData = new FormData()
+      formData.append('image_set_id', activeImageSet.id)
+      Array.from(fileList).forEach(file => formData.append('files', file, file.name))
+      const res = await fetch(`${API_BASE_URL}/add-channels-to-image-set`, {
+        method: 'POST', body: formData, credentials: 'include'
+      })
+      const data = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(data?.error || 'Failed to add channels')
+
+      const unmatchedUploads = data.unmatched_uploads || []
+      const unmatchedRecords = data.unmatched_records || []
+      const errors = (data.errors || []).map(item => `${item.file}: ${item.error}`)
+      alert([
+        `Added ${data.added_count || 0} channel${data.added_count === 1 ? '' : 's'}.`,
+        unmatchedUploads.length ? `Uploads without a matching image:\n${unmatchedUploads.join('\n')}` : '',
+        unmatchedRecords.length ? `Images without a matching upload:\n${unmatchedRecords.map(item => item.name).join('\n')}` : '',
+        errors.length ? `Uploads that could not be added:\n${errors.join('\n')}` : '',
+      ].filter(Boolean).join('\n\n'))
+      await loadImageSets()
+      if (imageID && data.matched?.some(item => item.image_id === imageID)) {
+        await renderAnnotations(imageID, selectedChannelId)
+      }
+    } catch (err) {
+      alert(`Add channels failed: ${err.message}`)
+    } finally {
+      setIsLoading(false)
+      setLoadingMessage('Processing...')
+    }
+  }
+
 
   // *----------* Annotation Operations *----------* \\
 
@@ -2337,6 +2372,7 @@ export default function CellAnnotationTool() {
               addImagesSelectionOpen={addImagesSelectionOpen}
               imageList={imageList}
               handleAddImageToSet={handleAddImageToSet}
+              handleAddChannelsToImageSet={handleAddChannelsToImageSet}
             />
 
             <Tooltip title="Crop Image" arrow>
