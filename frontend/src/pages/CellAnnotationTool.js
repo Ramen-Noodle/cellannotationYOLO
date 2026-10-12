@@ -399,6 +399,88 @@ export default function CellAnnotationTool() {
     }
   }
 
+  async function handleUploadFolder(e) {
+    const files = Array.from(e.target.files || [])
+    e.target.value = null
+    const tifFiles = files.filter(file => /\.tiff?$/i.test(file.name))
+    if (!tifFiles.length) return
+
+    const folderParts = file => (file.webkitRelativePath || file.name).split('/').filter(Boolean)
+    const subfolders = Array.from(new Set(tifFiles
+      .map(file => folderParts(file))
+      .filter(parts => parts.length >= 3)
+      .map(parts => parts[1])))
+
+    // A folder containing files directly is the existing batch-upload flow.
+    if (subfolders.length === 0) {
+      await handleUpload({ target: { files: tifFiles, value: '' } })
+      return
+    }
+
+    const baseFolder = subfolders.slice().sort((first, second) => first.localeCompare(second))[0]
+
+    const baseFiles = tifFiles.filter(file => folderParts(file)[1] === baseFolder)
+    const channelFolders = subfolders.filter(folder => folder !== baseFolder)
+    const setName = prompt('Enter a name for the new image set:')
+    if (!setName) return
+
+    setIsLoading(true)
+    setLoadingMessage('Creating image set from base folder...')
+    try {
+      const setRes = await fetch(`${API_BASE_URL}/create-image-set`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ name: setName }),
+      })
+      if (!setRes.ok) throw new Error('Failed to create image set')
+      const imageSet = await setRes.json()
+      let firstUploadedImageData = null
+
+      for (let index = 0; index < baseFiles.length; index += 1) {
+        const file = baseFiles[index]
+        setLoadingMessage(`Uploading base image ${index + 1}/${baseFiles.length}...`)
+        const formData = new FormData()
+        formData.append('file', file)
+        const uploadRes = await fetch(`${API_BASE_URL}/upload`, { method: 'POST', body: formData, credentials: 'include' })
+        if (!uploadRes.ok) throw new Error(`Upload failed for ${file.name}`)
+        const imageData = await uploadRes.json()
+        if (!firstUploadedImageData) firstUploadedImageData = imageData
+        await fetch(`${API_BASE_URL}/add-image-to-set`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ image_set_id: imageSet.id, image_id: imageData.image_id }),
+        })
+      }
+
+      const channelSummary = []
+      for (const folder of channelFolders) {
+        const channelFiles = tifFiles.filter(file => folderParts(file)[1] === folder)
+        const formData = new FormData()
+        formData.append('image_set_id', imageSet.id)
+        channelFiles.forEach(file => formData.append('files', file, file.name))
+        const channelRes = await fetch(`${API_BASE_URL}/add-channels-to-image-set`, {
+          method: 'POST', body: formData, credentials: 'include'
+        })
+        const result = await channelRes.json().catch(() => null)
+        if (!channelRes.ok) throw new Error(result?.error || `Channel folder upload failed for ${folder}`)
+        channelSummary.push(`${folder}: added ${result.added_count || 0}, unmatched uploads ${result.unmatched_uploads?.length || 0}`)
+      }
+
+      if (firstUploadedImageData) {
+        setImageID(firstUploadedImageData.image_id)
+        setImageURL(`${API_BASE_URL}${firstUploadedImageData.converted_url}`)
+        setImageSize({ width: firstUploadedImageData.dimensions[0], height: firstUploadedImageData.dimensions[1] })
+        await renderAnnotations(firstUploadedImageData.image_id)
+      }
+      alert(`Created ${baseFiles.length} image records in "${imageSet.name}".\n${channelSummary.join('\n')}`)
+    } catch (err) {
+      alert(`Folder upload failed: ${err.message}`)
+    } finally {
+      loadImages()
+      loadImageSets()
+      setIsLoading(false)
+      setLoadingMessage('Processing...')
+    }
+  }
+
   // Adds images selected by the user to the group to be used for batch detection
   async function addToBatch(e) {
     const files = e.target.files
@@ -2334,6 +2416,13 @@ export default function CellAnnotationTool() {
                   multiple 
                   onChange={handleUpload}
                 />
+              </IconButton>
+            </Tooltip>
+
+            <Tooltip title="Upload a folder or multichannel folder set" arrow>
+              <IconButton component="label" color="primary" sx={{ p: 1.5 }}>
+                <DriveFolderUploadIcon />
+                <input hidden type="file" accept=".tiff,.tif" webkitdirectory="true" directory="true" onChange={handleUploadFolder} />
               </IconButton>
             </Tooltip>
 
