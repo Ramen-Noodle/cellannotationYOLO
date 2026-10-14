@@ -2289,7 +2289,7 @@ export default function CellAnnotationTool() {
   const channelMenuRows = mergedLayer?.imageId === imageID ? [mergedLayer, ...channels] : channels
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', overflow: 'hidden' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100vw', overflow: 'hidden' }}>
       
       {/* Loading Overlay */}
       {isLoading && (
@@ -2311,15 +2311,18 @@ export default function CellAnnotationTool() {
       {/* Login Bar */}
       {!isLoggedIn && (
         <AppBar
-          position="sticky" 
+          position="fixed"
           sx={{ 
+            top: 0,
+            left: 0,
+            width: '100%',
             height: '64px', 
             display: 'flex', 
             flexDirection: 'row', 
             alignItems: 'center', 
             gap: 2, 
             px: 2,
-            zIndex: (theme) => theme.zIndex.drawer + 1 
+            zIndex: (theme) => theme.zIndex.appBar + 1
           }}
         >
           <TextField
