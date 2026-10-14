@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Box, CircularProgress, FormControl, InputLabel, MenuItem, Select, Stack, Typography } from '@mui/material'
 
-const API_BASE_URL = 'http://10.80.24.12:5002'
+const API_BASE_URL = 'http://10.80.24.12:5001'
 const CHANNEL_COLORS = ['#38bdf8', '#f97316', '#a78bfa', '#34d399', '#f472b6', '#facc15']
 
 function channelName(channel) { return `C${(channel.order_index ?? 0) + 1}` }
@@ -112,11 +112,11 @@ export default function CombineAnnotationsPage() {
       {loadingAnnotations && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}><CircularProgress size={18} /><Typography>Loading channel annotations…</Typography></Stack>}
       <Box onPointerMove={dragNode} onPointerUp={finishDrag} onPointerCancel={finishDrag} onContextMenu={event => event.preventDefault()}
         sx={{ position: 'relative', minHeight: 560, minWidth: Math.max(760, channels.length * 250), bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'auto' }}>
-        {channels.map((channel, index) => <Typography key={channel.id} variant="caption" sx={{ position: 'absolute', top: 8, left: 32 + index * 250, color: CHANNEL_COLORS[index % CHANNEL_COLORS.length], fontWeight: 700 }}>{channelName(channel)} · {channel.name}</Typography>)}
+        {channels.map((channel, index) => <Typography key={channel.id} variant="caption" sx={{ position: 'absolute', top: 8, left: 32 + index * 250, color: CHANNEL_COLORS[index % CHANNEL_COLORS.length], fontWeight: 700 }}>{channelName(channel)}</Typography>)}
         {nodes.map(node => <Box key={node.id} onPointerDown={event => moveNode(event, node)}
           sx={{ position: 'absolute', left: node.x, top: node.y + 24, width: 196, minHeight: 74, p: 1.25, boxSizing: 'border-box', border: `2px solid ${node.color}`, borderRadius: 1, bgcolor: 'rgba(25, 29, 40, 0.98)', cursor: 'grab', userSelect: 'none', '&:active': { cursor: 'grabbing' } }}>
-          <Typography variant="body2" sx={{ color: node.color, fontWeight: 700 }}>{node.name}</Typography>
-          <Typography variant="caption" color="text.secondary">{channelById.get(node.channelId)?.name || channelName(channels[node.channelIndex])} · {node.count} detections</Typography>
+          <Typography variant="body2" title={node.name} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</Typography>
+          <Typography variant="caption" color="text.secondary" title={channelById.get(node.channelId)?.name || ''} sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{channelName(channels[node.channelIndex])} · {node.count} detections</Typography>
         </Box>)}
         {!loadingAnnotations && imageId && nodes.length === 0 && <Typography color="text.secondary" sx={{ p: 3 }}>This image has no labeled annotation classes.</Typography>}
         {!imageId && !loadingImages && <Typography color="text.secondary" sx={{ p: 3 }}>Choose an image to begin.</Typography>}
