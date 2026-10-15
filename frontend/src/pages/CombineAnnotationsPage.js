@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Box, CircularProgress, FormControl, InputLabel, MenuItem, Select, Stack, Typography } from '@mui/material'
+import { Alert, Box, CircularProgress, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
 
 const API_BASE_URL = 'http://10.80.24.12:5001'
 const CHANNEL_COLORS = ['#38bdf8', '#f97316', '#a78bfa', '#34d399', '#f472b6', '#facc15']
@@ -18,6 +18,8 @@ export default function CombineAnnotationsPage() {
   const [nodes, setNodes] = useState([])
   const [createdNodes, setCreatedNodes] = useState([])
   const [connections, setConnections] = useState([])
+  const [connectionRules, setConnectionRules] = useState({})
+  const [selectedConnectionId, setSelectedConnectionId] = useState(null)
   const [connectionDrag, setConnectionDrag] = useState(null)
   const [loadingImages, setLoadingImages] = useState(true)
   const [loadingAnnotations, setLoadingAnnotations] = useState(false)
@@ -64,6 +66,8 @@ export default function CombineAnnotationsPage() {
   useEffect(() => {
     setCreatedNodes([])
     setConnections([])
+    setConnectionRules({})
+    setSelectedConnectionId(null)
     setConnectionDrag(null)
   }, [imageId])
 
@@ -131,9 +135,11 @@ export default function CombineAnnotationsPage() {
     event.stopPropagation()
     const sourceId = connectionDrag.sourceId
     if (sourceId !== target.id && target.created) {
-      setConnections(previous => previous.some(connection => connection.source === sourceId && connection.target === target.id)
+      const id = `${sourceId}->${target.id}`
+      setConnections(previous => previous.some(connection => connection.id === id)
         ? previous
-        : [...previous, { id: `${sourceId}->${target.id}`, source: sourceId, target: target.id }])
+        : [...previous, { id, source: sourceId, target: target.id }])
+      setConnectionRules(previous => previous[id] ? previous : { ...previous, [id]: { iou: 0.25, containment: 0.6 } })
     }
     setConnectionDrag(null)
   }
@@ -145,7 +151,15 @@ export default function CombineAnnotationsPage() {
       color: '#cbd5e1', x: 32 + channels.length * 250, y: 32 + index * 116,
     }])
   }
+  const updateNodeName = (nodeId, name) => setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, name } : node))
+  const updateConnectionRule = (field, value) => {
+    if (!selectedConnectionId) return
+    const numericValue = Math.max(0, Math.min(1, Number(value)))
+    setConnectionRules(previous => ({ ...previous, [selectedConnectionId]: { ...previous[selectedConnectionId], [field]: Number.isFinite(numericValue) ? numericValue : 0 } }))
+  }
   const selectedImage = images.find(image => image.id === imageId)
+  const selectedConnection = connections.find(connection => connection.id === selectedConnectionId)
+  const selectedRule = selectedConnection ? connectionRules[selectedConnection.id] || { iou: 0.25, containment: 0.6 } : null
 
   return (
     <Box sx={{ height: '100%', p: 3, boxSizing: 'border-box', bgcolor: 'background.default', overflow: 'auto' }}>
@@ -166,6 +180,12 @@ export default function CombineAnnotationsPage() {
       {error && <Alert severity="info" sx={{ mb: 2 }}>{error}</Alert>}
       {!loadingImages && images.length === 0 && !error && <Alert severity="info">No images are available yet.</Alert>}
       {loadingAnnotations && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}><CircularProgress size={18} /><Typography>Loading channel annotations…</Typography></Stack>}
+      {selectedConnection && selectedRule && <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }} sx={{ mb: 2, p: 1.5, bgcolor: 'background.paper', border: 1, borderColor: 'divider', borderRadius: 1 }}>
+        <Typography variant="body2" sx={{ flexGrow: 1 }}>Rule: {displayNodes.find(node => node.id === selectedConnection.source)?.name || selectedConnection.source} → {displayNodes.find(node => node.id === selectedConnection.target)?.name || selectedConnection.target}</Typography>
+        <TextField size="small" type="number" label="IoU" value={selectedRule.iou} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => updateConnectionRule('iou', event.target.value)} sx={{ width: 110 }} />
+        <TextField size="small" type="number" label="Containment" value={selectedRule.containment} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => updateConnectionRule('containment', event.target.value)} sx={{ width: 130 }} />
+        <Box component="button" type="button" onClick={() => setSelectedConnectionId(null)} sx={{ px: 1.25, py: 0.75, border: 1, borderColor: 'divider', borderRadius: 1, bgcolor: 'transparent', color: 'text.primary', cursor: 'pointer' }}>Done</Box>
+      </Stack>}
       <Box ref={graphRef} onPointerMove={event => { dragNode(event); dragConnection(event) }} onPointerUp={event => { finishDrag(event); cancelConnection() }} onPointerCancel={event => { finishDrag(event); cancelConnection() }} onContextMenu={event => event.preventDefault()}
         sx={{ position: 'relative', minHeight: 560, minWidth: graphWidth, bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'auto' }}>
         {channels.map((channel, index) => <Typography key={channel.id} variant="caption" sx={{ position: 'absolute', top: 8, left: 32 + index * 250, color: CHANNEL_COLORS[index % CHANNEL_COLORS.length], fontWeight: 700 }}>{channelName(channel)}</Typography>)}
@@ -175,7 +195,14 @@ export default function CombineAnnotationsPage() {
             const source = displayNodes.find(node => node.id === connection.source)
             const target = displayNodes.find(node => node.id === connection.target)
             if (!source || !target) return null
-            return <line key={connection.id} x1={source.x + 196} y1={source.y + 24 + 37} x2={target.x} y2={target.y + 24 + 37} stroke="#94a3b8" strokeWidth="2" markerEnd="url(#combine-arrow)" />
+            const x1 = source.x + 196
+            const y1 = source.y + 24 + 37
+            const x2 = target.x
+            const y2 = target.y + 24 + 37
+            return <g key={connection.id}>
+              <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#94a3b8" strokeWidth="2" markerEnd="url(#combine-arrow)" />
+              <circle cx={(x1 + x2) / 2} cy={(y1 + y2) / 2} r="7" fill={selectedConnectionId === connection.id ? '#f8fafc' : '#64748b'} stroke="#10131b" strokeWidth="2" pointerEvents="auto" role="button" tabIndex="0" aria-label="Edit connection rule" onClick={event => { event.stopPropagation(); setSelectedConnectionId(connection.id) }} />
+            </g>
           })}
           {connectionDrag && <line x1={(displayNodes.find(node => node.id === connectionDrag.sourceId)?.x || 0) + 196} y1={(displayNodes.find(node => node.id === connectionDrag.sourceId)?.y || 0) + 61} x2={connectionDrag.x} y2={connectionDrag.y} stroke="#cbd5e1" strokeWidth="2" strokeDasharray="6 4" />}
         </svg>
@@ -183,7 +210,9 @@ export default function CombineAnnotationsPage() {
           sx={{ position: 'absolute', left: node.x, top: node.y + 24, width: 196, minHeight: 74, p: 1.25, boxSizing: 'border-box', border: `2px solid ${node.color}`, borderRadius: 1, bgcolor: 'rgba(25, 29, 40, 0.98)', cursor: 'grab', userSelect: 'none', '&:active': { cursor: 'grabbing' } }}>
           {node.created && <Box role="button" tabIndex={0} aria-label="Connect to node" onPointerUp={event => completeConnection(event, node)} sx={{ position: 'absolute', left: -7, top: 31, width: 12, height: 12, borderRadius: '50%', bgcolor: node.color, border: '2px solid #10131b', cursor: 'crosshair' }} />}
           <Box role="button" tabIndex={0} aria-label="Start connection" onPointerDown={event => beginConnection(event, node)} sx={{ position: 'absolute', right: -7, top: 31, width: 12, height: 12, borderRadius: '50%', bgcolor: node.color, border: '2px solid #10131b', cursor: 'crosshair' }} />
-          <Typography variant="body2" title={node.name} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</Typography>
+          {node.created
+            ? <Box component="input" aria-label="Output class name" value={node.name} onChange={event => updateNodeName(node.id, event.target.value)} onPointerDown={event => event.stopPropagation()} title={node.name} sx={{ display: 'block', width: '100%', p: 0, border: 0, outline: 0, bgcolor: 'transparent', color: node.color, font: 'inherit', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} />
+            : <Typography variant="body2" title={node.name} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</Typography>}
           <Typography variant="caption" color="text.secondary" title={node.created ? 'User-created merge node' : channelById.get(node.channelId)?.name || ''} sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.created ? 'Merge node' : `${channelName(channels[node.channelIndex])} · ${node.count} detections`}</Typography>
         </Box>)}
         {!loadingAnnotations && imageId && displayNodes.length === 0 && <Typography color="text.secondary" sx={{ p: 3 }}>This image has no labeled annotation classes.</Typography>}
