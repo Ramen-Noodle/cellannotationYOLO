@@ -142,14 +142,18 @@ export default function CombineAnnotationsPage() {
   const addNode = type => {
     const index = createdNodes.length
     setCreatedNodes(previous => [...previous, {
-      id: `created-${Date.now()}-${index}`, created: true, type, name: type === 'rule' ? 'Merge rule' : 'New class', count: 0,
-      iou: 0.25, containment: 0.6, color: type === 'rule' ? '#f59e0b' : '#cbd5e1', x: 32 + channels.length * 250, y: 32 + index * 116,
+      id: `created-${Date.now()}-${index}`, created: true, type, name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
+      ruleType: 'iou', threshold: 0.25, color: type === 'rule' ? '#f59e0b' : '#cbd5e1', x: 32 + channels.length * 250, y: 32 + index * 116,
     }])
   }
   const updateNodeName = (nodeId, name) => setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, name } : node))
   const updateNodeRule = (nodeId, field, value) => {
+    if (field === 'ruleType') {
+      setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, ruleType: value } : node))
+      return
+    }
     const numericValue = Math.max(0, Math.min(1, Number(value)))
-    setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, [field]: Number.isFinite(numericValue) ? numericValue : 0 } : node))
+    setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, threshold: Number.isFinite(numericValue) ? numericValue : 0 } : node))
   }
   const selectedImage = images.find(image => image.id === imageId)
 
@@ -175,7 +179,7 @@ export default function CombineAnnotationsPage() {
       {error && <Alert severity="info" sx={{ mb: 2 }}>{error}</Alert>}
       {!loadingImages && images.length === 0 && !error && <Alert severity="info">No images are available yet.</Alert>}
       {loadingAnnotations && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}><CircularProgress size={18} /><Typography>Loading channel annotations…</Typography></Stack>}
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>Connect classes directly to relabel them. Connect classes to a rule node when the merge needs IoU or containment settings.</Typography>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>Connect classes directly to relabel them. Connect classes to a rule node to merge with IoU or containment, then chain that rule into another rule node for additional sources or criteria.</Typography>
       <Box ref={graphRef} onPointerMove={event => { dragNode(event); dragConnection(event) }} onPointerUp={event => { finishDrag(event); cancelConnection() }} onPointerCancel={event => { finishDrag(event); cancelConnection() }} onContextMenu={event => event.preventDefault()}
         sx={{ position: 'relative', minHeight: 560, minWidth: graphWidth, bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'auto' }}>
         {channels.map((channel, index) => <Typography key={channel.id} variant="caption" sx={{ position: 'absolute', top: 8, left: 32 + index * 250, color: CHANNEL_COLORS[index % CHANNEL_COLORS.length], fontWeight: 700 }}>{channelName(channel)}</Typography>)}
@@ -202,8 +206,14 @@ export default function CombineAnnotationsPage() {
             : <Typography variant="body2" title={node.name} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</Typography>}
           {node.created && node.type === 'rule'
             ? <Stack direction="row" spacing={0.75} sx={{ mt: 0.75 }}>
-                <TextField size="small" type="number" label="IoU" value={node.iou} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => updateNodeRule(node.id, 'iou', event.target.value)} onPointerDown={event => event.stopPropagation()} sx={{ width: 78, '& input': { py: 0.4, px: 0.6, color: 'text.primary' }, '& label': { fontSize: 10 } }} />
-                <TextField size="small" type="number" label="Contain." value={node.containment} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => updateNodeRule(node.id, 'containment', event.target.value)} onPointerDown={event => event.stopPropagation()} sx={{ width: 92, '& input': { py: 0.4, px: 0.6, color: 'text.primary' }, '& label': { fontSize: 10 } }} />
+                <FormControl size="small" sx={{ width: 112 }} onPointerDown={event => event.stopPropagation()}>
+                  <InputLabel id={`rule-type-${node.id}`}>Rule</InputLabel>
+                  <Select labelId={`rule-type-${node.id}`} label="Rule" value={node.ruleType} onChange={event => updateNodeRule(node.id, 'ruleType', event.target.value)} sx={{ color: 'text.primary', '& .MuiSelect-select': { py: 0.7, px: 0.75, fontSize: 12 } }}>
+                    <MenuItem value="iou">IoU</MenuItem>
+                    <MenuItem value="containment">Containment</MenuItem>
+                  </Select>
+                </FormControl>
+                <TextField size="small" type="number" label="Threshold" value={node.threshold} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => updateNodeRule(node.id, 'threshold', event.target.value)} onPointerDown={event => event.stopPropagation()} sx={{ width: 82, '& input': { py: 0.7, px: 0.5, color: 'text.primary', fontSize: 12 }, '& label': { fontSize: 10 } }} />
               </Stack>
             : <Typography variant="caption" color="text.secondary" title={node.created ? 'User-created class node' : channelById.get(node.channelId)?.name || ''} sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.created ? 'Class node' : `${channelName(channels[node.channelIndex])} · ${node.count} detections`}</Typography>}
         </Box>)}
