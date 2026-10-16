@@ -174,9 +174,11 @@ export default function CombineAnnotationsPage() {
     setCreatedNodes(previous => {
       const index = previous.length
       const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${index}`
+      const row = index % 3
+      const column = Math.floor(index / 3)
       return [...previous, {
         id: `${type === 'rule' ? 'rule' : 'output'}:${id}`, created: true, type, role: type === 'rule' ? 'rule' : 'output', name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
-        ruleType: 'iou', participation: 'any', threshold: 0.25, color: type === 'rule' ? '#f59e0b' : '#cbd5e1', x: 32 + channels.length * 250, y: 32 + index * 116,
+        ruleType: 'iou', participation: 'any', threshold: 0.25, color: type === 'rule' ? '#f59e0b' : '#cbd5e1', x: 32 + channels.length * 250 + column * 230, y: 32 + row * 116,
       }]
     })
   }

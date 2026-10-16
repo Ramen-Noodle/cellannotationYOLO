@@ -124,23 +124,48 @@ def _convert(active, source_id, target_id, target_node, audit):
 def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, audit):
     candidates = [cell for cell in active if cell['node_id'] in input_ids]
     candidates.sort(key=lambda cell: (-_area(cell), cell['source_index']))
+    parent = list(range(len(candidates)))
+    groups = {index: {index} for index in range(len(candidates))}
+
+    def root(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    # Build all compatible groups before assigning outputs.  This prevents a
+    # singleton fallback from consuming a box that belongs to a stronger
+    # cross-channel overlap.
+    pairs = []
+    for index, first in enumerate(candidates):
+        for other in range(index + 1, len(candidates)):
+            second = candidates[other]
+            if first['node_id'] == second['node_id'] or _channels(first) & _channels(second):
+                continue
+            if _matches(first, second, rule_node):
+                iou, containment = _overlap(first, second)
+                pairs.append((-max(iou, containment), index, other))
+    for _, first_index, second_index in sorted(pairs):
+        first_root, second_root = root(first_index), root(second_index)
+        if first_root == second_root:
+            continue
+        first_group, second_group = groups[first_root], groups[second_root]
+        first_cells = [candidates[index] for index in first_group]
+        second_cells = [candidates[index] for index in second_group]
+        if set().union(*(_channels(cell) for cell in first_cells)) & set().union(*(_channels(cell) for cell in second_cells)):
+            continue
+        if not all(_matches(first, second, rule_node) for first in first_cells for second in second_cells):
+            continue
+        parent[second_root] = first_root
+        groups[first_root] |= groups.pop(second_root)
+
     consumed = set()
     produced = []
     require_all = rule_node.get('apply_to_subsets') is False
-    for seed in candidates:
-        if seed['source_index'] in consumed:
-            continue
-        group = [seed]
-        used_inputs = {seed['node_id']}
-        for candidate in candidates:
-            if candidate['source_index'] in consumed or candidate['source_index'] == seed['source_index']:
-                continue
-            if candidate['node_id'] in used_inputs or _channels(candidate) & set().union(*(_channels(item) for item in group)):
-                continue
-            if all(_matches(candidate, item, rule_node) for item in group):
-                group.append(candidate)
-                used_inputs.add(candidate['node_id'])
-        if len(group) < 2 or (require_all and used_inputs != set(input_ids)):
+    for group_indices in groups.values():
+        group = [candidates[index] for index in sorted(group_indices)]
+        input_members = {cell['node_id'] for cell in group}
+        if len(group) < 2 or (require_all and input_members != set(input_ids)):
             continue
         consumed.update(item['source_index'] for item in group)
         representative = max(group, key=lambda item: (_area(item), -(item.get('confidence') or -1)))
@@ -164,12 +189,11 @@ def evaluate_recipe(cells, recipe):
         cell.setdefault('source_index', index)
     audit = []
 
-    # Direct class-to-class edges are one-input conversions and therefore run
-    # before multi-input rules.  Rule-to-class conversions run after the rule.
+    # Direct class-to-class edges are fallback conversions.  They run after
+    # cross-channel grouping so they cannot consume a box before an overlap
+    # rule gets a chance to match it.
     direct_edges = [(source, target) for source, targets in outgoing.items() for target in targets
                     if nodes[source]['type'] == 'class' and nodes[target]['type'] == 'class']
-    for source, target in direct_edges:
-        _convert(active, source, target, nodes[target], audit)
 
     rule_ids = [node_id for node_id, node in nodes.items() if node['type'] == 'rule']
     for rule_id in _rule_order(rule_ids, nodes, incoming):
@@ -185,9 +209,10 @@ def evaluate_recipe(cells, recipe):
         # while delaying the class conversion until the result is terminal.
         output_node = nodes.get(output_classes[0]) if output_classes else rule_node
         _apply_rule(active, rule_id, rule_node, input_ids, rule_id, output_node, audit)
-        downstream_rules = [target for target in outgoing[rule_id] if nodes[target]['type'] == 'rule']
-        if not downstream_rules and output_classes:
-            _convert(active, rule_id, output_classes[0], nodes[output_classes[0]], audit)
+    direct_edges.extend((source, target) for source, targets in outgoing.items() for target in targets
+                        if nodes[source]['type'] == 'rule' and nodes[target]['type'] == 'class')
+    for source, target in direct_edges:
+        _convert(active, source, target, nodes[target], audit)
 
     for cell in active:
         cell['output_node_id'] = cell['node_id']
