@@ -20,6 +20,7 @@ export default function CombineAnnotationsPage() {
   const [createdNodes, setCreatedNodes] = useState([])
   const [connections, setConnections] = useState([])
   const [connectionDrag, setConnectionDrag] = useState(null)
+  const [selectedConnectionId, setSelectedConnectionId] = useState(null)
   const [mergePreview, setMergePreview] = useState(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [loadingImages, setLoadingImages] = useState(true)
@@ -68,6 +69,7 @@ export default function CombineAnnotationsPage() {
     setCreatedNodes([])
     setConnections([])
     setConnectionDrag(null)
+    setSelectedConnectionId(null)
     setMergePreview(null)
   }, [imageId])
 
@@ -143,6 +145,15 @@ export default function CombineAnnotationsPage() {
     setConnectionDrag(null)
   }
   const cancelConnection = () => setConnectionDrag(null)
+  const removeNode = nodeId => {
+    setCreatedNodes(previous => previous.filter(node => node.id !== nodeId))
+    setConnections(previous => previous.filter(connection => connection.source !== nodeId && connection.target !== nodeId))
+    setSelectedConnectionId(null)
+  }
+  const removeConnection = connectionId => {
+    setConnections(previous => previous.filter(connection => connection.id !== connectionId))
+    setSelectedConnectionId(null)
+  }
   const addNode = type => {
     const index = createdNodes.length
     setCreatedNodes(previous => [...previous, {
@@ -210,6 +221,10 @@ export default function CombineAnnotationsPage() {
       {!loadingImages && images.length === 0 && !error && <Alert severity="info">No images are available yet.</Alert>}
       {loadingAnnotations && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}><CircularProgress size={18} /><Typography>Loading channel annotations…</Typography></Stack>}
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>Connect classes directly to relabel them. Connect classes to a rule node to merge with IoU or containment, then choose whether any compatible subset or all inputs are required.</Typography>
+      {selectedConnectionId && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>Connection selected. Delete it to remove this relationship.</Typography>
+        <Button size="small" color="error" variant="outlined" onClick={() => removeConnection(selectedConnectionId)}>Delete connection</Button>
+      </Stack>}
       <Box ref={graphRef} onPointerMove={event => { dragNode(event); dragConnection(event) }} onPointerUp={event => { finishDrag(event); cancelConnection() }} onPointerCancel={event => { finishDrag(event); cancelConnection() }} onContextMenu={event => event.preventDefault()}
         sx={{ position: 'relative', minHeight: 560, minWidth: graphWidth, bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'auto' }}>
         {channels.map((channel, index) => <Typography key={channel.id} variant="caption" sx={{ position: 'absolute', top: 8, left: 32 + index * 250, color: CHANNEL_COLORS[index % CHANNEL_COLORS.length], fontWeight: 700 }}>{channelName(channel)}</Typography>)}
@@ -223,7 +238,7 @@ export default function CombineAnnotationsPage() {
             const y1 = source.y + 24 + 37
             const x2 = target.x
             const y2 = target.y + 24 + 37
-            return <line key={connection.id} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#94a3b8" strokeWidth="2" markerEnd="url(#combine-arrow)" />
+            return <line key={connection.id} x1={x1} y1={y1} x2={x2} y2={y2} stroke={selectedConnectionId === connection.id ? '#f8fafc' : '#94a3b8'} strokeWidth={selectedConnectionId === connection.id ? 3 : 2} markerEnd="url(#combine-arrow)" pointerEvents="stroke" onClick={event => { event.stopPropagation(); setSelectedConnectionId(connection.id) }} />
           })}
           {connectionDrag && <line x1={(displayNodes.find(node => node.id === connectionDrag.sourceId)?.x || 0) + 196} y1={(displayNodes.find(node => node.id === connectionDrag.sourceId)?.y || 0) + 61} x2={connectionDrag.x} y2={connectionDrag.y} stroke="#cbd5e1" strokeWidth="2" strokeDasharray="6 4" />}
         </svg>
@@ -231,6 +246,7 @@ export default function CombineAnnotationsPage() {
           sx={{ position: 'absolute', left: node.x, top: node.y + 24, width: 196, minHeight: 74, p: 1.25, boxSizing: 'border-box', border: `2px solid ${node.color}`, borderRadius: 1, bgcolor: 'rgba(25, 29, 40, 0.98)', cursor: 'grab', userSelect: 'none', '&:active': { cursor: 'grabbing' } }}>
           {node.created && <Box role="button" tabIndex={0} aria-label="Connect to node" onPointerUp={event => completeConnection(event, node)} sx={{ position: 'absolute', left: -7, top: 31, width: 12, height: 12, borderRadius: '50%', bgcolor: node.color, border: '2px solid #10131b', cursor: 'crosshair' }} />}
           <Box role="button" tabIndex={0} aria-label="Start connection" onPointerDown={event => beginConnection(event, node)} sx={{ position: 'absolute', right: -7, top: 31, width: 12, height: 12, borderRadius: '50%', bgcolor: node.color, border: '2px solid #10131b', cursor: 'crosshair' }} />
+          {node.created && <Box component="button" type="button" aria-label={`Delete ${node.name}`} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); removeNode(node.id) }} sx={{ position: 'absolute', right: 5, top: 4, width: 20, height: 20, p: 0, border: 0, bgcolor: 'transparent', color: 'text.secondary', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>×</Box>}
           {node.created
             ? <Box component="input" aria-label={node.type === 'rule' ? 'Rule output class name' : 'Class name'} value={node.name} onChange={event => updateNodeName(node.id, event.target.value)} onPointerDown={event => event.stopPropagation()} title={node.name} sx={{ display: 'block', width: '100%', p: 0, border: 0, outline: 0, bgcolor: 'transparent', color: node.color, font: 'inherit', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} />
             : <Typography variant="body2" title={node.name} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</Typography>}
