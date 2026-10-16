@@ -56,6 +56,7 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # Session expire
 
 from database import db
 from models import User, ImageRecord, Channel, ImageSet, Annotation, LabelSet, Weights, DetectionSetting
+from annotation_merging import evaluate_recipe, RecipeError
 from flask_migrate import Migrate
 
 db.init_app(app)
@@ -1417,6 +1418,68 @@ def load_annotations():
         })
 
     return jsonify({"annotations": results}), 200
+
+
+@app.route('/combine/preview', methods=['POST'])
+def combine_preview():
+    """Evaluate a graph recipe for an image without changing saved data."""
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+    data = request.get_json() or {}
+    image_id = data.get('image_id')
+    recipe = data.get('recipe')
+    if not image_id or not isinstance(recipe, dict):
+        return jsonify({"error": "image_id and recipe are required"}), 400
+    image = ImageRecord.query.filter_by(id=image_id, user_id=g.user.id).first()
+    if not image:
+        return jsonify({"error": "Image record not found or unauthorized"}), 404
+    channels = sorted(image.channels, key=lambda channel: channel.order_index or 0)
+    channel_by_id = {channel.id: channel for channel in channels}
+    channel_names = {channel.id: f'C{(channel.order_index or 0) + 1}' for channel in channels}
+    annotations = Annotation.query.filter(
+        Annotation.user_id == g.user.id,
+        Annotation.channel_id.in_(list(channel_by_id))
+    ).all() if channel_by_id else []
+    cells = []
+    for annotation in annotations:
+        setting = annotation.detection_setting
+        weights = db.session.get(Weights, setting.weights_id) if setting else None
+        labels = weights.label_set.labels if weights and weights.label_set else []
+        if isinstance(labels, dict):
+            labels = labels.get('labels') or []
+        channel_name = channel_names[annotation.channel_id]
+        for source, boxes in (('detected', annotation.annotations_detected or []), ('drawn', annotation.annotations_drawn or [])):
+            for box in boxes:
+                class_index = int(box.get('class', 0))
+                label = labels[class_index] if class_index < len(labels) else {}
+                cells.append({
+                    'x': float(box.get('x', 0)), 'y': float(box.get('y', 0)),
+                    'w': float(box.get('w', 0)), 'h': float(box.get('h', 0)),
+                    'confidence': box.get('confidence'), 'class': class_index,
+                    'name': label.get('name', f'Class {class_index}'),
+                    'color': label.get('color', '#ffffff'),
+                    'renderStyle': 'dashed' if source == 'detected' else 'solid',
+                    'channel': channel_name, 'channel_ids': [channel_name],
+                    'channel_id': annotation.channel_id,
+                    'node_id': f'input:{channel_name}:{label.get("name", f"Class {class_index}")}',
+                })
+    try:
+        result = evaluate_recipe(cells, recipe)
+    except RecipeError as error:
+        return jsonify({"error": str(error)}), 400
+    layers = [{
+        'id': channel.id,
+        'src': f"{request.host_url.rstrip('/')}/static/{channel.normalized_path}",
+        'color': ['#38bdf8', '#f97316', '#a78bfa', '#34d399', '#f472b6', '#facc15'][index % 6],
+    } for index, channel in enumerate(channels)]
+    return jsonify({
+        'image_id': image.id,
+        'imageSize': {'width': image.width, 'height': image.height},
+        'layers': layers,
+        'boxes': result['boxes'],
+        'audit': result['audit'],
+        'recipe': recipe,
+    }), 200
 
 
 

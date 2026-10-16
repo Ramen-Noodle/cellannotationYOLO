@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Box, CircularProgress, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
+import { Alert, Box, Button, CircularProgress, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
+import MergePreviewModal from '../components/modals/MergePreviewModal'
 
 const API_BASE_URL = 'http://10.80.24.12:5001'
 const CHANNEL_COLORS = ['#38bdf8', '#f97316', '#a78bfa', '#34d399', '#f472b6', '#facc15']
@@ -19,6 +20,8 @@ export default function CombineAnnotationsPage() {
   const [createdNodes, setCreatedNodes] = useState([])
   const [connections, setConnections] = useState([])
   const [connectionDrag, setConnectionDrag] = useState(null)
+  const [mergePreview, setMergePreview] = useState(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
   const [loadingImages, setLoadingImages] = useState(true)
   const [loadingAnnotations, setLoadingAnnotations] = useState(false)
   const [error, setError] = useState('')
@@ -65,6 +68,7 @@ export default function CombineAnnotationsPage() {
     setCreatedNodes([])
     setConnections([])
     setConnectionDrag(null)
+    setMergePreview(null)
   }, [imageId])
 
   const channelById = useMemo(() => new Map(channels.map(channel => [channel.id, channel])), [channels])
@@ -80,7 +84,7 @@ export default function CombineAnnotationsPage() {
         })
       })
       ;[...labels.entries()].forEach(([name, entry], classIndex) => nextNodes.push({
-        id: `${channel.id}:${name}`, channelId: channel.id, channelIndex, name, count: entry.count,
+        id: `input:${channelName(channel)}:${name}`, type: 'class', role: 'input', channel: channelName(channel), channelId: channel.id, channelIndex, name, count: entry.count,
         color: CHANNEL_COLORS[channelIndex % CHANNEL_COLORS.length], x: 32 + channelIndex * 250, y: 32 + classIndex * 116,
       }))
     })
@@ -142,7 +146,7 @@ export default function CombineAnnotationsPage() {
   const addNode = type => {
     const index = createdNodes.length
     setCreatedNodes(previous => [...previous, {
-      id: `created-${Date.now()}-${index}`, created: true, type, name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
+      id: `${type === 'rule' ? 'rule' : 'output'}:${Date.now()}-${index}`, created: true, type, role: type === 'rule' ? 'rule' : 'output', name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
       ruleType: 'iou', participation: 'any', threshold: 0.25, color: type === 'rule' ? '#f59e0b' : '#cbd5e1', x: 32 + channels.length * 250, y: 32 + index * 116,
     }])
   }
@@ -156,6 +160,31 @@ export default function CombineAnnotationsPage() {
     setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, threshold: Number.isFinite(numericValue) ? numericValue : 0 } : node))
   }
   const selectedImage = images.find(image => image.id === imageId)
+  const buildRecipe = () => ({
+    version: 2,
+    nodes: displayNodes.map(node => node.type === 'rule'
+      ? { id: node.id, type: 'rule', rule_type: node.ruleType, threshold: node.threshold, apply_to_subsets: node.participation === 'any' }
+      : { id: node.id, type: 'class', role: node.role, channel: node.channel, label: node.name }),
+    edges: connections.map(connection => ({ source: connection.source, target: connection.target })),
+  })
+  const previewMergedAnnotations = async () => {
+    if (!imageId) return
+    setPreviewLoading(true)
+    setError('')
+    try {
+      const response = await fetch(`${API_BASE_URL}/combine/preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ image_id: imageId, recipe: buildRecipe() }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || 'Could not preview the recipe.')
+      setMergePreview({ ...data, id: `merged-preview:${imageId}`, imageId })
+    } catch (previewError) {
+      setError(previewError.message)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
 
   return (
     <Box sx={{ height: '100%', p: 3, boxSizing: 'border-box', bgcolor: 'background.default', overflow: 'auto' }}>
@@ -167,6 +196,7 @@ export default function CombineAnnotationsPage() {
         <Stack direction="row" spacing={1}>
           <Box component="button" type="button" onClick={() => addNode('class')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: 'divider', borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add class</Box>
           <Box component="button" type="button" onClick={() => addNode('rule')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: '#f59e0b', borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add rule</Box>
+          <Button variant="outlined" size="small" onClick={previewMergedAnnotations} disabled={!imageId || loadingAnnotations || previewLoading}>{previewLoading ? 'Previewing…' : 'Preview'}</Button>
         </Stack>
         <FormControl size="small" sx={{ minWidth: 280 }} disabled={loadingImages || images.length === 0}>
           <InputLabel id="combine-image-label">Image</InputLabel>
@@ -230,6 +260,7 @@ export default function CombineAnnotationsPage() {
         {!imageId && !loadingImages && <Typography color="text.secondary" sx={{ p: 3 }}>Choose an image to begin.</Typography>}
       </Box>
       {selectedImage && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{selectedImage.name} · {channels.length} channel{channels.length === 1 ? '' : 's'} · {displayNodes.length} node{displayNodes.length === 1 ? '' : 's'} · {connections.length} connection{connections.length === 1 ? '' : 's'}</Typography>}
+      <MergePreviewModal preview={mergePreview} onClose={() => setMergePreview(null)} />
     </Box>
   )
 }

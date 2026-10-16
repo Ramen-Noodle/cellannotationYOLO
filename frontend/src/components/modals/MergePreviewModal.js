@@ -42,7 +42,7 @@ export default function MergePreviewModal({ preview, onClose, onMerge, brightnes
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 1 }}>
         <Typography variant="body2" sx={{ flexGrow: 1 }}>All source channels combined. Scroll to zoom; right-drag to pan.</Typography>
         <Button onClick={onClose}>Back to rules</Button>
-        <Button variant="contained" onClick={() => onMerge(preview)}>Merge</Button>
+        {onMerge && <Button variant="contained" onClick={() => onMerge(preview)}>Merge</Button>}
       </Stack>
     </Box>
   </Modal>
