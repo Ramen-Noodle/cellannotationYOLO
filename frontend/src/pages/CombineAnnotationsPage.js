@@ -3,7 +3,10 @@ import { Alert, Box, Button, CircularProgress, FormControl, InputLabel, MenuItem
 import MergePreviewModal from '../components/modals/MergePreviewModal'
 
 const API_BASE_URL = 'http://10.80.24.12:5001'
-const CHANNEL_COLORS = ['#38bdf8', '#f97316', '#a78bfa', '#34d399', '#f472b6', '#facc15']
+// Keep the image-layer tint palette identical to the main canvas. These
+// colors belong to channels; annotation/class colors are kept on boxes and
+// graph nodes separately.
+const CHANNEL_COLORS = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
 
 function channelName(channel) { return `C${(channel.order_index ?? 0) + 1}` }
 function annotationCount(annotation, labelIndex) {
@@ -81,13 +84,13 @@ export default function CombineAnnotationsPage() {
       const labels = new Map()
       annotations.filter(annotation => annotation.channel_id === channel.id).forEach(annotation => {
         ;(annotation.labels?.labels || []).forEach((label, labelIndex) => {
-          if (!labels.has(label.name)) labels.set(label.name, { count: 0 })
+          if (!labels.has(label.name)) labels.set(label.name, { count: 0, color: label.color || '#cbd5e1' })
           labels.get(label.name).count += annotationCount(annotation, labelIndex)
         })
       })
       ;[...labels.entries()].forEach(([name, entry], classIndex) => nextNodes.push({
         id: `input:${channelName(channel)}:${name}`, type: 'class', role: 'input', channel: channelName(channel), channelId: channel.id, channelIndex, name, count: entry.count,
-        color: CHANNEL_COLORS[channelIndex % CHANNEL_COLORS.length], x: 32 + channelIndex * 250, y: 32 + classIndex * 116,
+        color: entry.color, x: 32 + channelIndex * 250, y: 32 + classIndex * 116,
       }))
     })
     setNodes(nextNodes)
@@ -210,7 +213,14 @@ export default function CombineAnnotationsPage() {
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.error || 'Could not preview the recipe.')
-      setMergePreview({ ...data, id: `merged-preview:${imageId}`, imageId })
+      // The backend returns the source layers, while the graph uses class
+      // colors for nodes and output boxes. Re-apply the channel palette here
+      // so a class color can never tint the composite image.
+      const layers = (data.layers || []).map((layer, index) => ({
+        ...layer,
+        color: CHANNEL_COLORS[index % CHANNEL_COLORS.length],
+      }))
+      setMergePreview({ ...data, layers, id: `merged-preview:${imageId}`, imageId })
     } catch (previewError) {
       setError(previewError.message)
     } finally {

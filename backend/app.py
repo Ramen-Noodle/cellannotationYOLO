@@ -1467,10 +1467,11 @@ def combine_preview():
         result = evaluate_recipe(cells, recipe)
     except RecipeError as error:
         return jsonify({"error": str(error)}), 400
+    channel_palette = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
     layers = [{
         'id': channel.id,
         'src': f"{request.host_url.rstrip('/')}/static/{channel.normalized_path}",
-        'color': ['#38bdf8', '#f97316', '#a78bfa', '#34d399', '#f472b6', '#facc15'][index % 6],
+        'color': channel_palette[index % len(channel_palette)],
     } for index, channel in enumerate(channels)]
     return jsonify({
         'image_id': image.id,
