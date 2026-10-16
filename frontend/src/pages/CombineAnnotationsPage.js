@@ -7,6 +7,7 @@ const API_BASE_URL = 'http://10.80.24.12:5001'
 // colors belong to channels; annotation/class colors are kept on boxes and
 // graph nodes separately.
 const CHANNEL_COLORS = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
+const CLASS_NODE_DEFAULT_COLOR = '#cbd5e1'
 
 function channelName(channel) { return `C${(channel.order_index ?? 0) + 1}` }
 function annotationCount(annotation, labelIndex) {
@@ -181,11 +182,12 @@ export default function CombineAnnotationsPage() {
       const column = Math.floor(index / 3)
       return [...previous, {
         id: `${type === 'rule' ? 'rule' : 'output'}:${id}`, created: true, type, role: type === 'rule' ? 'rule' : 'output', name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
-        ruleType: 'iou', participation: 'any', threshold: 0.25, color: type === 'rule' ? '#f59e0b' : '#cbd5e1', x: 32 + channels.length * 250 + column * 230, y: 32 + row * 116,
+        ruleType: 'iou', participation: 'any', threshold: 0.25, color: CLASS_NODE_DEFAULT_COLOR, x: 32 + channels.length * 250 + column * 230, y: 32 + row * 116,
       }]
     })
   }
   const updateNodeName = (nodeId, name) => setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, name } : node))
+  const updateNodeColor = (nodeId, color) => setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, color } : node))
   const updateNodeRule = (nodeId, field, value) => {
     if (field === 'ruleType' || field === 'participation') {
       setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, [field]: value } : node))
@@ -199,7 +201,7 @@ export default function CombineAnnotationsPage() {
     version: 2,
     nodes: displayNodes.map(node => node.type === 'rule'
       ? { id: node.id, type: 'rule', rule_type: node.ruleType, threshold: node.threshold, apply_to_subsets: node.participation === 'any' }
-      : { id: node.id, type: 'class', role: node.role, channel: node.channel, label: node.name }),
+      : { id: node.id, type: 'class', role: node.role, channel: node.channel, label: node.name, color: node.color }),
     edges: connections.map(connection => ({ source: connection.source, target: connection.target })),
   })
   const previewMergedAnnotations = async () => {
@@ -237,7 +239,7 @@ export default function CombineAnnotationsPage() {
         </Box>
         <Stack direction="row" spacing={1}>
           <Box component="button" type="button" onClick={() => addNode('class')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: 'divider', borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add class</Box>
-          <Box component="button" type="button" onClick={() => addNode('rule')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: '#f59e0b', borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add rule</Box>
+          <Box component="button" type="button" onClick={() => addNode('rule')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: CLASS_NODE_DEFAULT_COLOR, borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add rule</Box>
           <Button variant="outlined" size="small" onClick={previewMergedAnnotations} disabled={!imageId || loadingAnnotations || previewLoading}>{previewLoading ? 'Previewing…' : 'Preview'}</Button>
         </Stack>
         <FormControl size="small" sx={{ minWidth: 280 }} disabled={loadingImages || images.length === 0}>
@@ -277,6 +279,10 @@ export default function CombineAnnotationsPage() {
           {node.created
             ? <Box component="input" aria-label={node.type === 'rule' ? 'Rule output class name' : 'Class name'} value={node.name} onChange={event => updateNodeName(node.id, event.target.value)} onPointerDown={event => event.stopPropagation()} title={node.name} sx={{ display: 'block', width: '100%', p: 0, border: 0, outline: 0, bgcolor: 'transparent', color: node.color, font: 'inherit', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} />
             : <Typography variant="body2" title={node.name} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</Typography>}
+          {node.created && node.type === 'class' && <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 0.75 }} onPointerDown={event => event.stopPropagation()}>
+            <Typography variant="caption" color="text.secondary">Class color</Typography>
+            <Box component="input" type="color" aria-label="Class color" value={node.color} onChange={event => updateNodeColor(node.id, event.target.value)} sx={{ width: 28, height: 22, p: 0, border: 0, bgcolor: 'transparent', cursor: 'pointer' }} />
+          </Stack>}
           {node.created && node.type === 'rule'
             ? <Stack spacing={0.75} sx={{ mt: 0.75 }}>
                 <Stack direction="row" spacing={0.75}>
@@ -297,7 +303,7 @@ export default function CombineAnnotationsPage() {
                   </Select>
                 </FormControl>
               </Stack>
-            : <Typography variant="caption" color="text.secondary" title={node.created ? 'User-created class node' : channelById.get(node.channelId)?.name || ''} sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.created ? 'Class node' : `${channelName(channels[node.channelIndex])} · ${node.count} detections`}</Typography>}
+            : <Typography variant="caption" title={node.created ? 'User-created class node' : channelById.get(node.channelId)?.name || ''} sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: node.created ? 'text.secondary' : CHANNEL_COLORS[node.channelIndex % CHANNEL_COLORS.length] }}>{node.created ? 'Class node' : `${channelName(channels[node.channelIndex])} · ${node.count} detections`}</Typography>}
         </Box>)}
         {!loadingAnnotations && imageId && displayNodes.length === 0 && <Typography color="text.secondary" sx={{ p: 3 }}>This image has no labeled annotation classes.</Typography>}
         {!imageId && !loadingImages && <Typography color="text.secondary" sx={{ p: 3 }}>Choose an image to begin.</Typography>}

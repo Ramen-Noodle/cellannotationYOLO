@@ -50,6 +50,11 @@ def _node_label(node):
     return str(node.get('label') or node.get('name') or node.get('id'))
 
 
+def _node_color(node, fallback='#ffffff'):
+    color = node.get('color') if isinstance(node, dict) else None
+    return color if isinstance(color, str) and color.strip() else fallback
+
+
 def _validate(recipe):
     if not isinstance(recipe, dict) or recipe.get('version') != 2:
         raise RecipeError('Recipe version 2 is required.')
@@ -116,6 +121,7 @@ def _convert(active, source_id, target_id, target_node, audit):
         if cell['node_id'] == source_id:
             cell['node_id'] = target_id
             cell['name'] = _node_label(target_node)
+            cell['color'] = _node_color(target_node, cell.get('color', '#ffffff'))
             changed += 1
     if changed:
         audit.append({'operation': 'class conversion', 'source': source_id, 'target': target_id, 'count': changed})
@@ -172,6 +178,8 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
         merged = deepcopy(representative)
         merged['node_id'] = output_id
         merged['name'] = _node_label(output_node) if output_node else _node_label(rule_node)
+        if output_node:
+            merged['color'] = _node_color(output_node, merged.get('color', '#ffffff'))
         merged['channel_ids'] = sorted(set().union(*(_channels(item) for item in group)))
         merged['members'] = [item['source_index'] for item in group]
         produced.append(merged)
