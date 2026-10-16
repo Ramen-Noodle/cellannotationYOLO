@@ -20,7 +20,7 @@ export default function CombineAnnotationsPage() {
   const [createdNodes, setCreatedNodes] = useState([])
   const [connections, setConnections] = useState([])
   const [connectionDrag, setConnectionDrag] = useState(null)
-  const [selectedConnectionId, setSelectedConnectionId] = useState(null)
+  const [edgeDrag, setEdgeDrag] = useState(null)
   const [mergePreview, setMergePreview] = useState(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [loadingImages, setLoadingImages] = useState(true)
@@ -69,7 +69,7 @@ export default function CombineAnnotationsPage() {
     setCreatedNodes([])
     setConnections([])
     setConnectionDrag(null)
-    setSelectedConnectionId(null)
+    setEdgeDrag(null)
     setMergePreview(null)
   }, [imageId])
 
@@ -127,15 +127,26 @@ export default function CombineAnnotationsPage() {
     setConnectionDrag({ sourceId: node.id, x: point.x, y: point.y })
   }
   const dragConnection = event => {
-    if (!connectionDrag) return
+    if (!connectionDrag && !edgeDrag) return
     const point = graphPoint(event)
     setConnectionDrag(previous => previous ? { ...previous, x: point.x, y: point.y } : previous)
+    if (edgeDrag) {
+      const moved = Math.hypot(point.x - edgeDrag.startX, point.y - edgeDrag.startY) > 4
+      if (moved && !edgeDrag.detached) {
+        setConnections(previous => previous.filter(item => item.id !== edgeDrag.connectionId))
+      }
+      setEdgeDrag(previous => previous ? { ...previous, x: point.x, y: point.y, detached: previous.detached || moved } : previous)
+    }
   }
   const completeConnection = (event, target) => {
-    if (!connectionDrag) return
+    if (!connectionDrag && !edgeDrag) return
     event.preventDefault()
     event.stopPropagation()
-    const sourceId = connectionDrag.sourceId
+    if (edgeDrag && !edgeDrag.detached) {
+      setEdgeDrag(null)
+      return
+    }
+    const sourceId = connectionDrag?.sourceId || edgeDrag?.sourceId
     if (sourceId !== target.id && target.created) {
       const id = `${sourceId}->${target.id}`
       setConnections(previous => previous.some(connection => connection.id === id)
@@ -143,23 +154,31 @@ export default function CombineAnnotationsPage() {
         : [...previous, { id, source: sourceId, target: target.id }])
     }
     setConnectionDrag(null)
+    setEdgeDrag(null)
   }
-  const cancelConnection = () => setConnectionDrag(null)
+  const beginEdgeDrag = (event, connection) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const point = graphPoint(event)
+    setEdgeDrag({ connectionId: connection.id, sourceId: connection.source, x: point.x, y: point.y, startX: point.x, startY: point.y, detached: false })
+  }
+  const cancelConnection = () => {
+    setConnectionDrag(null)
+    setEdgeDrag(null)
+  }
   const removeNode = nodeId => {
     setCreatedNodes(previous => previous.filter(node => node.id !== nodeId))
     setConnections(previous => previous.filter(connection => connection.source !== nodeId && connection.target !== nodeId))
-    setSelectedConnectionId(null)
-  }
-  const removeConnection = connectionId => {
-    setConnections(previous => previous.filter(connection => connection.id !== connectionId))
-    setSelectedConnectionId(null)
   }
   const addNode = type => {
-    const index = createdNodes.length
-    setCreatedNodes(previous => [...previous, {
-      id: `${type === 'rule' ? 'rule' : 'output'}:${Date.now()}-${index}`, created: true, type, role: type === 'rule' ? 'rule' : 'output', name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
-      ruleType: 'iou', participation: 'any', threshold: 0.25, color: type === 'rule' ? '#f59e0b' : '#cbd5e1', x: 32 + channels.length * 250, y: 32 + index * 116,
-    }])
+    setCreatedNodes(previous => {
+      const index = previous.length
+      const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${index}`
+      return [...previous, {
+        id: `${type === 'rule' ? 'rule' : 'output'}:${id}`, created: true, type, role: type === 'rule' ? 'rule' : 'output', name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
+        ruleType: 'iou', participation: 'any', threshold: 0.25, color: type === 'rule' ? '#f59e0b' : '#cbd5e1', x: 32 + channels.length * 250, y: 32 + index * 116,
+      }]
+    })
   }
   const updateNodeName = (nodeId, name) => setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, name } : node))
   const updateNodeRule = (nodeId, field, value) => {
@@ -221,10 +240,6 @@ export default function CombineAnnotationsPage() {
       {!loadingImages && images.length === 0 && !error && <Alert severity="info">No images are available yet.</Alert>}
       {loadingAnnotations && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}><CircularProgress size={18} /><Typography>Loading channel annotations…</Typography></Stack>}
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>Connect classes directly to relabel them. Connect classes to a rule node to merge with IoU or containment, then choose whether any compatible subset or all inputs are required.</Typography>
-      {selectedConnectionId && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
-        <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>Connection selected. Delete it to remove this relationship.</Typography>
-        <Button size="small" color="error" variant="outlined" onClick={() => removeConnection(selectedConnectionId)}>Delete connection</Button>
-      </Stack>}
       <Box ref={graphRef} onPointerMove={event => { dragNode(event); dragConnection(event) }} onPointerUp={event => { finishDrag(event); cancelConnection() }} onPointerCancel={event => { finishDrag(event); cancelConnection() }} onContextMenu={event => event.preventDefault()}
         sx={{ position: 'relative', minHeight: 560, minWidth: graphWidth, bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'auto' }}>
         {channels.map((channel, index) => <Typography key={channel.id} variant="caption" sx={{ position: 'absolute', top: 8, left: 32 + index * 250, color: CHANNEL_COLORS[index % CHANNEL_COLORS.length], fontWeight: 700 }}>{channelName(channel)}</Typography>)}
@@ -238,9 +253,9 @@ export default function CombineAnnotationsPage() {
             const y1 = source.y + 24 + 37
             const x2 = target.x
             const y2 = target.y + 24 + 37
-            return <line key={connection.id} x1={x1} y1={y1} x2={x2} y2={y2} stroke={selectedConnectionId === connection.id ? '#f8fafc' : '#94a3b8'} strokeWidth={selectedConnectionId === connection.id ? 3 : 2} markerEnd="url(#combine-arrow)" pointerEvents="stroke" onClick={event => { event.stopPropagation(); setSelectedConnectionId(connection.id) }} />
+            return <line key={connection.id} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#94a3b8" strokeWidth="2" markerEnd="url(#combine-arrow)" pointerEvents="stroke" onPointerDown={event => beginEdgeDrag(event, connection)} />
           })}
-          {connectionDrag && <line x1={(displayNodes.find(node => node.id === connectionDrag.sourceId)?.x || 0) + 196} y1={(displayNodes.find(node => node.id === connectionDrag.sourceId)?.y || 0) + 61} x2={connectionDrag.x} y2={connectionDrag.y} stroke="#cbd5e1" strokeWidth="2" strokeDasharray="6 4" />}
+          {(connectionDrag || edgeDrag) && <line x1={(displayNodes.find(node => node.id === (connectionDrag?.sourceId || edgeDrag?.sourceId))?.x || 0) + 196} y1={(displayNodes.find(node => node.id === (connectionDrag?.sourceId || edgeDrag?.sourceId))?.y || 0) + 61} x2={(connectionDrag || edgeDrag).x} y2={(connectionDrag || edgeDrag).y} stroke="#cbd5e1" strokeWidth="2" strokeDasharray="6 4" />}
         </svg>
         {displayNodes.map(node => <Box key={node.id} onPointerDown={event => moveNode(event, node)}
           sx={{ position: 'absolute', left: node.x, top: node.y + 24, width: 196, minHeight: 74, p: 1.25, boxSizing: 'border-box', border: `2px solid ${node.color}`, borderRadius: 1, bgcolor: 'rgba(25, 29, 40, 0.98)', cursor: 'grab', userSelect: 'none', '&:active': { cursor: 'grabbing' } }}>
