@@ -78,6 +78,8 @@ export default function CellAnnotationTool() {
   const [imageSets, setImageSets] = useState([])
   const [imageID, setImageID] = useState('')
   const [importedPreview, setImportedPreview] = useState(null)
+  const [uploadMenuAnchor, setUploadMenuAnchor] = useState(null)
+  const fileUploadInputRef = useRef(null)
   const folderUploadInputRef = useRef(null)
   const importImageRef = useRef(imageID)
   importImageRef.current = imageID
@@ -2410,20 +2412,37 @@ export default function CellAnnotationTool() {
               <IconButton 
                 color="primary"
                 sx={{ p: 1.5 }}
-                onClick={() => folderUploadInputRef.current?.click()}
+                onClick={event => setUploadMenuAnchor(event.currentTarget)}
               >
                 <FileUploadIcon />
-                <input
-                  ref={folderUploadInputRef}
-                  hidden
-                  type="file"
-                  multiple
-                  webkitdirectory="true"
-                  directory="true"
-                  onChange={handleUploadFolder}
-                />
               </IconButton>
             </Tooltip>
+            <Menu
+              anchorEl={uploadMenuAnchor}
+              open={Boolean(uploadMenuAnchor)}
+              onClose={() => setUploadMenuAnchor(null)}
+            >
+              <MenuItem onClick={() => { setUploadMenuAnchor(null); fileUploadInputRef.current?.click() }}>Choose TIFF files</MenuItem>
+              <MenuItem onClick={() => { setUploadMenuAnchor(null); folderUploadInputRef.current?.click() }}>Choose a TIFF folder</MenuItem>
+            </Menu>
+            <input
+              ref={fileUploadInputRef}
+              hidden
+              type="file"
+              multiple
+              accept=".tif,.tiff"
+              onChange={handleUpload}
+            />
+            <input
+              ref={folderUploadInputRef}
+              hidden
+              type="file"
+              multiple
+              accept=".tif,.tiff"
+              webkitdirectory="true"
+              directory="true"
+              onChange={handleUploadFolder}
+            />
 
             <Tooltip title="Download Image" arrow>
               <IconButton 
