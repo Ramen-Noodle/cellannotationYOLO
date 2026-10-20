@@ -1448,6 +1448,7 @@ def combine_preview():
         if isinstance(labels, dict):
             labels = labels.get('labels') or []
         channel_name = channel_names[annotation.channel_id]
+        configured_sublabel = (setting.params or {}).get('sublabel') if setting else None
         for source, boxes in (('detected', annotation.annotations_detected or []), ('drawn', annotation.annotations_drawn or [])):
             for box in boxes:
                 class_index = int(box.get('class', 0))
@@ -1458,6 +1459,7 @@ def combine_preview():
                     'confidence': box.get('confidence'), 'class': class_index,
                     'name': label.get('name', f'Class {class_index}'),
                     'color': label.get('color', '#ffffff'),
+                    'sublabel': box.get('sublabel') or configured_sublabel,
                     'renderStyle': 'dashed' if source == 'detected' else 'solid',
                     'channel': channel_name, 'channel_ids': [channel_name],
                     'channel_id': annotation.channel_id,
