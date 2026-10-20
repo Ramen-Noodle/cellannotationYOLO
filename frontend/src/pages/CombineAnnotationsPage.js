@@ -10,6 +10,10 @@ const CHANNEL_COLORS = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '
 const CLASS_NODE_DEFAULT_COLOR = '#cbd5e1'
 
 function channelName(channel) { return `C${(channel.order_index ?? 0) + 1}` }
+function sourceNodeId(channel, annotation, className) {
+  const settingId = annotation.detection_setting_id || annotation.id
+  return `input:${channelName(channel)}:${settingId}:${className}`
+}
 function annotationCount(annotation, labelIndex) {
   return [...(annotation.annotations_detected || []), ...(annotation.annotations_drawn || [])]
     .filter(box => Number(box.class) === labelIndex).length
@@ -96,19 +100,19 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
   useEffect(() => {
     const nextNodes = []
     channels.forEach((channel, channelIndex) => {
-      const labels = new Map()
+      let classIndex = 0
       annotations.filter(annotation => annotation.channel_id === channel.id).forEach(annotation => {
         ;(annotation.labels?.labels || []).forEach((label, labelIndex) => {
-          if (!labels.has(label.name)) labels.set(label.name, { count: 0, color: label.color || '#cbd5e1', sublabels: new Set() })
-          const entry = labels.get(label.name)
-          entry.count += annotationCount(annotation, labelIndex)
-          annotationSublabels(annotation, labelIndex).forEach(sublabel => entry.sublabels.add(sublabel))
+          const sublabels = annotationSublabels(annotation, labelIndex)
+          const settingId = annotation.detection_setting_id || annotation.id
+          nextNodes.push({
+            id: sourceNodeId(channel, annotation, label.name), type: 'class', role: 'input', channel: channelName(channel), channelId: channel.id,
+            detectionSettingId: settingId, channelIndex, name: label.name, sublabels, count: annotationCount(annotation, labelIndex),
+            color: label.color || '#cbd5e1', x: 32 + channelIndex * 250, y: 32 + classIndex * 116,
+          })
+          classIndex += 1
         })
       })
-      ;[...labels.entries()].forEach(([name, entry], classIndex) => nextNodes.push({
-        id: `input:${channelName(channel)}:${name}`, type: 'class', role: 'input', channel: channelName(channel), channelId: channel.id, channelIndex, name, sublabels: [...entry.sublabels], count: entry.count,
-        color: entry.color, x: 32 + channelIndex * 250, y: 32 + classIndex * 116,
-      }))
     })
     setNodes(nextNodes)
   }, [annotations, channels])
@@ -348,7 +352,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
                   </Select>
                 </FormControl>
               </Stack>
-            : !node.created && <Typography variant="caption" title={channelById.get(node.channelId)?.name || ''} sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: CHANNEL_COLORS[node.channelIndex % CHANNEL_COLORS.length] }}>{`${channelName(channels[node.channelIndex])} · ${node.count} detections`}</Typography>}
+            : !node.created && <Typography variant="caption" title={`${channelById.get(node.channelId)?.name || ''} · setting ${node.detectionSettingId}`} sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: CHANNEL_COLORS[node.channelIndex % CHANNEL_COLORS.length] }}>{`${channelName(channels[node.channelIndex])} · ${String(node.detectionSettingId).slice(0, 8)} · ${node.count} detections`}</Typography>}
         </Box>)}
         {!loadingAnnotations && imageId && displayNodes.length === 0 && <Typography color="text.secondary" sx={{ p: 3 }}>This image has no labeled annotation classes.</Typography>}
         {!imageId && !loadingImages && <Typography color="text.secondary" sx={{ p: 3 }}>Choose an image to begin.</Typography>}

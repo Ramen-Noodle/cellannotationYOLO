@@ -1448,6 +1448,7 @@ def combine_preview():
         if isinstance(labels, dict):
             labels = labels.get('labels') or []
         channel_name = channel_names[annotation.channel_id]
+        setting_id = annotation.detection_setting_id or annotation.id
         configured_sublabel = (setting.params or {}).get('sublabel') if setting else None
         for source, boxes in (('detected', annotation.annotations_detected or []), ('drawn', annotation.annotations_drawn or [])):
             for box in boxes:
@@ -1463,7 +1464,7 @@ def combine_preview():
                     'renderStyle': 'dashed' if source == 'detected' else 'solid',
                     'channel': channel_name, 'channel_ids': [channel_name],
                     'channel_id': annotation.channel_id,
-                    'node_id': f'input:{channel_name}:{label.get("name", f"Class {class_index}")}',
+                    'node_id': f'input:{channel_name}:{setting_id}:{label.get("name", f"Class {class_index}")}',
                 })
     try:
         result = evaluate_recipe(cells, recipe)
