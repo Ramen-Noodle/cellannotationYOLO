@@ -121,6 +121,12 @@ const theme = createTheme({
 
 function App() {
   const [page, setPage] = useState('annotations')
+  const [appliedMergedLayers, setAppliedMergedLayers] = useState({})
+
+  const applyMergedLayer = result => {
+    if (!result?.imageId) return
+    setAppliedMergedLayers(previous => ({ ...previous, [result.imageId]: result }))
+  }
 
   return (
     <ThemeProvider theme={theme}>
@@ -165,7 +171,9 @@ function App() {
             </Button>
           </Box>
           <Box sx={{ height: 'calc(100vh - 48px)', pt: '48px', boxSizing: 'border-box' }}>
-            {page === 'annotations' ? <CellAnnotationTool /> : <CombineAnnotationsPage />}
+            {page === 'annotations'
+              ? <CellAnnotationTool appliedMergedLayers={appliedMergedLayers} />
+              : <CombineAnnotationsPage onApplyMergedLayer={applyMergedLayer} />}
           </Box>
         </Box>
       </ErrorBoundary>

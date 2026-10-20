@@ -15,8 +15,9 @@ function annotationCount(annotation, labelIndex) {
     .filter(box => Number(box.class) === labelIndex).length
 }
 
-export default function CombineAnnotationsPage() {
+export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
   const [images, setImages] = useState([])
+  const [imageSets, setImageSets] = useState([])
   const [imageId, setImageId] = useState('')
   const [channels, setChannels] = useState([])
   const [annotations, setAnnotations] = useState([])
@@ -35,13 +36,17 @@ export default function CombineAnnotationsPage() {
 
   useEffect(() => {
     let cancelled = false
-    fetch(`${API_BASE_URL}/user-images`, { credentials: 'include' })
-      .then(async response => {
-        const data = await response.json().catch(() => ({}))
-        if (!response.ok) throw new Error(data.error || 'Could not load images.')
-        return data
+    Promise.all([
+      fetch(`${API_BASE_URL}/user-images`, { credentials: 'include' }),
+      fetch(`${API_BASE_URL}/user-image-sets`, { credentials: 'include' }),
+    ])
+      .then(async ([imagesResponse, setsResponse]) => {
+        const data = await imagesResponse.json().catch(() => ({}))
+        const sets = await setsResponse.json().catch(() => [])
+        if (!imagesResponse.ok) throw new Error(data.error || 'Could not load images.')
+        return { data, sets: setsResponse.ok ? sets : [] }
       })
-      .then(data => { if (!cancelled) { setImages(data); if (data[0]) setImageId(data[0].id) } })
+      .then(({ data, sets }) => { if (!cancelled) { setImages(data); setImageSets(sets); if (data[0]) setImageId(data[0].id) } })
       .catch(loadError => { if (!cancelled) setError(loadError.message) })
       .finally(() => { if (!cancelled) setLoadingImages(false) })
     return () => { cancelled = true }
@@ -204,27 +209,56 @@ export default function CombineAnnotationsPage() {
       : { id: node.id, type: 'class', role: node.role, channel: node.channel, label: node.name, color: node.color }),
     edges: connections.map(connection => ({ source: connection.source, target: connection.target })),
   })
+  const formatPreview = data => {
+    const layers = (data.layers || []).map((layer, index) => ({
+      ...layer,
+      color: CHANNEL_COLORS[index % CHANNEL_COLORS.length],
+    }))
+    return {
+      ...data,
+      layers,
+      id: `merged:${data.image_id}`,
+      imageId: data.image_id,
+      channelName: 'Merged annotations',
+      visible: true,
+    }
+  }
+  const previewRecipeForImage = async targetImageId => {
+    const response = await fetch(`${API_BASE_URL}/combine/preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ image_id: targetImageId, recipe: buildRecipe() }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || 'Could not preview the recipe.')
+      return formatPreview(data)
+  }
   const previewMergedAnnotations = async () => {
     if (!imageId) return
     setPreviewLoading(true)
     setError('')
     try {
-      const response = await fetch(`${API_BASE_URL}/combine/preview`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-        body: JSON.stringify({ image_id: imageId, recipe: buildRecipe() }),
-      })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(data.error || 'Could not preview the recipe.')
-      // The backend returns the source layers, while the graph uses class
-      // colors for nodes and output boxes. Re-apply the channel palette here
-      // so a class color can never tint the composite image.
-      const layers = (data.layers || []).map((layer, index) => ({
-        ...layer,
-        color: CHANNEL_COLORS[index % CHANNEL_COLORS.length],
-      }))
-      setMergePreview({ ...data, layers, id: `merged-preview:${imageId}`, imageId })
+      setMergePreview(await previewRecipeForImage(imageId))
     } catch (previewError) {
       setError(previewError.message)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+  const applyRecipe = async target => {
+    if (!imageId || !onApplyMergedLayer) return
+    setPreviewLoading(true)
+    setError('')
+    try {
+      const targetIds = target.type === 'set'
+        ? (imageSets.find(imageSet => imageSet.id === target.imageSetId)?.images || []).map(image => image.id)
+        : [imageId]
+      if (!targetIds.length) throw new Error('The selected image set has no images.')
+      const results = await Promise.all(targetIds.map(previewRecipeForImage))
+      results.forEach(onApplyMergedLayer)
+      const currentResult = results.find(result => result.imageId === imageId)
+      if (currentResult) setMergePreview(currentResult)
+    } catch (applyError) {
+      setError(applyError.message)
     } finally {
       setPreviewLoading(false)
     }
@@ -309,7 +343,12 @@ export default function CombineAnnotationsPage() {
         {!imageId && !loadingImages && <Typography color="text.secondary" sx={{ p: 3 }}>Choose an image to begin.</Typography>}
       </Box>
       {selectedImage && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{selectedImage.name} · {channels.length} channel{channels.length === 1 ? '' : 's'} · {displayNodes.length} node{displayNodes.length === 1 ? '' : 's'} · {connections.length} connection{connections.length === 1 ? '' : 's'}</Typography>}
-      <MergePreviewModal preview={mergePreview} onClose={() => setMergePreview(null)} />
+      <MergePreviewModal
+        preview={mergePreview}
+        onClose={() => setMergePreview(null)}
+        onApply={applyRecipe}
+        applyTargets={{ sets: imageSets }}
+      />
     </Box>
   )
 }

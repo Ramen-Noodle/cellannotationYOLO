@@ -112,7 +112,25 @@ def _rule_order(rule_ids, nodes, incoming):
 
     for rule_id in rule_ids:
         leaves(rule_id)
-    return sorted(rule_ids, key=lambda node_id: (len(leaves(node_id)), rule_ids.index(node_id)))
+
+    # Respect rule-node dependencies, but when multiple rules are ready to
+    # run, evaluate the one covering the largest source set first. This lets a
+    # broad rule claim a valid multi-channel group before fallback rules run.
+    dependencies = {
+        rule_id: {source for source in incoming[rule_id] if nodes[source]['type'] == 'rule'}
+        for rule_id in rule_ids
+    }
+    remaining = set(rule_ids)
+    ordered = []
+    while remaining:
+        ready = [rule_id for rule_id in remaining if not (dependencies[rule_id] & remaining)]
+        if not ready:
+            raise RecipeError('Recipe contains a cycle.')
+        ready.sort(key=lambda node_id: (-len(leaves(node_id)), rule_ids.index(node_id)))
+        chosen = ready[0]
+        ordered.append(chosen)
+        remaining.remove(chosen)
+    return ordered
 
 
 def _convert(active, source_id, target_id, target_node, audit):
@@ -127,8 +145,8 @@ def _convert(active, source_id, target_id, target_node, audit):
         audit.append({'operation': 'class conversion', 'source': source_id, 'target': target_id, 'count': changed})
 
 
-def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, audit):
-    candidates = [cell for cell in active if cell['node_id'] in input_ids]
+def _compatible_groups(candidates, rule_node, input_ids):
+    """Return all mutually compatible multi-source groups for one rule."""
     candidates.sort(key=lambda cell: (-_area(cell), cell['source_index']))
     parent = list(range(len(candidates)))
     groups = {index: {index} for index in range(len(candidates))}
@@ -165,14 +183,48 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
         parent[second_root] = first_root
         groups[first_root] |= groups.pop(second_root)
 
-    consumed = set()
-    produced = []
     require_all = rule_node.get('apply_to_subsets') is False
+    valid_groups = []
     for group_indices in groups.values():
         group = [candidates[index] for index in sorted(group_indices)]
         input_members = {cell['node_id'] for cell in group}
         if len(group) < 2 or (require_all and input_members != set(input_ids)):
             continue
+        valid_groups.append(group)
+    return valid_groups
+
+
+def _explicit_subset_reservations(active, input_ids, rule_node, rule_nodes, incoming):
+    """Find boxes reserved by explicit smaller class-only rules.
+
+    A broad rule may cover any compatible subset, but a compatible group that
+    belongs to a separately defined smaller rule must be left for that rule.
+    Direct class conversions are intentionally excluded here so they remain
+    fallback behavior after multi-source merges.
+    """
+    reserved = set()
+    current_inputs = set(input_ids)
+    for other_id, other_node in rule_nodes.items():
+        other_inputs = set(incoming[other_id])
+        if other_node is rule_node or not other_inputs < current_inputs:
+            continue
+        if any(source_node in rule_nodes for source_node in other_inputs):
+            continue
+        candidates = [cell for cell in active if cell['node_id'] in other_inputs]
+        for group in _compatible_groups(candidates, other_node, other_inputs):
+            reserved.update(cell['source_index'] for cell in group)
+    return reserved
+
+
+def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, audit, reserved_source_indices=None):
+    reserved_source_indices = reserved_source_indices or set()
+    candidates = [cell for cell in active
+                  if cell['node_id'] in input_ids
+                  and cell['source_index'] not in reserved_source_indices]
+    valid_groups = _compatible_groups(candidates, rule_node, input_ids)
+    consumed = set()
+    produced = []
+    for group in valid_groups:
         consumed.update(item['source_index'] for item in group)
         representative = max(group, key=lambda item: (_area(item), -(item.get('confidence') or -1)))
         merged = deepcopy(representative)
@@ -186,7 +238,7 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
     if consumed:
         active[:] = [cell for cell in active if cell['source_index'] not in consumed]
         active.extend(produced)
-    audit.append({'operation': 'rule', 'rule': rule_id, 'inputs': sorted(input_ids), 'produced': len(produced), 'consumed': len(consumed), 'apply_to_subsets': not require_all})
+    audit.append({'operation': 'rule', 'rule': rule_id, 'inputs': sorted(input_ids), 'produced': len(produced), 'consumed': len(consumed), 'reserved': len(reserved_source_indices), 'apply_to_subsets': rule_node.get('apply_to_subsets') is not False})
 
 
 def evaluate_recipe(cells, recipe):
@@ -204,7 +256,8 @@ def evaluate_recipe(cells, recipe):
                     if nodes[source]['type'] == 'class' and nodes[target]['type'] == 'class']
 
     rule_ids = [node_id for node_id, node in nodes.items() if node['type'] == 'rule']
-    for rule_id in _rule_order(rule_ids, nodes, incoming):
+    ordered_rules = _rule_order(rule_ids, nodes, incoming)
+    for rule_id in ordered_rules:
         rule_node = nodes[rule_id]
         input_ids = set(incoming[rule_id])
         if len(input_ids) < 2:
@@ -216,7 +269,12 @@ def evaluate_recipe(cells, recipe):
         # this result as an input.  Apply the output class label immediately,
         # while delaying the class conversion until the result is terminal.
         output_node = nodes.get(output_classes[0]) if output_classes else rule_node
-        _apply_rule(active, rule_id, rule_node, input_ids, rule_id, output_node, audit)
+        reserved = _explicit_subset_reservations(
+            active, input_ids, rule_node,
+            {candidate_id: nodes[candidate_id] for candidate_id in rule_ids},
+            incoming,
+        )
+        _apply_rule(active, rule_id, rule_node, input_ids, rule_id, output_node, audit, reserved)
     direct_edges.extend((source, target) for source, targets in outgoing.items() for target in targets
                         if nodes[source]['type'] == 'rule' and nodes[target]['type'] == 'class')
     for source, target in direct_edges:

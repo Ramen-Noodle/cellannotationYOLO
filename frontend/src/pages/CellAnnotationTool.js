@@ -32,7 +32,6 @@ import VisibilityIcon from '@mui/icons-material/Visibility'
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff'
 import SaveIcon from '@mui/icons-material/Save'
 import CropIcon from '@mui/icons-material/Crop'
-import MergeTypeIcon from '@mui/icons-material/MergeType'
 import Tooltip from '@mui/material/Tooltip'
 import CircularProgress from '@mui/material/CircularProgress'
 import AppBar from '@mui/material/AppBar'
@@ -47,8 +46,6 @@ import MetricsChart from '../components/MetricsChart'
 import CellCalibrator from '../components/CellCalibrator'
 import GalleryMenu from '../components/modals/GalleryMenu'
 import RowMenu from '../components/RowMenu'
-import MergeAnnotationsModal from '../components/modals/MergeAnnotationsModal'
-import MergePreviewModal from '../components/modals/MergePreviewModal'
 import { batchRowError } from '../components/BatchDetectionRows'
 
 // Seeded per-user on account creation (see User.setup_filesystem in the
@@ -60,7 +57,7 @@ const DEFAULT_MODEL_NAMES = ['MADM', 'SGN', 'StarDist']
 // Frontend-only for now - not persisted to the backend.
 const CHANNEL_COLOR_PALETTE = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
 
-export default function CellAnnotationTool() {
+export default function CellAnnotationTool({ appliedMergedLayers = {} }) {
   // Base URL for the backend API
   const API_BASE_URL = 'http://10.80.24.12:5001'
 
@@ -702,7 +699,6 @@ export default function CellAnnotationTool() {
       const channelRows = channelList.map(buildChannelRow)
       setChannels(channelRows)
       setMergedLayer(null)
-      setMergePreview(null)
 
       const annosByChannel = new Map()
       annoList.forEach(a => {
@@ -1758,13 +1754,16 @@ export default function CellAnnotationTool() {
 
   const [channels, setChannels] = useState([])
   const [mergedLayer, setMergedLayer] = useState(null)
-  const [mergePreview, setMergePreview] = useState(null)
   const mergedActive = mergedLayer?.imageId === imageID && mergedLayer.visible
   useEffect(() => {
     setMergedLayer(null)
-    setMergePreview(null)
-    setMergeModalOpen(false)
   }, [imageID])
+  useEffect(() => {
+    const appliedLayer = appliedMergedLayers[imageID]
+    if (!appliedLayer) return
+    setMergedLayer({ ...appliedLayer, visible: true })
+    setChannels(previous => previous.map(channel => ({ ...channel, visible: false })))
+  }, [appliedMergedLayers, imageID])
   const [selectedChannelId, setSelectedChannelId] = useState(null)
   const [selectedDetectionSettingId, setSelectedDetectionSettingId] = useState(null)
   // Which channel's nested detection-settings menu is open (settings gear on a channel row)
@@ -1806,7 +1805,6 @@ export default function CellAnnotationTool() {
   const [annotationModalOpen, setAnnotationModalOpen] = useState(false)
 
   const [exportModalOpen, setExportModalOpen] = useState(false)
-  const [mergeModalOpen, setMergeModalOpen] = useState(false)
   // Mutually exclusive: exactly one of these is non-null at a time.
   // Whichever one is set determines the export scope ("image" vs "image set").
   const [exportImageId, setExportImageId] = useState('')
@@ -2087,7 +2085,6 @@ export default function CellAnnotationTool() {
 
     setChannels(remainingChannels)
     setMergedLayer(null)
-    setMergePreview(null)
     setDetectionSettings(remainingSettings)
     setActiveRowIds(prevActive => prevActive.filter(id => !removedSettingIds.has(id)))
     setAnnotations(prevAnnos => prevAnnos.filter(ann => ann.channel_id !== targetChannel.id))
@@ -2263,30 +2260,6 @@ export default function CellAnnotationTool() {
   useEffect(() => {
     console.log(detectionSettings)
   }, [detectionSettings])
-
-  function buildMergeResult(mergedBoxes) {
-    return {
-      id: `merged:${imageID}`, imageId: imageID, channelName: 'Merged annotations', visible: true,
-      boxes: mergedBoxes.map(box => ({ ...box, channel_ids: box.channel_ids || [box.channel_id] })),
-      layers: channels.map(c => ({ id: c.id, src: c.channelUrl, color: c.channelColor })),
-      imageSize: { ...imageSize },
-    }
-  }
-
-  function showMergePreview(mergedBoxes) {
-    setMergePreview(buildMergeResult(mergedBoxes))
-    setMergeModalOpen(false)
-  }
-
-  function commitMerge(result) {
-    if (!result || result.imageId !== imageID) return
-    setMergedLayer(result)
-    setChannels(previous => previous.map(c => ({ ...c, visible: false })))
-    setImportedPreview(null)
-    setMergePreview(null)
-    setMergeModalOpen(false)
-    setIsCropping(false)
-  }
 
   const channelMenuRows = mergedLayer?.imageId === imageID ? [mergedLayer, ...channels] : channels
 
@@ -2546,26 +2519,6 @@ export default function CellAnnotationTool() {
                 <input hidden type="file" accept=".txt" onChange={importAnnotations}/>
               </IconButton>
             </Tooltip>
-
-            <Tooltip title="Merge Annotations" arrow>
-              <IconButton color="primary" aria-label="Merge annotations"
-                onClick={() => setMergeModalOpen(true)} sx={{ p: 1.5 }}>
-                <MergeTypeIcon />
-              </IconButton>
-            </Tooltip>
-            <MergeAnnotationsModal
-              open={mergeModalOpen}
-              onClose={() => setMergeModalOpen(false)}
-              boxes={boxes}
-              channels={channels}
-              annotations={annotations}
-              onPreview={showMergePreview}
-              onMerge={mergedBoxes => commitMerge(buildMergeResult(mergedBoxes))}
-            />
-
-            <MergePreviewModal preview={mergePreview}
-              onClose={() => { setMergePreview(null); setMergeModalOpen(true) }}
-              onMerge={commitMerge} brightness={brightness} contrast={contrast} showLabels={showLabels} />
 
             {/* 2. EXPORT ANNOTATIONS (Triggers new Configuration Modal) */}
             <Tooltip title="Download Options" arrow>
