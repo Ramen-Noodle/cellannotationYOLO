@@ -697,8 +697,14 @@ export default function CellAnnotationTool({ appliedMergedLayers = {} }) {
       setAnnotations(annoList)
 
       const channelRows = channelList.map(buildChannelRow)
-      setChannels(channelRows)
-      setMergedLayer(null)
+      const appliedLayer = appliedMergedLayers[imgId]
+      setChannels(appliedLayer
+        ? channelRows.map(channel => ({ ...channel, visible: false }))
+        : channelRows)
+      // Annotation reloads can finish after a recipe has been applied. Keep
+      // the session-level merged layer visible for this image instead of
+      // letting the asynchronous reload remove its row from the channel menu.
+      setMergedLayer(appliedLayer ? { ...appliedLayer, visible: true } : null)
 
       const annosByChannel = new Map()
       annoList.forEach(a => {
