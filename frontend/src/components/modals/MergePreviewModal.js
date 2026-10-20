@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Box, Button, IconButton, Modal, Stack, Typography } from '@mui/material'
+import { Box, Button, FormControl, IconButton, InputLabel, MenuItem, Modal, Select, Stack, Typography } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import ImageCanvas from '../ImageCanvas'
 
-export default function MergePreviewModal({ preview, onClose, onMerge, brightness, contrast, showLabels }) {
+export default function MergePreviewModal({ preview, onClose, onMerge, onApply, applyTargets, brightness, contrast, showLabels }) {
   const [container, setContainer] = useState(null)
   const [viewport, setViewport] = useState({ width: 1, height: 1 })
   const [zoom, setZoom] = useState(1)
   const [viewKey, setViewKey] = useState(0)
+  const [selectedSetId, setSelectedSetId] = useState('')
   useEffect(() => {
     if (!preview || !container) return
     setZoom(1)
@@ -17,6 +18,9 @@ export default function MergePreviewModal({ preview, onClose, onMerge, brightnes
     observer.observe(container)
     return () => observer.disconnect()
   }, [preview, container])
+  useEffect(() => {
+    setSelectedSetId('')
+  }, [preview])
   const validSize = preview?.imageSize.width > 0 && preview?.imageSize.height > 0
   const fitScale = validSize ? Math.min(viewport.width / preview.imageSize.width, viewport.height / preview.imageSize.height) * 0.95 : 1
   const centeredOffset = validSize ? {
@@ -42,7 +46,19 @@ export default function MergePreviewModal({ preview, onClose, onMerge, brightnes
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 1 }}>
         <Typography variant="body2" sx={{ flexGrow: 1 }}>All source channels combined. Scroll to zoom; right-drag to pan.</Typography>
         <Button onClick={onClose}>Back to rules</Button>
-        <Button variant="contained" onClick={() => onMerge(preview)}>Merge</Button>
+        {onMerge && <Button variant="contained" onClick={() => onMerge(preview)}>Merge</Button>}
+        {onApply && <>
+          <Button variant="contained" onClick={() => onApply({ type: 'image' })}>Apply to image</Button>
+          {applyTargets?.sets?.length > 0 && <>
+            <FormControl size="small" sx={{ minWidth: 180 }}>
+              <InputLabel id="merge-apply-set-label">Image set</InputLabel>
+              <Select labelId="merge-apply-set-label" label="Image set" value={selectedSetId} onChange={event => setSelectedSetId(event.target.value)}>
+                {applyTargets.sets.map(imageSet => <MenuItem key={imageSet.id} value={imageSet.id}>{imageSet.name} ({imageSet.image_count})</MenuItem>)}
+              </Select>
+            </FormControl>
+            <Button variant="contained" disabled={!selectedSetId} onClick={() => onApply({ type: 'set', imageSetId: selectedSetId })}>Apply to set</Button>
+          </>}
+        </>}
       </Stack>
     </Box>
   </Modal>

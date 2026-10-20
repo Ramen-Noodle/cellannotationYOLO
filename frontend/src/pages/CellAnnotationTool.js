@@ -32,7 +32,6 @@ import VisibilityIcon from '@mui/icons-material/Visibility'
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff'
 import SaveIcon from '@mui/icons-material/Save'
 import CropIcon from '@mui/icons-material/Crop'
-import MergeTypeIcon from '@mui/icons-material/MergeType'
 import Tooltip from '@mui/material/Tooltip'
 import CircularProgress from '@mui/material/CircularProgress'
 import AppBar from '@mui/material/AppBar'
@@ -47,8 +46,6 @@ import MetricsChart from '../components/MetricsChart'
 import CellCalibrator from '../components/CellCalibrator'
 import GalleryMenu from '../components/modals/GalleryMenu'
 import RowMenu from '../components/RowMenu'
-import MergeAnnotationsModal from '../components/modals/MergeAnnotationsModal'
-import MergePreviewModal from '../components/modals/MergePreviewModal'
 import { batchRowError } from '../components/BatchDetectionRows'
 
 // Seeded per-user on account creation (see User.setup_filesystem in the
@@ -60,7 +57,7 @@ const DEFAULT_MODEL_NAMES = ['MADM', 'SGN', 'StarDist']
 // Frontend-only for now - not persisted to the backend.
 const CHANNEL_COLOR_PALETTE = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
 
-export default function CellAnnotationTool() {
+export default function CellAnnotationTool({ appliedMergedLayers = {} }) {
   // Base URL for the backend API
   const API_BASE_URL = 'http://10.80.24.12:5001'
 
@@ -78,6 +75,9 @@ export default function CellAnnotationTool() {
   const [imageSets, setImageSets] = useState([])
   const [imageID, setImageID] = useState('')
   const [importedPreview, setImportedPreview] = useState(null)
+  const [uploadMenuAnchor, setUploadMenuAnchor] = useState(null)
+  const fileUploadInputRef = useRef(null)
+  const folderUploadInputRef = useRef(null)
   const importImageRef = useRef(imageID)
   importImageRef.current = imageID
   useEffect(() => { setImportedPreview(null) }, [imageID])
@@ -399,6 +399,88 @@ export default function CellAnnotationTool() {
     }
   }
 
+  async function handleUploadFolder(e) {
+    const files = Array.from(e.target.files || [])
+    e.target.value = null
+    const tifFiles = files.filter(file => /\.tiff?$/i.test(file.name))
+    if (!tifFiles.length) return
+
+    const folderParts = file => (file.webkitRelativePath || file.name).split('/').filter(Boolean)
+    const subfolders = Array.from(new Set(tifFiles
+      .map(file => folderParts(file))
+      .filter(parts => parts.length >= 3)
+      .map(parts => parts[1])))
+
+    // A folder containing files directly is the existing batch-upload flow.
+    if (subfolders.length === 0) {
+      await handleUpload({ target: { files: tifFiles, value: '' } })
+      return
+    }
+
+    const baseFolder = subfolders.slice().sort((first, second) => first.localeCompare(second))[0]
+
+    const baseFiles = tifFiles.filter(file => folderParts(file)[1] === baseFolder)
+    const channelFolders = subfolders.filter(folder => folder !== baseFolder)
+    const setName = prompt('Enter a name for the new image set:')
+    if (!setName) return
+
+    setIsLoading(true)
+    setLoadingMessage('Creating image set from base folder...')
+    try {
+      const setRes = await fetch(`${API_BASE_URL}/create-image-set`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ name: setName }),
+      })
+      if (!setRes.ok) throw new Error('Failed to create image set')
+      const imageSet = await setRes.json()
+      let firstUploadedImageData = null
+
+      for (let index = 0; index < baseFiles.length; index += 1) {
+        const file = baseFiles[index]
+        setLoadingMessage(`Uploading base image ${index + 1}/${baseFiles.length}...`)
+        const formData = new FormData()
+        formData.append('file', file)
+        const uploadRes = await fetch(`${API_BASE_URL}/upload`, { method: 'POST', body: formData, credentials: 'include' })
+        if (!uploadRes.ok) throw new Error(`Upload failed for ${file.name}`)
+        const imageData = await uploadRes.json()
+        if (!firstUploadedImageData) firstUploadedImageData = imageData
+        await fetch(`${API_BASE_URL}/add-image-to-set`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ image_set_id: imageSet.id, image_id: imageData.image_id }),
+        })
+      }
+
+      const channelSummary = []
+      for (const folder of channelFolders) {
+        const channelFiles = tifFiles.filter(file => folderParts(file)[1] === folder)
+        const formData = new FormData()
+        formData.append('image_set_id', imageSet.id)
+        channelFiles.forEach(file => formData.append('files', file, file.name))
+        const channelRes = await fetch(`${API_BASE_URL}/add-channels-to-image-set`, {
+          method: 'POST', body: formData, credentials: 'include'
+        })
+        const result = await channelRes.json().catch(() => null)
+        if (!channelRes.ok) throw new Error(result?.error || `Channel folder upload failed for ${folder}`)
+        channelSummary.push(`${folder}: added ${result.added_count || 0}, unmatched uploads ${result.unmatched_uploads?.length || 0}`)
+      }
+
+      if (firstUploadedImageData) {
+        setImageID(firstUploadedImageData.image_id)
+        setImageURL(`${API_BASE_URL}${firstUploadedImageData.converted_url}`)
+        setImageSize({ width: firstUploadedImageData.dimensions[0], height: firstUploadedImageData.dimensions[1] })
+        await renderAnnotations(firstUploadedImageData.image_id)
+      }
+      alert(`Created ${baseFiles.length} image records in "${imageSet.name}".\n${channelSummary.join('\n')}`)
+    } catch (err) {
+      alert(`Folder upload failed: ${err.message}`)
+    } finally {
+      loadImages()
+      loadImageSets()
+      setIsLoading(false)
+      setLoadingMessage('Processing...')
+    }
+  }
+
   // Adds images selected by the user to the group to be used for batch detection
   async function addToBatch(e) {
     const files = e.target.files
@@ -615,9 +697,14 @@ export default function CellAnnotationTool() {
       setAnnotations(annoList)
 
       const channelRows = channelList.map(buildChannelRow)
-      setChannels(channelRows)
-      setMergedLayer(null)
-      setMergePreview(null)
+      const appliedLayer = appliedMergedLayers[imgId]
+      setChannels(appliedLayer
+        ? channelRows.map(channel => ({ ...channel, visible: false }))
+        : channelRows)
+      // Annotation reloads can finish after a recipe has been applied. Keep
+      // the session-level merged layer visible for this image instead of
+      // letting the asynchronous reload remove its row from the channel menu.
+      setMergedLayer(appliedLayer ? { ...appliedLayer, visible: true } : null)
 
       const annosByChannel = new Map()
       annoList.forEach(a => {
@@ -826,6 +913,41 @@ export default function CellAnnotationTool() {
         }
       })
       .catch(err => console.error("Error adding image to set:", err))
+  }
+
+  async function handleAddChannelsToImageSet(fileList) {
+    if (!activeImageSet || !fileList?.length) return
+    setIsLoading(true)
+    setLoadingMessage('Matching channel uploads to image set...')
+    try {
+      const formData = new FormData()
+      formData.append('image_set_id', activeImageSet.id)
+      Array.from(fileList).forEach(file => formData.append('files', file, file.name))
+      const res = await fetch(`${API_BASE_URL}/add-channels-to-image-set`, {
+        method: 'POST', body: formData, credentials: 'include'
+      })
+      const data = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(data?.error || 'Failed to add channels')
+
+      const unmatchedUploads = data.unmatched_uploads || []
+      const unmatchedRecords = data.unmatched_records || []
+      const errors = (data.errors || []).map(item => `${item.file}: ${item.error}`)
+      alert([
+        `Added ${data.added_count || 0} channel${data.added_count === 1 ? '' : 's'}.`,
+        unmatchedUploads.length ? `Uploads without a matching image:\n${unmatchedUploads.join('\n')}` : '',
+        unmatchedRecords.length ? `Images without a matching upload:\n${unmatchedRecords.map(item => item.name).join('\n')}` : '',
+        errors.length ? `Uploads that could not be added:\n${errors.join('\n')}` : '',
+      ].filter(Boolean).join('\n\n'))
+      await loadImageSets()
+      if (imageID && data.matched?.some(item => item.image_id === imageID)) {
+        await renderAnnotations(imageID, selectedChannelId)
+      }
+    } catch (err) {
+      alert(`Add channels failed: ${err.message}`)
+    } finally {
+      setIsLoading(false)
+      setLoadingMessage('Processing...')
+    }
   }
 
 
@@ -1638,13 +1760,16 @@ export default function CellAnnotationTool() {
 
   const [channels, setChannels] = useState([])
   const [mergedLayer, setMergedLayer] = useState(null)
-  const [mergePreview, setMergePreview] = useState(null)
   const mergedActive = mergedLayer?.imageId === imageID && mergedLayer.visible
   useEffect(() => {
     setMergedLayer(null)
-    setMergePreview(null)
-    setMergeModalOpen(false)
   }, [imageID])
+  useEffect(() => {
+    const appliedLayer = appliedMergedLayers[imageID]
+    if (!appliedLayer) return
+    setMergedLayer({ ...appliedLayer, visible: true })
+    setChannels(previous => previous.map(channel => ({ ...channel, visible: false })))
+  }, [appliedMergedLayers, imageID])
   const [selectedChannelId, setSelectedChannelId] = useState(null)
   const [selectedDetectionSettingId, setSelectedDetectionSettingId] = useState(null)
   // Which channel's nested detection-settings menu is open (settings gear on a channel row)
@@ -1686,7 +1811,6 @@ export default function CellAnnotationTool() {
   const [annotationModalOpen, setAnnotationModalOpen] = useState(false)
 
   const [exportModalOpen, setExportModalOpen] = useState(false)
-  const [mergeModalOpen, setMergeModalOpen] = useState(false)
   // Mutually exclusive: exactly one of these is non-null at a time.
   // Whichever one is set determines the export scope ("image" vs "image set").
   const [exportImageId, setExportImageId] = useState('')
@@ -1967,7 +2091,6 @@ export default function CellAnnotationTool() {
 
     setChannels(remainingChannels)
     setMergedLayer(null)
-    setMergePreview(null)
     setDetectionSettings(remainingSettings)
     setActiveRowIds(prevActive => prevActive.filter(id => !removedSettingIds.has(id)))
     setAnnotations(prevAnnos => prevAnnos.filter(ann => ann.channel_id !== targetChannel.id))
@@ -2144,34 +2267,10 @@ export default function CellAnnotationTool() {
     console.log(detectionSettings)
   }, [detectionSettings])
 
-  function buildMergeResult(mergedBoxes) {
-    return {
-      id: `merged:${imageID}`, imageId: imageID, channelName: 'Merged annotations', visible: true,
-      boxes: mergedBoxes.map(box => ({ ...box, channel_ids: box.channel_ids || [box.channel_id] })),
-      layers: channels.map(c => ({ id: c.id, src: c.channelUrl, color: c.channelColor })),
-      imageSize: { ...imageSize },
-    }
-  }
-
-  function showMergePreview(mergedBoxes) {
-    setMergePreview(buildMergeResult(mergedBoxes))
-    setMergeModalOpen(false)
-  }
-
-  function commitMerge(result) {
-    if (!result || result.imageId !== imageID) return
-    setMergedLayer(result)
-    setChannels(previous => previous.map(c => ({ ...c, visible: false })))
-    setImportedPreview(null)
-    setMergePreview(null)
-    setMergeModalOpen(false)
-    setIsCropping(false)
-  }
-
   const channelMenuRows = mergedLayer?.imageId === imageID ? [mergedLayer, ...channels] : channels
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', overflow: 'hidden' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100vw', overflow: 'hidden' }}>
       
       {/* Loading Overlay */}
       {isLoading && (
@@ -2193,15 +2292,18 @@ export default function CellAnnotationTool() {
       {/* Login Bar */}
       {!isLoggedIn && (
         <AppBar
-          position="sticky" 
+          position="fixed"
           sx={{ 
+            top: 0,
+            left: 0,
+            width: '100%',
             height: '64px', 
             display: 'flex', 
             flexDirection: 'row', 
             alignItems: 'center', 
             gap: 2, 
             px: 2,
-            zIndex: (theme) => theme.zIndex.drawer + 1 
+            zIndex: (theme) => theme.zIndex.appBar + 1
           }}
         >
           <TextField
@@ -2287,20 +2389,39 @@ export default function CellAnnotationTool() {
 
             <Tooltip title="Upload Images" arrow>
               <IconButton 
-                component="label" 
                 color="primary"
                 sx={{ p: 1.5 }}
+                onClick={event => setUploadMenuAnchor(event.currentTarget)}
               >
                 <FileUploadIcon />
-                <input 
-                  hidden 
-                  type="file" 
-                  accept=".tiff,.tif" 
-                  multiple 
-                  onChange={handleUpload}
-                />
               </IconButton>
             </Tooltip>
+            <Menu
+              anchorEl={uploadMenuAnchor}
+              open={Boolean(uploadMenuAnchor)}
+              onClose={() => setUploadMenuAnchor(null)}
+            >
+              <MenuItem onClick={() => { setUploadMenuAnchor(null); fileUploadInputRef.current?.click() }}>Choose TIFF files</MenuItem>
+              <MenuItem onClick={() => { setUploadMenuAnchor(null); folderUploadInputRef.current?.click() }}>Choose a TIFF folder</MenuItem>
+            </Menu>
+            <input
+              ref={fileUploadInputRef}
+              hidden
+              type="file"
+              multiple
+              accept=".tif,.tiff"
+              onChange={handleUpload}
+            />
+            <input
+              ref={folderUploadInputRef}
+              hidden
+              type="file"
+              multiple
+              accept=".tif,.tiff"
+              webkitdirectory="true"
+              directory="true"
+              onChange={handleUploadFolder}
+            />
 
             <Tooltip title="Download Image" arrow>
               <IconButton 
@@ -2337,6 +2458,7 @@ export default function CellAnnotationTool() {
               addImagesSelectionOpen={addImagesSelectionOpen}
               imageList={imageList}
               handleAddImageToSet={handleAddImageToSet}
+              handleAddChannelsToImageSet={handleAddChannelsToImageSet}
             />
 
             <Tooltip title="Crop Image" arrow>
@@ -2403,26 +2525,6 @@ export default function CellAnnotationTool() {
                 <input hidden type="file" accept=".txt" onChange={importAnnotations}/>
               </IconButton>
             </Tooltip>
-
-            <Tooltip title="Merge Annotations" arrow>
-              <IconButton color="primary" aria-label="Merge annotations"
-                onClick={() => setMergeModalOpen(true)} sx={{ p: 1.5 }}>
-                <MergeTypeIcon />
-              </IconButton>
-            </Tooltip>
-            <MergeAnnotationsModal
-              open={mergeModalOpen}
-              onClose={() => setMergeModalOpen(false)}
-              boxes={boxes}
-              channels={channels}
-              annotations={annotations}
-              onPreview={showMergePreview}
-              onMerge={mergedBoxes => commitMerge(buildMergeResult(mergedBoxes))}
-            />
-
-            <MergePreviewModal preview={mergePreview}
-              onClose={() => { setMergePreview(null); setMergeModalOpen(true) }}
-              onMerge={commitMerge} brightness={brightness} contrast={contrast} showLabels={showLabels} />
 
             {/* 2. EXPORT ANNOTATIONS (Triggers new Configuration Modal) */}
             <Tooltip title="Download Options" arrow>

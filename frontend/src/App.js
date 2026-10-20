@@ -1,8 +1,10 @@
-import { Box } from '@mui/material'
+import { useState } from 'react'
+import { Box, Button, Typography } from '@mui/material'
 import { createTheme, ThemeProvider } from '@mui/material/styles'
 import CssBaseline from '@mui/material/CssBaseline'
 import CellAnnotationTool from './pages/CellAnnotationTool'
 import ErrorBoundary from './components/ErrorBoundary'
+import CombineAnnotationsPage from './pages/CombineAnnotationsPage'
 
 const theme = createTheme({
   palette: {
@@ -118,11 +120,62 @@ const theme = createTheme({
 })
 
 function App() {
+  const [page, setPage] = useState('annotations')
+  const [appliedMergedLayers, setAppliedMergedLayers] = useState({})
+
+  const applyMergedLayer = result => {
+    if (!result?.imageId) return
+    setAppliedMergedLayers(previous => ({ ...previous, [result.imageId]: result }))
+  }
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
       <ErrorBoundary>
-        <CellAnnotationTool />
+        <Box sx={{ height: '100vh', overflow: 'hidden' }}>
+          <Box
+            component="nav"
+            aria-label="Application pages"
+            sx={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 48,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              px: 2,
+              bgcolor: 'rgba(10, 10, 15, 0.96)',
+              borderBottom: 1,
+              borderColor: 'divider',
+              zIndex: (theme) => theme.zIndex.appBar,
+            }}
+          >
+            <Typography variant="body2" sx={{ mr: 2, color: 'text.secondary' }}>
+              Cell Annotation
+            </Typography>
+            <Button
+              size="small"
+              variant={page === 'annotations' ? 'contained' : 'text'}
+              onClick={() => setPage('annotations')}
+            >
+              Annotation Tool
+            </Button>
+            <Button
+              size="small"
+              variant={page === 'combine' ? 'contained' : 'text'}
+              onClick={() => setPage('combine')}
+            >
+              Combine Annotations
+            </Button>
+          </Box>
+          <Box sx={{ height: 'calc(100vh - 48px)', pt: '48px', boxSizing: 'border-box' }}>
+            {page === 'annotations'
+              ? <CellAnnotationTool appliedMergedLayers={appliedMergedLayers} />
+              : <CombineAnnotationsPage onApplyMergedLayer={applyMergedLayer} />}
+          </Box>
+        </Box>
       </ErrorBoundary>
     </ThemeProvider>
   )

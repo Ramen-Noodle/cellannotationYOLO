@@ -1,5 +1,7 @@
 import sys
 import json
+import re
+from difflib import SequenceMatcher
 from annotation_export import annotation_rows, yolo_line, serialize_annotations, channel_label
 from werkzeug.utils import secure_filename  # ADD THIS AT TOP OF FILE
 from flask import Flask, request, jsonify, send_from_directory, send_file, g
@@ -54,6 +56,7 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # Session expire
 
 from database import db
 from models import User, ImageRecord, Channel, ImageSet, Annotation, LabelSet, Weights, DetectionSetting
+from annotation_merging import evaluate_recipe, RecipeError
 from flask_migrate import Migrate
 
 db.init_app(app)
@@ -1089,6 +1092,146 @@ def add_channel():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/add-channels-to-image-set', methods=['POST'])
+def add_channels_to_image_set():
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+    image_set_id = request.form.get('image_set_id')
+    files = request.files.getlist('files')
+    if not image_set_id or not files:
+        return jsonify({'error': 'Missing image_set_id or files'}), 400
+
+    image_set = ImageSet.query.filter_by(id=image_set_id, user_id=g.user.id).first()
+    if not image_set:
+        return jsonify({'error': 'Image set not found or unauthorized'}), 404
+
+    def file_key(filename):
+        stem = os.path.splitext(os.path.basename(filename or ''))[0].strip()
+        # Multi-channel uploads name the base channel "sample (C1)" while
+        # companion files are commonly named "sample" or "sample (C2)".
+        stem = re.sub(r'\s*\(c\d+\)$', '', stem, flags=re.IGNORECASE)
+        return stem.casefold()
+
+    def filename_score(first, second):
+        first_key = file_key(first)
+        second_key = file_key(second)
+        if not first_key or not second_key:
+            return 0.0
+        if first_key == second_key:
+            return 1.0
+        compact_first = re.sub(r'[^a-z0-9]', '', first_key)
+        compact_second = re.sub(r'[^a-z0-9]', '', second_key)
+        compact_score = SequenceMatcher(None, compact_first, compact_second).ratio()
+        direct_score = SequenceMatcher(None, first_key, second_key).ratio()
+        first_tokens = [token for token in re.split(r'[^a-z0-9]+', first_key) if token]
+        second_tokens = [token for token in re.split(r'[^a-z0-9]+', second_key) if token]
+        token_sequence_score = SequenceMatcher(None, first_tokens, second_tokens).ratio()
+        first_token_set = set(first_tokens)
+        second_token_set = set(second_tokens)
+        token_union = first_token_set | second_token_set
+        token_overlap_score = (
+            len(first_token_set & second_token_set) / len(token_union)
+            if len(token_union) >= 2 else 0.0
+        )
+        return max(compact_score, direct_score, token_sequence_score, token_overlap_score)
+
+    def record_filename(image):
+        channel = image.base_channel
+        return f'{channel.name}{channel.original_extension}' if channel else image.id
+
+    image_records = [image for image in image_set.images if image.base_channel]
+    records_by_key = {}
+    for image in image_records:
+        records_by_key.setdefault(file_key(record_filename(image)), []).append(image)
+    matched_record_ids = set()
+    matched = []
+    unmatched_uploads = []
+    errors = []
+    created_paths = []
+
+    try:
+        for file in files:
+            upload_name = os.path.basename(file.filename or '')
+            exact_candidates = [
+                candidate for candidate in records_by_key.get(file_key(upload_name), [])
+                if candidate.id not in matched_record_ids
+            ]
+            image_record = exact_candidates[0] if len(exact_candidates) == 1 else None
+            if len(exact_candidates) > 1:
+                image_record = max(
+                    exact_candidates,
+                    key=lambda candidate: filename_score(upload_name, record_filename(candidate)),
+                )
+            if not image_record:
+                candidates = sorted(
+                    ((filename_score(upload_name, record_filename(candidate)), candidate) for candidate in image_records
+                     if candidate.id not in matched_record_ids),
+                    key=lambda item: item[0], reverse=True
+                )
+                best_score = candidates[0][0] if candidates else 0.0
+                if best_score >= 0.70:
+                    image_record = candidates[0][1]
+                else:
+                    unmatched_uploads.append(upload_name)
+                    continue
+            if image_record.id in matched_record_ids:
+                errors.append({'file': upload_name, 'error': 'Multiple uploads matched the same image record'})
+                continue
+            ext = os.path.splitext(upload_name)[1].lower()
+            if not ext:
+                errors.append({'file': upload_name, 'error': 'File has no extension'})
+                continue
+            unique_id = str(uuid.uuid4())
+            image_dir = g.user.get_path('images')
+            original_path = os.path.join(image_dir, 'original', f'{unique_id}_orig{ext}')
+            original_save_path = os.path.join('data', original_path)
+            file.save(original_save_path)
+            created_paths.append(original_save_path)
+
+            with Image.open(original_save_path) as img:
+                dimensions = img.size
+            if dimensions != (image_record.width, image_record.height):
+                os.remove(original_save_path)
+                errors.append({'file': upload_name, 'error': f'Channel dimensions {dimensions[0]}x{dimensions[1]} do not match image dimensions {image_record.width}x{image_record.height}'})
+                continue
+
+            normalized_path = os.path.join(image_dir, 'normalized', f'{unique_id}_norm.png')
+            p_low, p_high = normalize_image(original_save_path, os.path.join('data', normalized_path))
+            channel = Channel(
+                id=unique_id,
+                image_id=image_record.id,
+                name=os.path.splitext(upload_name)[0],
+                order_index=(max((c.order_index or 0) for c in image_record.channels) + 1) if image_record.channels else 0,
+                is_base=False,
+                original_extension=ext,
+                original_path=original_path,
+                normalized_path=normalized_path,
+                p_low=int(p_low) if p_low is not None else None,
+                p_high=int(p_high) if p_high is not None else None,
+            )
+            db.session.add(channel)
+            matched_record_ids.add(image_record.id)
+            matched.append({'upload': upload_name, 'image_id': image_record.id, 'channel_id': unique_id})
+
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({'error': str(exc)}), 500
+
+    unmatched_records = [
+        {'image_id': image.id, 'name': f'{image.base_channel.name}{image.base_channel.original_extension}'}
+        for image in image_set.images
+        if image.id not in matched_record_ids and image.base_channel
+    ]
+    return jsonify({
+        'matched': matched,
+        'unmatched_uploads': unmatched_uploads,
+        'unmatched_records': unmatched_records,
+        'errors': errors,
+        'added_count': len(matched),
+    })
+
+
 @app.route('/load-channels', methods=['POST'])
 def load_channels():
     if not g.user:
@@ -1275,6 +1418,69 @@ def load_annotations():
         })
 
     return jsonify({"annotations": results}), 200
+
+
+@app.route('/combine/preview', methods=['POST'])
+def combine_preview():
+    """Evaluate a graph recipe for an image without changing saved data."""
+    if not g.user:
+        return jsonify({"error": "No active session"}), 401
+    data = request.get_json() or {}
+    image_id = data.get('image_id')
+    recipe = data.get('recipe')
+    if not image_id or not isinstance(recipe, dict):
+        return jsonify({"error": "image_id and recipe are required"}), 400
+    image = ImageRecord.query.filter_by(id=image_id, user_id=g.user.id).first()
+    if not image:
+        return jsonify({"error": "Image record not found or unauthorized"}), 404
+    channels = sorted(image.channels, key=lambda channel: channel.order_index or 0)
+    channel_by_id = {channel.id: channel for channel in channels}
+    channel_names = {channel.id: f'C{(channel.order_index or 0) + 1}' for channel in channels}
+    annotations = Annotation.query.filter(
+        Annotation.user_id == g.user.id,
+        Annotation.channel_id.in_(list(channel_by_id))
+    ).all() if channel_by_id else []
+    cells = []
+    for annotation in annotations:
+        setting = annotation.detection_setting
+        weights = db.session.get(Weights, setting.weights_id) if setting else None
+        labels = weights.label_set.labels if weights and weights.label_set else []
+        if isinstance(labels, dict):
+            labels = labels.get('labels') or []
+        channel_name = channel_names[annotation.channel_id]
+        for source, boxes in (('detected', annotation.annotations_detected or []), ('drawn', annotation.annotations_drawn or [])):
+            for box in boxes:
+                class_index = int(box.get('class', 0))
+                label = labels[class_index] if class_index < len(labels) else {}
+                cells.append({
+                    'x': float(box.get('x', 0)), 'y': float(box.get('y', 0)),
+                    'w': float(box.get('w', 0)), 'h': float(box.get('h', 0)),
+                    'confidence': box.get('confidence'), 'class': class_index,
+                    'name': label.get('name', f'Class {class_index}'),
+                    'color': label.get('color', '#ffffff'),
+                    'renderStyle': 'dashed' if source == 'detected' else 'solid',
+                    'channel': channel_name, 'channel_ids': [channel_name],
+                    'channel_id': annotation.channel_id,
+                    'node_id': f'input:{channel_name}:{label.get("name", f"Class {class_index}")}',
+                })
+    try:
+        result = evaluate_recipe(cells, recipe)
+    except RecipeError as error:
+        return jsonify({"error": str(error)}), 400
+    channel_palette = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
+    layers = [{
+        'id': channel.id,
+        'src': f"{request.host_url.rstrip('/')}/static/{channel.normalized_path}",
+        'color': channel_palette[index % len(channel_palette)],
+    } for index, channel in enumerate(channels)]
+    return jsonify({
+        'image_id': image.id,
+        'imageSize': {'width': image.width, 'height': image.height},
+        'layers': layers,
+        'boxes': result['boxes'],
+        'audit': result['audit'],
+        'recipe': recipe,
+    }), 200
 
 
 
