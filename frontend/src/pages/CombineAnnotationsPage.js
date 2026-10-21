@@ -44,7 +44,10 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
   const [loadingImages, setLoadingImages] = useState(true)
   const [loadingAnnotations, setLoadingAnnotations] = useState(false)
   const [error, setError] = useState('')
+  const [graphZoom, setGraphZoom] = useState(1)
+  const [graphPan, setGraphPan] = useState({ x: 0, y: 0 })
   const dragRef = useRef(null)
+  const panRef = useRef(null)
   const graphRef = useRef(null)
 
   useEffect(() => {
@@ -93,6 +96,8 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     setConnectionDrag(null)
     setEdgeDrag(null)
     setMergePreview(null)
+    setGraphZoom(1)
+    setGraphPan({ x: 0, y: 0 })
   }, [imageId])
 
   const channelById = useMemo(() => new Map(channels.map(channel => [channel.id, channel])), [channels])
@@ -122,13 +127,17 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
   const graphHeight = Math.max(560, ...displayNodes.map(node => node.y + 150))
 
   const moveNode = (event, node) => {
+    if (event.button !== 0) return
     event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId)
     dragRef.current = { id: node.id, created: node.created, start: { x: event.clientX, y: event.clientY, nodeX: node.x, nodeY: node.y } }
   }
   const dragNode = event => {
     const drag = dragRef.current
     if (!drag) return
-    const nextPosition = { x: Math.max(8, drag.start.nodeX + event.clientX - drag.start.x), y: Math.max(8, drag.start.nodeY + event.clientY - drag.start.y) }
+    const nextPosition = {
+      x: Math.max(8, drag.start.nodeX + (event.clientX - drag.start.x) / graphZoom),
+      y: Math.max(8, drag.start.nodeY + (event.clientY - drag.start.y) / graphZoom),
+    }
     if (drag.created) {
       setCreatedNodes(previous => previous.map(node => node.id === drag.id ? { ...node, ...nextPosition } : node))
     } else {
@@ -139,10 +148,45 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     if (dragRef.current && event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     dragRef.current = null
   }
+  const beginGraphPan = event => {
+    const isPanButton = event.button === 1 || event.button === 2 || (event.button === 0 && event.shiftKey)
+    if (!isPanButton) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    panRef.current = { startX: event.clientX, startY: event.clientY, pan: graphPan }
+  }
+  const dragGraphPan = event => {
+    if (!panRef.current) return
+    setGraphPan({
+      x: panRef.current.pan.x + event.clientX - panRef.current.startX,
+      y: panRef.current.pan.y + event.clientY - panRef.current.startY,
+    })
+  }
+  const finishGraphPan = event => {
+    if (panRef.current && event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    panRef.current = null
+  }
   const graphPoint = event => {
     const bounds = graphRef.current?.getBoundingClientRect()
     if (!bounds) return { x: event.clientX, y: event.clientY }
-    return { x: event.clientX - bounds.left + (graphRef.current?.scrollLeft || 0), y: event.clientY - bounds.top + (graphRef.current?.scrollTop || 0) }
+    return {
+      x: (event.clientX - bounds.left + (graphRef.current?.scrollLeft || 0) - graphPan.x) / graphZoom,
+      y: (event.clientY - bounds.top + (graphRef.current?.scrollTop || 0) - graphPan.y) / graphZoom,
+    }
+  }
+  const handleGraphWheel = event => {
+    event.preventDefault()
+    event.stopPropagation()
+    const bounds = graphRef.current?.getBoundingClientRect()
+    if (!bounds) return
+    const cursorX = event.clientX - bounds.left
+    const cursorY = event.clientY - bounds.top
+    const nextZoom = Math.max(0.35, Math.min(2.5, graphZoom * (event.deltaY < 0 ? 1.1 : 0.9)))
+    const graphX = (cursorX - graphPan.x) / graphZoom
+    const graphY = (cursorY - graphPan.y) / graphZoom
+    setGraphZoom(nextZoom)
+    setGraphPan({ x: cursorX - graphX * nextZoom, y: cursorY - graphY * nextZoom })
   }
   const beginConnection = (event, node) => {
     event.preventDefault()
@@ -303,8 +347,15 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
       {!loadingImages && images.length === 0 && !error && <Alert severity="info">No images are available yet.</Alert>}
       {loadingAnnotations && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}><CircularProgress size={18} /><Typography>Loading channel annotations…</Typography></Stack>}
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>Connect classes directly to relabel them. Connect classes to a rule node to merge with IoU or containment, then choose whether any compatible subset or all inputs are required.</Typography>
-      <Box ref={graphRef} onPointerMove={event => { dragNode(event); dragConnection(event) }} onPointerUp={event => { finishDrag(event); cancelConnection() }} onPointerCancel={event => { finishDrag(event); cancelConnection() }} onContextMenu={event => event.preventDefault()}
-        sx={{ position: 'relative', minHeight: 560, minWidth: graphWidth, bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'auto' }}>
+      <Box ref={graphRef} onPointerDown={beginGraphPan} onPointerMove={event => { dragGraphPan(event); dragNode(event); dragConnection(event) }} onPointerUp={event => { finishGraphPan(event); finishDrag(event); cancelConnection() }} onPointerCancel={event => { finishGraphPan(event); finishDrag(event); cancelConnection() }} onWheel={handleGraphWheel} onContextMenu={event => event.preventDefault()}
+        sx={{ position: 'relative', width: '100%', height: 560, bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'hidden', cursor: panRef.current ? 'grabbing' : 'default' }}>
+        <Box sx={{ position: 'absolute', zIndex: 2, top: 8, right: 8, display: 'flex', alignItems: 'center', gap: 0.5, p: 0.5, borderRadius: 1, bgcolor: 'rgba(16, 19, 27, 0.9)', border: 1, borderColor: 'divider' }} onPointerDown={event => event.stopPropagation()}>
+          <Box component="button" type="button" aria-label="Zoom out" onClick={() => setGraphZoom(previous => Math.max(0.35, previous * 0.8))} sx={{ width: 28, height: 26, border: 0, borderRadius: 0.5, bgcolor: 'action.hover', color: 'text.primary', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>−</Box>
+          <Typography variant="caption" sx={{ minWidth: 42, textAlign: 'center' }}>{Math.round(graphZoom * 100)}%</Typography>
+          <Box component="button" type="button" aria-label="Zoom in" onClick={() => setGraphZoom(previous => Math.min(2.5, previous * 1.25))} sx={{ width: 28, height: 26, border: 0, borderRadius: 0.5, bgcolor: 'action.hover', color: 'text.primary', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>+</Box>
+          <Box component="button" type="button" aria-label="Reset graph view" onClick={() => { setGraphZoom(1); setGraphPan({ x: 0, y: 0 }) }} sx={{ height: 26, px: 0.75, border: 0, borderRadius: 0.5, bgcolor: 'action.hover', color: 'text.primary', cursor: 'pointer', fontSize: 11 }}>Reset</Box>
+        </Box>
+        <Box sx={{ position: 'absolute', left: graphPan.x, top: graphPan.y, width: graphWidth, height: graphHeight, transform: `scale(${graphZoom})`, transformOrigin: '0 0' }}>
         {channels.map((channel, index) => <Typography key={channel.id} variant="caption" sx={{ position: 'absolute', top: 8, left: 32 + index * 250, color: CHANNEL_COLORS[index % CHANNEL_COLORS.length], fontWeight: 700 }}>{channelName(channel)}</Typography>)}
         <svg width={graphWidth} height={graphHeight} aria-hidden="true" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'visible' }}>
           <defs><marker id="combine-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8" /></marker></defs>
@@ -356,6 +407,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
         </Box>)}
         {!loadingAnnotations && imageId && displayNodes.length === 0 && <Typography color="text.secondary" sx={{ p: 3 }}>This image has no labeled annotation classes.</Typography>}
         {!imageId && !loadingImages && <Typography color="text.secondary" sx={{ p: 3 }}>Choose an image to begin.</Typography>}
+        </Box>
       </Box>
       {selectedImage && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{selectedImage.name} · {channels.length} channel{channels.length === 1 ? '' : 's'} · {displayNodes.length} node{displayNodes.length === 1 ? '' : 's'} · {connections.length} connection{connections.length === 1 ? '' : 's'}</Typography>}
       <MergePreviewModal

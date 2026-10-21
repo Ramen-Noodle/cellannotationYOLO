@@ -37,8 +37,6 @@ def _channels(cell):
 
 
 def _matches(first, second, rule):
-    if _channels(first) & _channels(second):
-        return False
     iou, containment = _overlap(first, second)
     threshold = float(rule.get('threshold', 0.25))
     if rule.get('rule_type', 'iou') == 'containment':
@@ -164,7 +162,7 @@ def _compatible_groups(candidates, rule_node, input_ids):
     for index, first in enumerate(candidates):
         for other in range(index + 1, len(candidates)):
             second = candidates[other]
-            if first['node_id'] == second['node_id'] or _channels(first) & _channels(second):
+            if first['node_id'] == second['node_id']:
                 continue
             if _matches(first, second, rule_node):
                 iou, containment = _overlap(first, second)
@@ -176,8 +174,6 @@ def _compatible_groups(candidates, rule_node, input_ids):
         first_group, second_group = groups[first_root], groups[second_root]
         first_cells = [candidates[index] for index in first_group]
         second_cells = [candidates[index] for index in second_group]
-        if set().union(*(_channels(cell) for cell in first_cells)) & set().union(*(_channels(cell) for cell in second_cells)):
-            continue
         if not all(_matches(first, second, rule_node) for first in first_cells for second in second_cells):
             continue
         parent[second_root] = first_root
