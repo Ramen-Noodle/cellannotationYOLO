@@ -240,6 +240,8 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
         if output_node and output_node.get('output_mappings'):
             mapping = next((candidate for candidate in output_node['output_mappings']
                             if set(candidate.get('sources') or []) == set(group_input_ids)), None)
+        if mapping and mapping.get('exclude') is True:
+            continue
         merged['name'] = (mapping.get('label') if mapping and mapping.get('label') else _node_label(output_node)) if output_node else _node_label(rule_node)
         if output_node:
             merged['color'] = _node_color(mapping, _node_color(output_node, merged.get('color', '#ffffff'))) if mapping else _node_color(output_node, merged.get('color', '#ffffff'))

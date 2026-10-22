@@ -10,6 +10,7 @@ const API_BASE_URL = 'http://10.80.24.12:5002'
 const CHANNEL_COLORS = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
 const CLASS_NODE_DEFAULT_COLOR = '#cbd5e1'
 const NEW_OUTPUT_CLASS = '__new_output_class__'
+const NO_OUTPUT_CLASS = '__no_output_class__'
 
 function channelName(channel) { return `C${(channel.order_index ?? 0) + 1}` }
 function sourceNodeId(channel, annotation, className) {
@@ -270,7 +271,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
       const key = sources.slice().sort().join('|')
       const prior = existingByKey.get(key)
       const outputClass = outputClasses.find(candidate => candidate.name === prior?.label)
-      return { id: key, key, sources, classId: outputClass?.id || NEW_OUTPUT_CLASS, label: outputClass?.name || prior?.label || '', color: outputClass?.color || prior?.color || CLASS_NODE_DEFAULT_COLOR }
+      return { id: key, key, sources, classId: prior?.exclude ? NO_OUTPUT_CLASS : (outputClass?.id || NEW_OUTPUT_CLASS), label: outputClass?.name || prior?.label || '', color: outputClass?.color || prior?.color || CLASS_NODE_DEFAULT_COLOR }
     })
     setOutputTable({ nodeId: node.id, sourceIds, rows })
   }
@@ -285,6 +286,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     const classById = new Map(outputClasses.map(outputClass => [outputClass.id, outputClass]))
     const nextClasses = [...outputClasses]
     const mappings = outputTable.rows.map(({ sources, classId, label, color }) => {
+      if (classId === NO_OUTPUT_CLASS) return { sources, exclude: true }
       let outputClass = classById.get(classId)
       if (!outputClass && label.trim()) {
         outputClass = nextClasses.find(candidate => candidate.name === label.trim())
@@ -334,6 +336,10 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     const label = source.sublabels?.length ? `${source.name} · ${source.sublabels.join(', ')}` : source.name
     return source.channel ? `${source.channel}: ${label}` : label
   }
+  const draftOutputClasses = (outputTable?.rows || [])
+    .filter(row => row.classId === NEW_OUTPUT_CLASS && row.label.trim())
+    .map(row => ({ id: `draft:${row.key}`, name: row.label.trim(), color: row.color }))
+  const selectableOutputClasses = [...outputClasses, ...draftOutputClasses.filter(draft => !outputClasses.some(outputClass => outputClass.name === draft.name))]
   const buildRecipe = () => ({
     version: 2,
     nodes: displayNodes.map(node => node.type === 'rule'
@@ -488,7 +494,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
               const row = outputTable?.rows[index]
               if (!row) return
               if (field === 'classId') {
-                const outputClass = outputClasses.find(candidate => candidate.id === value)
+                const outputClass = selectableOutputClasses.find(candidate => candidate.id === value)
                 setOutputTable(previous => previous ? { ...previous, rows: previous.rows.map((item, itemIndex) => itemIndex === index
                   ? { ...item, classId: value, label: outputClass?.name || '', color: outputClass?.color || CLASS_NODE_DEFAULT_COLOR }
                   : item) } : previous)
@@ -506,8 +512,9 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
                   <Select size="small" value={row.classId} onChange={event => {
                     onChange('classId', event.target.value)
                   }} sx={{ minWidth: 140, flex: 1 }}>
-                    {outputClasses.map(outputClass => <MenuItem key={outputClass.id} value={outputClass.id}>{outputClass.name}</MenuItem>)}
+                    {selectableOutputClasses.map(outputClass => <MenuItem key={outputClass.id} value={outputClass.id}>{outputClass.name}</MenuItem>)}
                     <MenuItem value={NEW_OUTPUT_CLASS}>Define new class</MenuItem>
+                    <MenuItem value={NO_OUTPUT_CLASS}>No output</MenuItem>
                   </Select>
                   {isNew && <TextField size="small" placeholder="Class name" value={row.label} onChange={event => updateOutputTableRow(row.key, 'label', event.target.value)} />}
                 </Box>
