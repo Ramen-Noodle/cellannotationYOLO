@@ -83,7 +83,7 @@ const RowMenu = ({ rows, onChange, onDelete, onAdd, onSelect, selectedRowId, ren
                   {renderRowTemplate(row, index, (fieldName, value) => onChange(index, fieldName, value))}
                 </Box>
 
-                <IconButton 
+                {onDelete && <IconButton
                   color="error" 
                   onClick={(e) => {
                     e.stopPropagation() 
@@ -91,7 +91,7 @@ const RowMenu = ({ rows, onChange, onDelete, onAdd, onSelect, selectedRowId, ren
                   }}
                 >
                   <DeleteIcon />
-                </IconButton>
+                </IconButton>}
               </Box>
             )
           })}
@@ -99,7 +99,7 @@ const RowMenu = ({ rows, onChange, onDelete, onAdd, onSelect, selectedRowId, ren
       </Box>
 
       {/* Minimalistic Plus Icon Button to Add Row */}
-      <Box display="flex" justifyContent="flex-start">
+      {onAdd && <Box display="flex" justifyContent="flex-start">
         <Tooltip title="Add New Item" arrow placement="right">
           <IconButton 
             color="primary" 
@@ -110,7 +110,7 @@ const RowMenu = ({ rows, onChange, onDelete, onAdd, onSelect, selectedRowId, ren
             <AddCircleIcon fontSize="medium" />
           </IconButton>
         </Tooltip>
-      </Box>
+      </Box>}
     </Box>
   )
 }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Box, Button, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
 import MergePreviewModal from '../components/modals/MergePreviewModal'
+import RowMenu from '../components/RowMenu'
 
 const API_BASE_URL = 'http://10.80.24.12:5002'
 // Keep the image-layer tint palette identical to the main canvas. These
@@ -8,6 +9,7 @@ const API_BASE_URL = 'http://10.80.24.12:5002'
 // graph nodes separately.
 const CHANNEL_COLORS = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
 const CLASS_NODE_DEFAULT_COLOR = '#cbd5e1'
+const NEW_OUTPUT_CLASS = '__new_output_class__'
 
 function channelName(channel) { return `C${(channel.order_index ?? 0) + 1}` }
 function sourceNodeId(channel, annotation, className) {
@@ -47,6 +49,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
   const [graphZoom, setGraphZoom] = useState(1)
   const [graphPan, setGraphPan] = useState({ x: 0, y: 0 })
   const [outputTable, setOutputTable] = useState(null)
+  const [outputClasses, setOutputClasses] = useState([])
   const dragRef = useRef(null)
   const panRef = useRef(null)
   const graphRef = useRef(null)
@@ -98,6 +101,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     setEdgeDrag(null)
     setMergePreview(null)
     setOutputTable(null)
+    setOutputClasses([])
     setGraphZoom(1)
     setGraphPan({ x: 0, y: 0 })
   }, [imageId])
@@ -265,7 +269,8 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     const rows = outputCombinations(sourceIds).map(sources => {
       const key = sources.slice().sort().join('|')
       const prior = existingByKey.get(key)
-      return { key, sources, label: prior?.label || node.name, color: prior?.color || node.color || CLASS_NODE_DEFAULT_COLOR }
+      const outputClass = outputClasses.find(candidate => candidate.name === prior?.label)
+      return { id: key, key, sources, classId: outputClass?.id || NEW_OUTPUT_CLASS, label: outputClass?.name || prior?.label || '', color: outputClass?.color || prior?.color || CLASS_NODE_DEFAULT_COLOR }
     })
     setOutputTable({ nodeId: node.id, sourceIds, rows })
   }
@@ -277,8 +282,26 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
   }
   const saveOutputTable = () => {
     if (!outputTable) return
+    const classById = new Map(outputClasses.map(outputClass => [outputClass.id, outputClass]))
+    const nextClasses = [...outputClasses]
+    const mappings = outputTable.rows.map(({ sources, classId, label, color }) => {
+      let outputClass = classById.get(classId)
+      if (!outputClass && label.trim()) {
+        outputClass = nextClasses.find(candidate => candidate.name === label.trim())
+        if (!outputClass) {
+          outputClass = { id: `output-class:${Date.now()}:${nextClasses.length}`, name: label.trim(), color }
+          nextClasses.push(outputClass)
+        }
+      }
+      if (outputClass) {
+        classById.set(outputClass.id, outputClass)
+        return { sources, class_id: outputClass.id, label: outputClass.name, color: outputClass.color }
+      }
+      return { sources, label: label.trim(), color }
+    })
+    setOutputClasses(nextClasses)
     setCreatedNodes(previous => previous.map(node => node.id === outputTable.nodeId
-      ? { ...node, outputMappings: outputTable.rows.map(({ sources, label, color }) => ({ sources, label, color })) }
+      ? { ...node, outputMappings: mappings }
       : node))
     setOutputTable(null)
   }
@@ -305,7 +328,12 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, threshold: Number.isFinite(numericValue) ? numericValue : 0 } : node))
   }
   const selectedImage = images.find(image => image.id === imageId)
-  const existingOutputNames = [...new Set(createdNodes.filter(node => node.role === 'output').map(node => node.name).filter(Boolean))]
+  const sourceDisplayName = sourceId => {
+    const source = displayNodes.find(node => node.id === sourceId)
+    if (!source) return sourceId
+    const label = source.sublabels?.length ? `${source.name} · ${source.sublabels.join(', ')}` : source.name
+    return source.channel ? `${source.channel}: ${label}` : label
+  }
   const buildRecipe = () => ({
     version: 2,
     nodes: displayNodes.map(node => node.type === 'rule'
@@ -454,24 +482,39 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
       <Dialog open={Boolean(outputTable)} onClose={() => setOutputTable(null)} fullWidth maxWidth="md">
         <DialogTitle>{displayNodes.find(node => node.id === outputTable?.nodeId)?.name || ''}</DialogTitle>
         <DialogContent dividers>
-          <Stack spacing={1}>
-            {(outputTable?.rows || []).map(row => {
-              const isExisting = existingOutputNames.includes(row.label)
-              return <Box key={row.key} sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(180px, 0.8fr) 44px', gap: 1, alignItems: 'center' }}>
-                <Typography variant="body2" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.sources.map(sourceId => displayNodes.find(node => node.id === sourceId)?.name || sourceId).join(' + ')}>
-                  {row.sources.map(sourceId => displayNodes.find(node => node.id === sourceId)?.name || sourceId).join(' + ')}
+          <RowMenu
+            rows={outputTable?.rows || []}
+            onChange={(index, field, value) => {
+              const row = outputTable?.rows[index]
+              if (!row) return
+              if (field === 'classId') {
+                const outputClass = outputClasses.find(candidate => candidate.id === value)
+                setOutputTable(previous => previous ? { ...previous, rows: previous.rows.map((item, itemIndex) => itemIndex === index
+                  ? { ...item, classId: value, label: outputClass?.name || '', color: outputClass?.color || CLASS_NODE_DEFAULT_COLOR }
+                  : item) } : previous)
+              } else updateOutputTableRow(row.key, field, value)
+            }}
+            headers={['Sources', 'Output class', 'Color']}
+            gridTemplateColumns="minmax(0, 1fr) minmax(220px, 0.8fr) 44px"
+            renderRowTemplate={(row, rowIndex, onChange) => {
+              const isNew = row.classId === NEW_OUTPUT_CLASS
+              return <Stack direction="row" spacing={1} alignItems="center" sx={{ width: '100%' }}>
+                <Typography variant="body2" sx={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.sources.map(sourceDisplayName).join(' + ')}>
+                  {row.sources.map(sourceDisplayName).join(' + ')}
                 </Typography>
-                <Box sx={{ display: 'flex', gap: 0.75 }}>
-                  <Select size="small" value={isExisting ? row.label : '__custom__'} onChange={event => updateOutputTableRow(row.key, 'label', event.target.value === '__custom__' ? '' : event.target.value)} sx={{ minWidth: 120, flex: 1 }}>
-                    {existingOutputNames.map(name => <MenuItem key={name} value={name}>{name}</MenuItem>)}
-                    <MenuItem value="__custom__">Custom</MenuItem>
+                <Box sx={{ display: 'flex', gap: 0.75, minWidth: 220 }}>
+                  <Select size="small" value={row.classId} onChange={event => {
+                    onChange('classId', event.target.value)
+                  }} sx={{ minWidth: 140, flex: 1 }}>
+                    {outputClasses.map(outputClass => <MenuItem key={outputClass.id} value={outputClass.id}>{outputClass.name}</MenuItem>)}
+                    <MenuItem value={NEW_OUTPUT_CLASS}>Define new class</MenuItem>
                   </Select>
-                  {!isExisting && <TextField size="small" value={row.label} onChange={event => updateOutputTableRow(row.key, 'label', event.target.value)} />}
+                  {isNew && <TextField size="small" placeholder="Class name" value={row.label} onChange={event => updateOutputTableRow(row.key, 'label', event.target.value)} />}
                 </Box>
-                <Box component="input" type="color" aria-label="Output color" value={row.color} onChange={event => updateOutputTableRow(row.key, 'color', event.target.value)} sx={{ width: 36, height: 32, p: 0, border: 0, bgcolor: 'transparent', cursor: 'pointer' }} />
-              </Box>
-            })}
-          </Stack>
+                <Box component="input" type="color" aria-label="Output color" value={row.color} disabled={!isNew} onChange={event => onChange('color', event.target.value)} sx={{ width: 36, height: 32, p: 0, border: 0, bgcolor: 'transparent', cursor: isNew ? 'pointer' : 'default', opacity: isNew ? 1 : 0.55 }} />
+              </Stack>
+            }}
+          />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setOutputTable(null)}>Cancel</Button>
