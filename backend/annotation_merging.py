@@ -190,13 +190,10 @@ def _compatible_groups(candidates, rule_node, input_ids):
         parent[second_root] = first_root
         groups[first_root] |= groups.pop(second_root)
 
-    require_all = rule_node.get('apply_to_subsets') is False
     valid_groups = []
     for group_indices in groups.values():
         group = [candidates[index] for index in sorted(group_indices)]
         input_members = {_input_node_id(cell, input_ids) for cell in group}
-        if len(group) < 2 or (require_all and input_members != set(input_ids)):
-            continue
         valid_groups.append(group)
     return valid_groups
 
@@ -259,7 +256,7 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
     if consumed:
         active[:] = [cell for cell in active if cell['source_index'] not in consumed]
         active.extend(produced)
-    audit.append({'operation': 'rule', 'rule': rule_id, 'inputs': sorted(input_ids), 'produced': len(produced), 'consumed': len(consumed), 'reserved': len(reserved_source_indices), 'apply_to_subsets': rule_node.get('apply_to_subsets') is not False})
+    audit.append({'operation': 'rule', 'rule': rule_id, 'inputs': sorted(input_ids), 'produced': len(produced), 'consumed': len(consumed), 'reserved': len(reserved_source_indices)})
 
 
 def evaluate_recipe(cells, recipe):

@@ -316,13 +316,13 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
       return [...previous, {
         id: `${type === 'rule' ? 'rule' : 'output'}:${id}`, created: true, type, role: type === 'rule' ? 'rule' : 'output', name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
         outputMappings: type === 'class' ? [] : undefined,
-        ruleType: 'iou', participation: 'any', threshold: 0.25, color: CLASS_NODE_DEFAULT_COLOR, x: 32 + channels.length * 250 + column * 230, y: 32 + row * 116,
+        ruleType: 'iou', threshold: 0.25, color: CLASS_NODE_DEFAULT_COLOR, x: 32 + channels.length * 250 + column * 230, y: 32 + row * 116,
       }]
     })
   }
   const updateNodeName = (nodeId, name) => setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, name } : node))
   const updateNodeRule = (nodeId, field, value) => {
-    if (field === 'ruleType' || field === 'participation') {
+    if (field === 'ruleType') {
       setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, [field]: value } : node))
       return
     }
@@ -343,7 +343,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
   const buildRecipe = () => ({
     version: 2,
     nodes: displayNodes.map(node => node.type === 'rule'
-      ? { id: node.id, type: 'rule', rule_type: node.ruleType, threshold: node.threshold, apply_to_subsets: node.participation === 'any' }
+      ? { id: node.id, type: 'rule', rule_type: node.ruleType, threshold: node.threshold }
       : { id: node.id, type: 'class', role: node.role, channel: node.channel, label: node.name, color: node.color, output_mappings: node.outputMappings || [] }),
     edges: connections.map(connection => ({ source: connection.source, target: connection.target })),
   })
@@ -425,7 +425,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
       {error && <Alert severity="info" sx={{ mb: 2 }}>{error}</Alert>}
       {!loadingImages && images.length === 0 && !error && <Alert severity="info">No images are available yet.</Alert>}
       {loadingAnnotations && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}><CircularProgress size={18} /><Typography>Loading channel annotations…</Typography></Stack>}
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>Connect classes directly to relabel them. Connect classes to a rule node to merge with IoU or containment, then choose whether any compatible subset or all inputs are required.</Typography>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>Connect classes directly to relabel them. Connect classes to a rule node to merge with IoU or containment, then choose output classes in the output table.</Typography>
       <Box ref={graphRef} onPointerDown={beginGraphPan} onPointerMove={event => { dragGraphPan(event); dragNode(event); dragConnection(event) }} onPointerUp={event => { finishGraphPan(event); finishDrag(event); cancelConnection() }} onPointerCancel={event => { finishGraphPan(event); finishDrag(event); cancelConnection() }} onWheel={handleGraphWheel} onContextMenu={event => event.preventDefault()}
         sx={{ position: 'relative', width: '100%', height: 560, bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'hidden', cursor: panRef.current ? 'grabbing' : 'default' }}>
         <Box sx={{ position: 'absolute', zIndex: 2, top: 8, right: 8, display: 'flex', alignItems: 'center', gap: 0.5, p: 0.5, borderRadius: 1, bgcolor: 'rgba(16, 19, 27, 0.9)', border: 1, borderColor: 'divider' }} onPointerDown={event => event.stopPropagation()}>
@@ -471,13 +471,6 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
                   </FormControl>
                   <TextField size="small" type="number" label="Threshold" value={node.threshold} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => updateNodeRule(node.id, 'threshold', event.target.value)} onPointerDown={event => event.stopPropagation()} sx={{ width: 82, '& input': { py: 0.7, px: 0.5, color: 'text.primary', fontSize: 12 }, '& label': { fontSize: 10 } }} />
                 </Stack>
-                <FormControl size="small" fullWidth onPointerDown={event => event.stopPropagation()}>
-                  <InputLabel id={`rule-participation-${node.id}`}>Inputs</InputLabel>
-                  <Select labelId={`rule-participation-${node.id}`} label="Inputs" value={node.participation} onChange={event => updateNodeRule(node.id, 'participation', event.target.value)} sx={{ color: 'text.primary', '& .MuiSelect-select': { py: 0.7, px: 0.75, fontSize: 11 } }}>
-                    <MenuItem value="any">Any compatible subset</MenuItem>
-                    <MenuItem value="all">Require all inputs</MenuItem>
-                  </Select>
-                </FormControl>
               </Stack>
             : !node.created && <Typography variant="caption" title={`${channelById.get(node.channelId)?.name || ''} · setting ${node.detectionSettingId}`} sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: CHANNEL_COLORS[node.channelIndex % CHANNEL_COLORS.length] }}>{`${channelName(channels[node.channelIndex])} · ${String(node.detectionSettingId).slice(0, 8)} · ${node.count} detections`}</Typography>}
         </Box>)}
