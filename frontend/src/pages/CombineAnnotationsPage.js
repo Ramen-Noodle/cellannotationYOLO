@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Box, Button, CircularProgress, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
+import { Alert, Box, Button, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
 import MergePreviewModal from '../components/modals/MergePreviewModal'
 
-const API_BASE_URL = 'http://10.80.24.12:5001'
+const API_BASE_URL = 'http://10.80.24.12:5002'
 // Keep the image-layer tint palette identical to the main canvas. These
 // colors belong to channels; annotation/class colors are kept on boxes and
 // graph nodes separately.
@@ -46,6 +46,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
   const [error, setError] = useState('')
   const [graphZoom, setGraphZoom] = useState(1)
   const [graphPan, setGraphPan] = useState({ x: 0, y: 0 })
+  const [outputTable, setOutputTable] = useState(null)
   const dragRef = useRef(null)
   const panRef = useRef(null)
   const graphRef = useRef(null)
@@ -96,6 +97,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     setConnectionDrag(null)
     setEdgeDrag(null)
     setMergePreview(null)
+    setOutputTable(null)
     setGraphZoom(1)
     setGraphPan({ x: 0, y: 0 })
   }, [imageId])
@@ -238,6 +240,48 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     setCreatedNodes(previous => previous.filter(node => node.id !== nodeId))
     setConnections(previous => previous.filter(connection => connection.source !== nodeId && connection.target !== nodeId))
   }
+  const outputSources = outputNodeId => {
+    const visited = new Set()
+    const visit = nodeId => {
+      if (visited.has(nodeId)) return []
+      visited.add(nodeId)
+      const node = displayNodes.find(candidate => candidate.id === nodeId)
+      if (!node || node.type !== 'rule') return [nodeId]
+      return connections.filter(connection => connection.target === nodeId).flatMap(connection => visit(connection.source))
+    }
+    return [...new Set(connections.filter(connection => connection.target === outputNodeId).flatMap(connection => visit(connection.source)))]
+  }
+  const outputCombinations = sourceIds => {
+    const combinations = []
+    for (let mask = 1; mask < (1 << sourceIds.length); mask += 1) {
+      combinations.push(sourceIds.filter((_, index) => mask & (1 << index)))
+    }
+    return combinations
+  }
+  const openOutputTable = node => {
+    const sourceIds = outputSources(node.id)
+    const existing = node.outputMappings || []
+    const existingByKey = new Map(existing.map(mapping => [mapping.sources.slice().sort().join('|'), mapping]))
+    const rows = outputCombinations(sourceIds).map(sources => {
+      const key = sources.slice().sort().join('|')
+      const prior = existingByKey.get(key)
+      return { key, sources, label: prior?.label || node.name, color: prior?.color || node.color || CLASS_NODE_DEFAULT_COLOR }
+    })
+    setOutputTable({ nodeId: node.id, sourceIds, rows })
+  }
+  const updateOutputTableRow = (key, field, value) => {
+    setOutputTable(previous => previous ? {
+      ...previous,
+      rows: previous.rows.map(row => row.key === key ? { ...row, [field]: value } : row),
+    } : previous)
+  }
+  const saveOutputTable = () => {
+    if (!outputTable) return
+    setCreatedNodes(previous => previous.map(node => node.id === outputTable.nodeId
+      ? { ...node, outputMappings: outputTable.rows.map(({ sources, label, color }) => ({ sources, label, color })) }
+      : node))
+    setOutputTable(null)
+  }
   const addNode = type => {
     setCreatedNodes(previous => {
       const index = previous.length
@@ -246,12 +290,12 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
       const column = Math.floor(index / 3)
       return [...previous, {
         id: `${type === 'rule' ? 'rule' : 'output'}:${id}`, created: true, type, role: type === 'rule' ? 'rule' : 'output', name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
+        outputMappings: type === 'class' ? [] : undefined,
         ruleType: 'iou', participation: 'any', threshold: 0.25, color: CLASS_NODE_DEFAULT_COLOR, x: 32 + channels.length * 250 + column * 230, y: 32 + row * 116,
       }]
     })
   }
   const updateNodeName = (nodeId, name) => setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, name } : node))
-  const updateNodeColor = (nodeId, color) => setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, color } : node))
   const updateNodeRule = (nodeId, field, value) => {
     if (field === 'ruleType' || field === 'participation') {
       setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, [field]: value } : node))
@@ -261,11 +305,12 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, threshold: Number.isFinite(numericValue) ? numericValue : 0 } : node))
   }
   const selectedImage = images.find(image => image.id === imageId)
+  const existingOutputNames = [...new Set(createdNodes.filter(node => node.role === 'output').map(node => node.name).filter(Boolean))]
   const buildRecipe = () => ({
     version: 2,
     nodes: displayNodes.map(node => node.type === 'rule'
       ? { id: node.id, type: 'rule', rule_type: node.ruleType, threshold: node.threshold, apply_to_subsets: node.participation === 'any' }
-      : { id: node.id, type: 'class', role: node.role, channel: node.channel, label: node.name, color: node.color }),
+      : { id: node.id, type: 'class', role: node.role, channel: node.channel, label: node.name, color: node.color, output_mappings: node.outputMappings || [] }),
     edges: connections.map(connection => ({ source: connection.source, target: connection.target })),
   })
   const formatPreview = data => {
@@ -331,7 +376,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
           <Typography color="text.secondary" variant="body2">Connect loaded classes into user-created nodes to define merge relationships.</Typography>
         </Box>
         <Stack direction="row" spacing={1}>
-          <Box component="button" type="button" onClick={() => addNode('class')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: 'divider', borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add class</Box>
+          <Box component="button" type="button" onClick={() => addNode('class')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: 'divider', borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add output</Box>
           <Box component="button" type="button" onClick={() => addNode('rule')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: CLASS_NODE_DEFAULT_COLOR, borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add rule</Box>
           <Button variant="outlined" size="small" onClick={previewMergedAnnotations} disabled={!imageId || loadingAnnotations || previewLoading}>{previewLoading ? 'Previewing…' : 'Preview'}</Button>
         </Stack>
@@ -379,10 +424,7 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
           {node.created
             ? <Box component="input" aria-label={node.type === 'rule' ? 'Rule output class name' : 'Class name'} value={node.name} onChange={event => updateNodeName(node.id, event.target.value)} onPointerDown={event => event.stopPropagation()} title={node.name} sx={{ display: 'block', width: '100%', p: 0, border: 0, outline: 0, bgcolor: 'transparent', color: node.color, font: 'inherit', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} />
             : <Typography variant="body2" title={node.sublabels?.length ? `${node.name} · ${node.sublabels.join(', ')}` : node.name} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.sublabels?.length ? `${node.name} · ${node.sublabels.join(', ')}` : node.name}</Typography>}
-          {node.created && node.type === 'class' && <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 0.75 }} onPointerDown={event => event.stopPropagation()}>
-            <Typography variant="caption" color="text.secondary">Class color</Typography>
-            <Box component="input" type="color" aria-label="Class color" value={node.color} onChange={event => updateNodeColor(node.id, event.target.value)} sx={{ width: 28, height: 22, p: 0, border: 0, bgcolor: 'transparent', cursor: 'pointer' }} />
-          </Stack>}
+          {node.created && node.role === 'output' && <Button size="small" variant="outlined" onClick={event => { event.stopPropagation(); openOutputTable(node) }} onPointerDown={event => event.stopPropagation()} sx={{ mt: 0.75 }}>Edit table</Button>}
           {node.created && node.type === 'rule'
             ? <Stack spacing={0.75} sx={{ mt: 0.75 }}>
                 <Stack direction="row" spacing={0.75}>
@@ -409,6 +451,33 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
         {!imageId && !loadingImages && <Typography color="text.secondary" sx={{ p: 3 }}>Choose an image to begin.</Typography>}
         </Box>
       </Box>
+      <Dialog open={Boolean(outputTable)} onClose={() => setOutputTable(null)} fullWidth maxWidth="md">
+        <DialogTitle>{displayNodes.find(node => node.id === outputTable?.nodeId)?.name || ''}</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1}>
+            {(outputTable?.rows || []).map(row => {
+              const isExisting = existingOutputNames.includes(row.label)
+              return <Box key={row.key} sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(180px, 0.8fr) 44px', gap: 1, alignItems: 'center' }}>
+                <Typography variant="body2" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.sources.map(sourceId => displayNodes.find(node => node.id === sourceId)?.name || sourceId).join(' + ')}>
+                  {row.sources.map(sourceId => displayNodes.find(node => node.id === sourceId)?.name || sourceId).join(' + ')}
+                </Typography>
+                <Box sx={{ display: 'flex', gap: 0.75 }}>
+                  <Select size="small" value={isExisting ? row.label : '__custom__'} onChange={event => updateOutputTableRow(row.key, 'label', event.target.value === '__custom__' ? '' : event.target.value)} sx={{ minWidth: 120, flex: 1 }}>
+                    {existingOutputNames.map(name => <MenuItem key={name} value={name}>{name}</MenuItem>)}
+                    <MenuItem value="__custom__">Custom</MenuItem>
+                  </Select>
+                  {!isExisting && <TextField size="small" value={row.label} onChange={event => updateOutputTableRow(row.key, 'label', event.target.value)} />}
+                </Box>
+                <Box component="input" type="color" aria-label="Output color" value={row.color} onChange={event => updateOutputTableRow(row.key, 'color', event.target.value)} sx={{ width: 36, height: 32, p: 0, border: 0, bgcolor: 'transparent', cursor: 'pointer' }} />
+              </Box>
+            })}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOutputTable(null)}>Cancel</Button>
+          <Button variant="contained" onClick={saveOutputTable}>Save</Button>
+        </DialogActions>
+      </Dialog>
       {selectedImage && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{selectedImage.name} · {channels.length} channel{channels.length === 1 ? '' : 's'} · {displayNodes.length} node{displayNodes.length === 1 ? '' : 's'} · {connections.length} connection{connections.length === 1 ? '' : 's'}</Typography>}
       <MergePreviewModal
         preview={mergePreview}

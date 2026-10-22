@@ -53,6 +53,16 @@ def _node_color(node, fallback='#ffffff'):
     return color if isinstance(color, str) and color.strip() else fallback
 
 
+def _input_node_id(cell, input_ids):
+    node_id = cell.get('node_id')
+    if node_id in input_ids:
+        return node_id
+    parent_id = cell.get('output_parent_id')
+    if parent_id in input_ids:
+        return parent_id
+    return None
+
+
 def _validate(recipe):
     if not isinstance(recipe, dict) or recipe.get('version') != 2:
         raise RecipeError('Recipe version 2 is required.')
@@ -134,8 +144,9 @@ def _rule_order(rule_ids, nodes, incoming):
 def _convert(active, source_id, target_id, target_node, audit):
     changed = 0
     for cell in active:
-        if cell['node_id'] == source_id:
+        if cell['node_id'] == source_id or cell.get('output_parent_id') == source_id:
             cell['node_id'] = target_id
+            cell.pop('output_parent_id', None)
             cell['name'] = _node_label(target_node)
             cell['color'] = _node_color(target_node, cell.get('color', '#ffffff'))
             changed += 1
@@ -162,7 +173,7 @@ def _compatible_groups(candidates, rule_node, input_ids):
     for index, first in enumerate(candidates):
         for other in range(index + 1, len(candidates)):
             second = candidates[other]
-            if first['node_id'] == second['node_id']:
+            if _input_node_id(first, input_ids) == _input_node_id(second, input_ids):
                 continue
             if _matches(first, second, rule_node):
                 iou, containment = _overlap(first, second)
@@ -183,7 +194,7 @@ def _compatible_groups(candidates, rule_node, input_ids):
     valid_groups = []
     for group_indices in groups.values():
         group = [candidates[index] for index in sorted(group_indices)]
-        input_members = {cell['node_id'] for cell in group}
+        input_members = {_input_node_id(cell, input_ids) for cell in group}
         if len(group) < 2 or (require_all and input_members != set(input_ids)):
             continue
         valid_groups.append(group)
@@ -206,7 +217,7 @@ def _explicit_subset_reservations(active, input_ids, rule_node, rule_nodes, inco
             continue
         if any(source_node in rule_nodes for source_node in other_inputs):
             continue
-        candidates = [cell for cell in active if cell['node_id'] in other_inputs]
+        candidates = [cell for cell in active if _input_node_id(cell, other_inputs) is not None]
         for group in _compatible_groups(candidates, other_node, other_inputs):
             reserved.update(cell['source_index'] for cell in group)
     return reserved
@@ -215,7 +226,7 @@ def _explicit_subset_reservations(active, input_ids, rule_node, rule_nodes, inco
 def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, audit, reserved_source_indices=None):
     reserved_source_indices = reserved_source_indices or set()
     candidates = [cell for cell in active
-                  if cell['node_id'] in input_ids
+                  if _input_node_id(cell, input_ids) is not None
                   and cell['source_index'] not in reserved_source_indices]
     valid_groups = _compatible_groups(candidates, rule_node, input_ids)
     consumed = set()
@@ -224,10 +235,22 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
         consumed.update(item['source_index'] for item in group)
         representative = max(group, key=lambda item: (_area(item), -(item.get('confidence') or -1)))
         merged = deepcopy(representative)
-        merged['node_id'] = output_id
-        merged['name'] = _node_label(output_node) if output_node else _node_label(rule_node)
+        group_input_ids = sorted({_input_node_id(item, input_ids) for item in group})
+        mapping = None
+        if output_node and output_node.get('output_mappings'):
+            mapping = next((candidate for candidate in output_node['output_mappings']
+                            if set(candidate.get('sources') or []) == set(group_input_ids)), None)
+        merged['name'] = (mapping.get('label') if mapping and mapping.get('label') else _node_label(output_node)) if output_node else _node_label(rule_node)
         if output_node:
-            merged['color'] = _node_color(output_node, merged.get('color', '#ffffff'))
+            merged['color'] = _node_color(mapping, _node_color(output_node, merged.get('color', '#ffffff'))) if mapping else _node_color(output_node, merged.get('color', '#ffffff'))
+            if output_node.get('role') == 'output':
+                merged['node_id'] = f"{output_id}::{ '|'.join(group_input_ids) }"
+                merged['output_parent_id'] = output_id
+                merged['output_sources'] = group_input_ids
+            else:
+                merged['node_id'] = output_id
+        else:
+            merged['node_id'] = output_id
         merged['channel_ids'] = sorted(set().union(*(_channels(item) for item in group)))
         merged['members'] = [item['source_index'] for item in group]
         produced.append(merged)
@@ -270,7 +293,8 @@ def evaluate_recipe(cells, recipe):
             {candidate_id: nodes[candidate_id] for candidate_id in rule_ids},
             incoming,
         )
-        _apply_rule(active, rule_id, rule_node, input_ids, rule_id, output_node, audit, reserved)
+        result_id = output_classes[0] if output_node and output_node.get('role') == 'output' else rule_id
+        _apply_rule(active, rule_id, rule_node, input_ids, result_id, output_node, audit, reserved)
     direct_edges.extend((source, target) for source, targets in outgoing.items() for target in targets
                         if nodes[source]['type'] == 'rule' and nodes[target]['type'] == 'class')
     for source, target in direct_edges:
