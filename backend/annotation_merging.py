@@ -63,6 +63,33 @@ def _input_node_id(cell, input_ids):
     return None
 
 
+def _output_variant_id(node_id, mapping):
+    key = mapping.get('class_id') or mapping.get('label')
+    return f'{node_id}::class::{key}' if key else None
+
+
+def _output_variant_ids(node_id, node):
+    variants = []
+    for mapping in node.get('output_mappings') or []:
+        if mapping.get('exclude') is True:
+            continue
+        variant_id = _output_variant_id(node_id, mapping)
+        if variant_id and variant_id not in variants:
+            variants.append(variant_id)
+    return variants
+
+
+def _rule_input_ids(rule_id, nodes, incoming):
+    input_ids = set()
+    for source_id in incoming[rule_id]:
+        source_node = nodes[source_id]
+        if source_node.get('role') == 'output':
+            input_ids.update(_output_variant_ids(source_id, source_node))
+        else:
+            input_ids.add(source_id)
+    return input_ids
+
+
 def _validate(recipe):
     if not isinstance(recipe, dict) or recipe.get('version') != 2:
         raise RecipeError('Recipe version 2 is required.')
@@ -198,7 +225,7 @@ def _compatible_groups(candidates, rule_node, input_ids):
     return valid_groups
 
 
-def _explicit_subset_reservations(active, input_ids, rule_node, rule_nodes, incoming):
+def _explicit_subset_reservations(active, input_ids, rule_node, rule_nodes, nodes, incoming):
     """Find boxes reserved by explicit smaller class-only rules.
 
     A broad rule may cover any compatible subset, but a compatible group that
@@ -209,7 +236,7 @@ def _explicit_subset_reservations(active, input_ids, rule_node, rule_nodes, inco
     reserved = set()
     current_inputs = set(input_ids)
     for other_id, other_node in rule_nodes.items():
-        other_inputs = set(incoming[other_id])
+        other_inputs = _rule_input_ids(other_id, nodes, incoming)
         if other_node is rule_node or not other_inputs < current_inputs:
             continue
         if any(source_node in rule_nodes for source_node in other_inputs):
@@ -243,7 +270,8 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
         if output_node:
             merged['color'] = _node_color(mapping, _node_color(output_node, merged.get('color', '#ffffff'))) if mapping else _node_color(output_node, merged.get('color', '#ffffff'))
             if output_node.get('role') == 'output':
-                merged['node_id'] = f"{output_id}::{ '|'.join(group_input_ids) }"
+                variant_id = _output_variant_id(output_id, mapping) if mapping else None
+                merged['node_id'] = variant_id or f"{output_id}::{ '|'.join(group_input_ids) }"
                 merged['output_parent_id'] = output_id
                 merged['output_sources'] = group_input_ids
             else:
@@ -277,7 +305,7 @@ def evaluate_recipe(cells, recipe):
     ordered_rules = _rule_order(rule_ids, nodes, incoming)
     for rule_id in ordered_rules:
         rule_node = nodes[rule_id]
-        input_ids = set(incoming[rule_id])
+        input_ids = _rule_input_ids(rule_id, nodes, incoming)
         if len(input_ids) < 2:
             raise RecipeError(f'Rule {rule_id} needs at least two inputs.')
         output_classes = [target for target in outgoing[rule_id] if nodes[target]['type'] == 'class']
@@ -290,6 +318,7 @@ def evaluate_recipe(cells, recipe):
         reserved = _explicit_subset_reservations(
             active, input_ids, rule_node,
             {candidate_id: nodes[candidate_id] for candidate_id in rule_ids},
+            nodes,
             incoming,
         )
         result_id = output_classes[0] if output_node and output_node.get('role') == 'output' else rule_id

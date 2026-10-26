@@ -32,6 +32,10 @@ function annotationSublabels(annotation, labelIndex) {
   return [...new Set([...configured, ...perBox])]
 }
 
+function outputVariantId(node, mapping) {
+  return `${node.id}::class::${mapping.class_id || mapping.label}`
+}
+
 export default function CombineAnnotationsPage() {
   const [images, setImages] = useState([])
   const [imageSets, setImageSets] = useState([])
@@ -315,6 +319,9 @@ export default function CombineAnnotationsPage() {
       if (visited.has(nodeId)) return []
       visited.add(nodeId)
       const node = displayNodes.find(candidate => candidate.id === nodeId)
+      if (node?.role === 'output') {
+        return (node.outputMappings || []).filter(mapping => !mapping.exclude).map(mapping => outputVariantId(node, mapping))
+      }
       if (!node || node.type !== 'rule') return [nodeId]
       return connections.filter(connection => connection.target === nodeId).flatMap(connection => visit(connection.source))
     }
@@ -488,7 +495,13 @@ export default function CombineAnnotationsPage() {
   }
   const sourceDisplayName = sourceId => {
     const source = displayNodes.find(node => node.id === sourceId)
-    if (!source) return sourceId
+    if (!source) {
+      for (const node of displayNodes.filter(candidate => candidate.role === 'output')) {
+        const mapping = (node.outputMappings || []).find(candidate => outputVariantId(node, candidate) === sourceId)
+        if (mapping) return `${nodeLabel(node)}: ${mapping.label}`
+      }
+      return sourceId
+    }
     const label = source.sublabels?.length ? `${source.name} · ${source.sublabels.join(', ')}` : source.name
     return source.channel ? `${source.channel}: ${label}` : nodeLabel(source)
   }
