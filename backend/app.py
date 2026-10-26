@@ -55,7 +55,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # Session expires after 24 hours
 
 from database import db
-from models import User, ImageRecord, Channel, ImageSet, Annotation, LabelSet, Weights, DetectionSetting, MergeRecipe
+from models import User, ImageRecord, Channel, ImageSet, Annotation, LabelSet, Weights, DetectionSetting, MergeRecipe, MergedLayer
 from annotation_merging import evaluate_recipe, RecipeError
 from flask_migrate import Migrate
 
@@ -1442,6 +1442,23 @@ def combine_preview():
     return jsonify(payload), 200
 
 
+@app.route('/merged-layers/<image_id>', methods=['GET'])
+def get_merged_layer(image_id):
+    if not g.user:
+        return jsonify({'error': 'No active session'}), 401
+    image = ImageRecord.query.filter_by(id=image_id, user_id=g.user.id).first()
+    if not image:
+        return jsonify({'error': 'Image record not found or unauthorized'}), 404
+    layer = MergedLayer.query.filter_by(image_id=image.id, user_id=g.user.id).first()
+    if not layer:
+        return jsonify({'merged_layer': None}), 200
+    return jsonify({'merged_layer': {
+        'id': layer.id,
+        'image_id': layer.image_id,
+        'annotations': layer.annotations or [],
+    }}), 200
+
+
 def _combine_cells_for_image(image):
     channels = sorted(image.channels, key=lambda channel: channel.order_index or 0)
     channel_by_id = {channel.id: channel for channel in channels}
@@ -1532,6 +1549,19 @@ def combine_apply():
             evaluated = list(executor.map(evaluate_prepared, prepared))
         results = [_combine_payload(image, channels, recipe, result, request.host_url.rstrip('/'))
                    for image, channels, result in evaluated]
+        for payload in results:
+            layer = MergedLayer.query.filter_by(
+                image_id=payload['image_id'], user_id=g.user.id
+            ).first()
+            if layer is None:
+                layer = MergedLayer(
+                    id=str(uuid.uuid4()),
+                    image_id=payload['image_id'],
+                    user_id=g.user.id,
+                )
+                db.session.add(layer)
+            layer.annotations = payload['boxes']
+        db.session.commit()
         return jsonify({'results': results}), 200
     except RecipeError as error:
         return jsonify({'error': str(error)}), 400

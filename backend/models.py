@@ -14,6 +14,7 @@ class User(db.Model):
     weights = db.relationship('Weights', cascade='all, delete-orphan', backref='user')
     detection_settings = db.relationship('DetectionSetting', cascade='all, delete-orphan', backref='user')
     merge_recipes = db.relationship('MergeRecipe', cascade='all, delete-orphan', backref='user')
+    merged_layers = db.relationship('MergedLayer', cascade='all, delete-orphan', backref='user')
     # Add this inside class User(db.Model):
     image_sets = db.relationship('ImageSet', cascade='all, delete-orphan', backref='user')
 
@@ -112,6 +113,9 @@ class ImageRecord(db.Model):
     channels = db.relationship(
         'Channel', cascade='all, delete-orphan', order_by='Channel.order_index', backref='image_record'
     )
+    merged_layer = db.relationship(
+        'MergedLayer', uselist=False, cascade='all, delete-orphan', backref='image_record'
+    )
 
     @property
     def base_channel(self):
@@ -186,6 +190,16 @@ class MergeRecipe(db.Model):
     name = db.Column(db.String(255), nullable=False)
     recipe = db.Column(db.JSON, nullable=False)
     source_classes = db.Column(db.JSON, nullable=False, default=list)
+
+
+class MergedLayer(db.Model):
+    __tablename__ = 'merged_layer'
+    __table_args__ = (db.UniqueConstraint('image_id', name='uq_merged_layer_image'),)
+
+    id = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.String(36), db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    image_id = db.Column(db.String(36), db.ForeignKey('image_record.id', ondelete='CASCADE'), nullable=False)
+    annotations = db.Column(db.JSON, nullable=False, default=list)
 
 
 class Annotation(db.Model):

@@ -702,7 +702,27 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
       setAnnotations(annoList)
 
       const channelRows = channelList.map(buildChannelRow)
-      const appliedLayer = appliedMergedLayers[imgId]
+      let savedLayer = null
+      try {
+        const mergedLayerRes = await fetch(`${API_BASE_URL}/merged-layers/${imgId}`, { credentials: 'include' })
+        if (mergedLayerRes.ok) {
+          const mergedLayerData = await mergedLayerRes.json()
+          if (mergedLayerData.merged_layer) {
+            const stored = mergedLayerData.merged_layer
+            savedLayer = {
+              id: `merged:${imgId}`,
+              imageId: imgId,
+              channelName: 'Merged annotations',
+              layers: channelRows.map(channel => ({ id: channel.id, src: channel.channelUrl, color: channel.channelColor })),
+              boxes: stored.annotations || [],
+              visible: true,
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('Could not load saved merged layer:', error)
+      }
+      const appliedLayer = appliedMergedLayers[imgId] || savedLayer
       setChannels(appliedLayer
         ? channelRows.map(channel => ({ ...channel, visible: false }))
         : channelRows)
