@@ -1859,9 +1859,8 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
   async function handleApplyMergeRecipe({ recipeId, sourceType, sourceId }) {
     const recipe = mergeRecipes.find(candidate => candidate.id === recipeId)
     if (!recipe) return
-    const targetIds = sourceType === 'set'
-      ? (imageSets.find(imageSet => imageSet.id === sourceId)?.images || []).map(image => image.id)
-      : [sourceId]
+    const selectedSet = sourceType === 'set' ? imageSets.find(imageSet => imageSet.id === sourceId) : null
+    const targetIds = sourceType === 'set' ? (selectedSet?.images || []).map(image => image.id) : [sourceId]
     if (!targetIds.length) {
       setMergeApplyError('The selected image set has no images.')
       return
@@ -1869,23 +1868,23 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
     setMergeApplyLoading(true)
     setMergeApplyError('')
     try {
-      const results = await Promise.all(targetIds.map(async targetImageId => {
-        const response = await fetch(`${API_BASE_URL}/combine/preview`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ image_id: targetImageId, recipe: recipe.recipe }),
-        })
-        const data = await response.json().catch(() => ({}))
-        if (!response.ok) throw new Error(data.error || `Could not apply the recipe to ${targetImageId}.`)
-        return {
-          ...data,
-          layers: (data.layers || []).map((layer, index) => ({ ...layer, color: CHANNEL_COLOR_PALETTE[index % CHANNEL_COLOR_PALETTE.length] })),
-          id: `merged:${data.image_id}`,
-          imageId: data.image_id,
-          channelName: 'Merged annotations',
-          visible: true,
-        }
+      const response = await fetch(`${API_BASE_URL}/combine/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(sourceType === 'set'
+          ? { image_set_id: sourceId, recipe: recipe.recipe }
+          : { image_ids: targetIds, recipe: recipe.recipe }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || 'Could not apply the merge recipe.')
+      const results = (data.results || []).map(result => ({
+        ...result,
+        layers: (result.layers || []).map((layer, index) => ({ ...layer, color: CHANNEL_COLOR_PALETTE[index % CHANNEL_COLOR_PALETTE.length] })),
+        id: `merged:${result.image_id}`,
+        imageId: result.image_id,
+        channelName: 'Merged annotations',
+        visible: true,
       }))
       const currentResult = results.find(result => result.imageId === imageID)
       if (currentResult) {

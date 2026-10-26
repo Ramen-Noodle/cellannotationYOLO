@@ -1433,6 +1433,11 @@ def combine_preview():
     image = ImageRecord.query.filter_by(id=image_id, user_id=g.user.id).first()
     if not image:
         return jsonify({"error": "Image record not found or unauthorized"}), 404
+    payload = _combine_result_for_image(image, recipe, request.host_url.rstrip('/'))
+    return jsonify(payload), 200
+
+
+def _combine_cells_for_image(image):
     channels = sorted(image.channels, key=lambda channel: channel.order_index or 0)
     channel_by_id = {channel.id: channel for channel in channels}
     channel_names = {channel.id: f'C{(channel.order_index or 0) + 1}' for channel in channels}
@@ -1466,24 +1471,68 @@ def combine_preview():
                     'channel_id': annotation.channel_id,
                     'node_id': f'input:{channel_name}:{setting_id}:{label.get("name", f"Class {class_index}")}',
                 })
-    try:
-        result = evaluate_recipe(cells, recipe)
-    except RecipeError as error:
-        return jsonify({"error": str(error)}), 400
+    return channels, cells
+
+
+def _combine_result_for_image(image, recipe, host_url):
+    channels, cells = _combine_cells_for_image(image)
+    result = evaluate_recipe(cells, recipe, image_size=(image.width, image.height))
+    return _combine_payload(image, channels, recipe, result, host_url)
+
+
+def _combine_payload(image, channels, recipe, result, host_url):
     channel_palette = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
     layers = [{
         'id': channel.id,
-        'src': f"{request.host_url.rstrip('/')}/static/{channel.normalized_path}",
+        'src': f"{host_url}/static/{channel.normalized_path}",
         'color': channel_palette[index % len(channel_palette)],
     } for index, channel in enumerate(channels)]
-    return jsonify({
+    return {
         'image_id': image.id,
         'imageSize': {'width': image.width, 'height': image.height},
         'layers': layers,
         'boxes': result['boxes'],
         'audit': result['audit'],
         'recipe': recipe,
-    }), 200
+    }
+
+
+@app.route('/combine/apply', methods=['POST'])
+def combine_apply():
+    if not g.user:
+        return jsonify({'error': 'No active session'}), 401
+    data = request.get_json() or {}
+    recipe = data.get('recipe')
+    if not isinstance(recipe, dict):
+        return jsonify({'error': 'recipe is required'}), 400
+    image_ids = data.get('image_ids')
+    if image_ids is None and data.get('image_set_id'):
+        image_set = ImageSet.query.filter_by(id=data['image_set_id'], user_id=g.user.id).first()
+        if not image_set:
+            return jsonify({'error': 'Image set not found or unauthorized'}), 404
+        image_ids = [image.id for image in image_set.images]
+    if not isinstance(image_ids, list) or not image_ids:
+        return jsonify({'error': 'image_ids or image_set_id is required'}), 400
+    images = ImageRecord.query.filter(ImageRecord.user_id == g.user.id, ImageRecord.id.in_(image_ids)).all()
+    image_by_id = {image.id: image for image in images}
+    missing_ids = [image_id for image_id in image_ids if image_id not in image_by_id]
+    if missing_ids:
+        return jsonify({'error': 'One or more images were not found or unauthorized', 'image_ids': missing_ids}), 404
+    try:
+        prepared = [(image_by_id[image_id], *_combine_cells_for_image(image_by_id[image_id])) for image_id in image_ids]
+        def evaluate_prepared(item):
+            image, channels, cells = item
+            return image, channels, evaluate_recipe(cells, recipe, image_size=(image.width, image.height))
+        with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
+            evaluated = list(executor.map(evaluate_prepared, prepared))
+        results = [_combine_payload(image, channels, recipe, result, request.host_url.rstrip('/'))
+                   for image, channels, result in evaluated]
+        return jsonify({'results': results}), 200
+    except RecipeError as error:
+        return jsonify({'error': str(error)}), 400
+    except Exception:
+        app.logger.exception('Could not apply merge recipe')
+        return jsonify({'error': 'Could not apply merge recipe.'}), 500
 
 
 

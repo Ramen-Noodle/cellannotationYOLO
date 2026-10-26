@@ -5,6 +5,9 @@ module deliberately has no Flask or database dependencies so the same
 evaluator can be used by preview and future saved-recipe endpoints.
 """
 from copy import deepcopy
+from functools import lru_cache
+import json
+import numpy as np
 
 
 class RecipeError(ValueError):
@@ -29,6 +32,19 @@ def _overlap(first, second):
     union = first_area + second_area - intersection
     iou = intersection / union if union > 0 else 0.0
     containment = intersection / min(first_area, second_area) if min(first_area, second_area) > 0 else 0.0
+    return iou, containment
+
+
+def _overlaps_many(candidates, pairs):
+    first = np.asarray([_bounds(candidates[index]) for index, _ in pairs], dtype=float)
+    second = np.asarray([_bounds(candidates[index]) for _, index in pairs], dtype=float)
+    intersection = np.maximum(0.0, np.minimum(first[:, 2], second[:, 2]) - np.maximum(first[:, 0], second[:, 0])) * np.maximum(0.0, np.minimum(first[:, 3], second[:, 3]) - np.maximum(first[:, 1], second[:, 1]))
+    first_area = np.maximum(0.0, first[:, 2] - first[:, 0]) * np.maximum(0.0, first[:, 3] - first[:, 1])
+    second_area = np.maximum(0.0, second[:, 2] - second[:, 0]) * np.maximum(0.0, second[:, 3] - second[:, 1])
+    union = first_area + second_area - intersection
+    iou = np.divide(intersection, union, out=np.zeros_like(intersection), where=union > 0)
+    minimum = np.minimum(first_area, second_area)
+    containment = np.divide(intersection, minimum, out=np.zeros_like(intersection), where=minimum > 0)
     return iou, containment
 
 
@@ -125,6 +141,11 @@ def _validate(recipe):
     return by_id, incoming, outgoing
 
 
+@lru_cache(maxsize=128)
+def _validated_recipe(serialized_recipe):
+    return _validate(json.loads(serialized_recipe))
+
+
 def _rule_order(rule_ids, nodes, incoming):
     memo = {}
 
@@ -197,14 +218,27 @@ def _compatible_groups(candidates, rule_node, input_ids):
     # singleton fallback from consuming a box that belongs to a stronger
     # cross-channel overlap.
     pairs = []
-    for index, first in enumerate(candidates):
-        for other in range(index + 1, len(candidates)):
-            second = candidates[other]
-            if _input_node_id(first, input_ids) == _input_node_id(second, input_ids):
-                continue
-            if _matches(first, second, rule_node):
-                iou, containment = _overlap(first, second)
-                pairs.append((-max(iou, containment), index, other))
+    threshold = float(rule_node.get('threshold', 0.25))
+    if threshold <= 0:
+        pair_candidates = [(index, other) for index in range(len(candidates)) for other in range(index + 1, len(candidates))]
+    else:
+        cell_size = max(1.0, float(np.median([max(float(cell.get('w', 0)), float(cell.get('h', 0))) for cell in candidates] or [1.0])))
+        buckets = {}
+        for index, cell in enumerate(candidates):
+            x1, y1, x2, y2 = _bounds(cell)
+            for grid_x in range(int(x1 // cell_size), int(x2 // cell_size) + 1):
+                for grid_y in range(int(y1 // cell_size), int(y2 // cell_size) + 1):
+                    buckets.setdefault((grid_x, grid_y), []).append(index)
+        pair_candidates = sorted({tuple(sorted((first, second))) for bucket in buckets.values() for first in bucket for second in bucket if first < second})
+    overlap_iou, overlap_containment = _overlaps_many(candidates, pair_candidates) if pair_candidates else (np.array([]), np.array([]))
+    for pair_index, (index, other) in enumerate(pair_candidates):
+        first, second = candidates[index], candidates[other]
+        if _input_node_id(first, input_ids) == _input_node_id(second, input_ids):
+            continue
+        iou, containment = overlap_iou[pair_index], overlap_containment[pair_index]
+        matched = containment >= threshold if rule_node.get('rule_type', 'iou') == 'containment' else iou >= threshold
+        if matched:
+            pairs.append((-max(iou, containment), index, other))
     for _, first_index, second_index in sorted(pairs):
         first_root, second_root = root(first_index), root(second_index)
         if first_root == second_root:
@@ -290,9 +324,10 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
     audit.append({'operation': 'rule', 'rule': rule_id, 'inputs': sorted(input_ids), 'produced': len(produced), 'consumed': len(consumed), 'reserved': len(reserved_source_indices)})
 
 
-def evaluate_recipe(cells, recipe):
-    """Evaluate a validated graph recipe over pixel-space annotation boxes."""
-    nodes, incoming, outgoing = _validate(recipe)
+def _evaluate_recipe_once(cells, recipe, include_members=False):
+    """Evaluate a recipe over one complete set of candidate boxes."""
+    serialized_recipe = json.dumps(recipe, sort_keys=True, separators=(',', ':'))
+    nodes, incoming, outgoing = _validated_recipe(serialized_recipe)
     active = [deepcopy(cell) for cell in cells]
     for index, cell in enumerate(active):
         cell.setdefault('source_index', index)
@@ -333,6 +368,47 @@ def evaluate_recipe(cells, recipe):
 
     for cell in active:
         cell['output_node_id'] = cell['node_id']
+        if include_members:
+            cell['members'] = cell.get('members') or [cell['source_index']]
         cell.pop('source_index', None)
         cell.pop('node_id', None)
     return {'boxes': active, 'audit': audit}
+
+
+def evaluate_recipe(cells, recipe, image_size=None, tile_size=1024):
+    """Evaluate a recipe, tiling large images while preserving boundary matches."""
+    if not image_size or max(image_size) <= tile_size:
+        return _evaluate_recipe_once(cells, recipe)
+
+    indexed_cells = [deepcopy(cell) for cell in cells]
+    for index, cell in enumerate(indexed_cells):
+        cell.setdefault('source_index', index)
+    max_dimension = max([max(float(cell.get('w', 0)), float(cell.get('h', 0))) for cell in indexed_cells] or [0])
+    overlap = max(64.0, max_dimension)
+    width, height = image_size
+    boxes = []
+    audits = []
+    seen = set()
+    for top in range(0, int(height), tile_size):
+        for left in range(0, int(width), tile_size):
+            right, bottom = min(width, left + tile_size), min(height, top + tile_size)
+            expanded_left, expanded_top = max(0, left - overlap), max(0, top - overlap)
+            expanded_right, expanded_bottom = min(width, right + overlap), min(height, bottom + overlap)
+            tile_cells = []
+            for cell in indexed_cells:
+                x1, y1, x2, y2 = _bounds(cell)
+                if x2 >= expanded_left and x1 <= expanded_right and y2 >= expanded_top and y1 <= expanded_bottom:
+                    tile_cells.append(deepcopy(cell))
+            if not tile_cells:
+                continue
+            result = _evaluate_recipe_once(tile_cells, recipe, include_members=True)
+            audits.extend(result['audit'])
+            for box in result['boxes']:
+                members = tuple(sorted(box.get('members') or []))
+                key = (members, box.get('output_node_id'), box.get('name'), box.get('color'))
+                if key in seen:
+                    continue
+                seen.add(key)
+                box.pop('members', None)
+                boxes.append(box)
+    return {'boxes': boxes, 'audit': audits}
