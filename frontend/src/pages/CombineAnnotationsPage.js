@@ -60,7 +60,6 @@ export default function CombineAnnotationsPage() {
   const [graphZoom, setGraphZoom] = useState(1)
   const [graphPan, setGraphPan] = useState({ x: 0, y: 0 })
   const [outputTable, setOutputTable] = useState(null)
-  const [outputClasses, setOutputClasses] = useState([])
   const dragRef = useRef(null)
   const panRef = useRef(null)
   const graphRef = useRef(null)
@@ -129,13 +128,6 @@ export default function CombineAnnotationsPage() {
       source: edge.source,
       target: edge.target,
     })))
-    const savedClasses = []
-    created.forEach(node => (node.outputMappings || []).forEach(mapping => {
-      if (mapping.label && !savedClasses.some(outputClass => outputClass.name === mapping.label)) {
-        savedClasses.push({ id: mapping.class_id || `saved-output:${savedClasses.length}`, name: mapping.label, color: mapping.color || CLASS_NODE_DEFAULT_COLOR })
-      }
-    }))
-    setOutputClasses(savedClasses)
     setPendingRecipe(null)
   }, [pendingRecipe, loadingAnnotations, imageId, channels.length])
 
@@ -146,7 +138,6 @@ export default function CombineAnnotationsPage() {
     setEdgeDrag(null)
     setMergePreview(null)
     setOutputTable(null)
-    setOutputClasses([])
     setGraphZoom(1)
     setGraphPan({ x: 0, y: 0 })
   }, [imageId])
@@ -340,24 +331,34 @@ export default function CombineAnnotationsPage() {
     const sourceIds = outputSources(node.id)
     const existing = node.outputMappings || []
     const existingByKey = new Map(existing.map(mapping => [mapping.sources.slice().sort().join('|'), mapping]))
+    const classes = existing.filter(mapping => mapping.label).reduce((result, mapping) => {
+      if (!result.some(outputClass => outputClass.name === mapping.label)) result.push({ id: mapping.class_id || `output-class:${node.id}:${mapping.label}`, name: mapping.label, color: mapping.color || CLASS_NODE_DEFAULT_COLOR })
+      return result
+    }, [])
     const rows = outputCombinations(sourceIds).map(sources => {
       const key = sources.slice().sort().join('|')
       const prior = existingByKey.get(key)
-      const outputClass = outputClasses.find(candidate => candidate.name === prior?.label)
+      const outputClass = classes.find(candidate => candidate.name === prior?.label)
       return { id: key, key, sources, classId: prior?.exclude ? NO_OUTPUT_CLASS : (outputClass?.id || NEW_OUTPUT_CLASS), label: outputClass?.name || prior?.label || '', color: outputClass?.color || prior?.color || CLASS_NODE_DEFAULT_COLOR }
     })
-    setOutputTable({ nodeId: node.id, sourceIds, rows })
+    setOutputTable({ nodeId: node.id, sourceIds, rows, classes })
   }
   const updateOutputTableRow = (key, field, value) => {
     setOutputTable(previous => previous ? {
       ...previous,
-      rows: previous.rows.map(row => row.key === key ? { ...row, [field]: value } : row),
+      rows: previous.rows.map(row => {
+        if (row.key === key) return { ...row, [field]: value }
+        const changedRow = previous.rows.find(candidate => candidate.key === key)
+        return field === 'color' && changedRow && changedRow.classId === row.classId && row.classId !== NEW_OUTPUT_CLASS && row.classId !== NO_OUTPUT_CLASS
+          ? { ...row, color: value }
+          : row
+      }),
     } : previous)
   }
   const saveOutputTable = () => {
     if (!outputTable) return
-    const classById = new Map(outputClasses.map(outputClass => [outputClass.id, outputClass]))
-    const nextClasses = [...outputClasses]
+    const classById = new Map((outputTable.classes || []).map(outputClass => [outputClass.id, outputClass]))
+    const nextClasses = [...(outputTable.classes || [])]
     const mappings = outputTable.rows.map(({ sources, classId, label, color }) => {
       if (classId === NO_OUTPUT_CLASS) return { sources, exclude: true }
       let outputClass = classById.get(classId)
@@ -369,12 +370,12 @@ export default function CombineAnnotationsPage() {
         }
       }
       if (outputClass) {
+        outputClass = { ...outputClass, color }
         classById.set(outputClass.id, outputClass)
         return { sources, class_id: outputClass.id, label: outputClass.name, color: outputClass.color }
       }
       return { sources, label: label.trim(), color }
     })
-    setOutputClasses(nextClasses)
     setCreatedNodes(previous => previous.map(node => node.id === outputTable.nodeId
       ? { ...node, outputMappings: mappings }
       : node))
@@ -442,7 +443,6 @@ export default function CombineAnnotationsPage() {
     setPendingRecipe(null)
     setCreatedNodes([])
     setConnections([])
-    setOutputClasses([])
     setMergePreview(null)
     setImageId(targetImageId)
     setRecipeModalOpen(false)
@@ -495,7 +495,7 @@ export default function CombineAnnotationsPage() {
   const draftOutputClasses = (outputTable?.rows || [])
     .filter(row => row.classId === NEW_OUTPUT_CLASS && row.label.trim())
     .map(row => ({ id: `draft:${row.key}`, name: row.label.trim(), color: row.color }))
-  const selectableOutputClasses = [...outputClasses, ...draftOutputClasses.filter(draft => !outputClasses.some(outputClass => outputClass.name === draft.name))]
+  const selectableOutputClasses = [...(outputTable?.classes || []), ...draftOutputClasses.filter(draft => !(outputTable?.classes || []).some(outputClass => outputClass.name === draft.name))]
   const buildRecipe = () => ({
     version: 2,
     nodes: displayNodes.map(node => node.type === 'rule'
@@ -595,7 +595,7 @@ export default function CombineAnnotationsPage() {
           {node.created
             ? <Typography variant="body2" title={nodeLabel(node)} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nodeLabel(node)}</Typography>
             : <Typography variant="body2" title={node.sublabels?.length ? `${node.name} · ${node.sublabels.join(', ')}` : node.name} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.sublabels?.length ? `${node.name} · ${node.sublabels.join(', ')}` : node.name}</Typography>}
-          {node.created && node.role === 'output' && <Button size="small" variant="outlined" onClick={event => { event.stopPropagation(); openOutputTable(node) }} onPointerDown={event => event.stopPropagation()} sx={{ mt: 0.75, width: '100%', justifyContent: 'flex-start', color: 'text.primary', fontSize: 12, py: 0.7, px: 0.75 }}>Edit table</Button>}
+          {node.created && node.role === 'output' && <Button size="small" variant="outlined" onClick={event => { event.stopPropagation(); openOutputTable(node) }} onPointerDown={event => event.stopPropagation()} sx={{ mt: 0.75, width: '100%', justifyContent: 'flex-start', color: 'text.primary', borderColor: CLASS_NODE_DEFAULT_COLOR, fontSize: 12, py: 0.7, px: 0.75, '&:hover': { borderColor: '#ffffff' } }}>Edit table</Button>}
           {node.created && node.type === 'rule'
             ? <Stack spacing={0.75} sx={{ mt: 0.75 }}>
                 <Stack direction="row" spacing={0.75}>
@@ -648,7 +648,7 @@ export default function CombineAnnotationsPage() {
                   </Select>
                   {isNew && <TextField size="small" placeholder="Class name" value={row.label} onChange={event => updateOutputTableRow(row.key, 'label', event.target.value)} />}
                 </Box>
-                <Box component="input" type="color" aria-label="Output color" value={row.color} disabled={!isNew} onChange={event => onChange('color', event.target.value)} sx={{ width: 36, height: 32, p: 0, border: 0, bgcolor: 'transparent', cursor: isNew ? 'pointer' : 'default', opacity: isNew ? 1 : 0.55 }} />
+                <Box component="input" type="color" aria-label="Output color" value={row.color} onChange={event => onChange('color', event.target.value)} sx={{ width: 36, height: 32, p: 0, border: 0, bgcolor: 'transparent', cursor: 'pointer' }} />
               </Stack>
             }}
           />
