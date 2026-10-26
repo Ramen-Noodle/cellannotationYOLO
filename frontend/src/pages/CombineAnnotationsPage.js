@@ -68,7 +68,7 @@ export default function CombineAnnotationsPage() {
   const panRef = useRef(null)
   const graphRef = useRef(null)
   const loadedAnnotationsImageRef = useRef('')
-  const layoutSignatureRef = useRef('')
+  const layoutRequestedRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -108,7 +108,7 @@ export default function CombineAnnotationsPage() {
         if (!annotationsResponse.ok) throw new Error(annotationData.error || 'Could not load annotations.')
         return { channelData, annotationData }
       })
-      .then(({ channelData, annotationData }) => { if (!cancelled) { setChannels(channelData); setAnnotations(annotationData.annotations || []); loadedAnnotationsImageRef.current = imageId } })
+      .then(({ channelData, annotationData }) => { if (!cancelled) { layoutRequestedRef.current = true; setChannels(channelData); setAnnotations(annotationData.annotations || []); loadedAnnotationsImageRef.current = imageId } })
       .catch(loadError => { if (!cancelled) setError(loadError.message) })
       .finally(() => { if (!cancelled) setLoadingAnnotations(false) })
     return () => { cancelled = true }
@@ -132,6 +132,7 @@ export default function CombineAnnotationsPage() {
       source: edge.source,
       target: edge.target,
     })))
+    layoutRequestedRef.current = true
     setPendingRecipe(null)
   }, [pendingRecipe, loadingAnnotations, imageId, channels.length])
 
@@ -169,13 +170,13 @@ export default function CombineAnnotationsPage() {
   }, [annotations, channels])
 
   const displayNodes = useMemo(() => [...nodes, ...createdNodes], [nodes, createdNodes])
-  const graphTopology = useMemo(() => JSON.stringify({
-    nodes: displayNodes.map(node => ({ id: node.id, type: node.type, role: node.role })),
-    edges: connections.map(connection => ({ source: connection.source, target: connection.target })),
-  }), [displayNodes, connections])
   useEffect(() => {
-    if (!displayNodes.length || graphTopology === layoutSignatureRef.current) return
-    layoutSignatureRef.current = graphTopology
+    if (!layoutRequestedRef.current) return
+    if (!displayNodes.length) {
+      layoutRequestedRef.current = false
+      return
+    }
+    layoutRequestedRef.current = false
     let cancelled = false
     const elk = new ELK()
     elk.layout({
@@ -197,7 +198,7 @@ export default function CombineAnnotationsPage() {
       setCreatedNodes(previous => previous.map(node => positions.has(node.id) ? { ...node, ...positions.get(node.id) } : node))
     }).catch(() => {})
     return () => { cancelled = true }
-  }, [displayNodes, connections, graphTopology])
+  }, [displayNodes, connections])
   const graphWidth = Math.max(760, channels.length * 250, ...displayNodes.map(node => node.x + 230))
   const graphHeight = Math.max(560, ...displayNodes.map(node => node.y + 150))
 
