@@ -12,6 +12,7 @@ const CHANNEL_COLORS = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '
 const CLASS_NODE_DEFAULT_COLOR = '#cbd5e1'
 const NEW_OUTPUT_CLASS = '__new_output_class__'
 const NO_OUTPUT_CLASS = '__no_output_class__'
+const NO_CHANGE_CLASS = '__no_change_class__'
 
 function channelName(channel) { return `C${(channel.order_index ?? 0) + 1}` }
 function sourceNodeId(channel, annotation, className) {
@@ -347,7 +348,7 @@ export default function CombineAnnotationsPage() {
       const key = sources.slice().sort().join('|')
       const prior = existingByKey.get(key)
       const outputClass = classes.find(candidate => candidate.name === prior?.label)
-      return { id: key, key, sources, classId: prior?.exclude ? NO_OUTPUT_CLASS : (outputClass?.id || NEW_OUTPUT_CLASS), label: outputClass?.name || prior?.label || '', color: outputClass?.color || prior?.color || CLASS_NODE_DEFAULT_COLOR }
+      return { id: key, key, sources, classId: prior?.exclude ? NO_OUTPUT_CLASS : (prior?.pass_through ? NO_CHANGE_CLASS : (outputClass?.id || NEW_OUTPUT_CLASS)), label: outputClass?.name || prior?.label || '', color: outputClass?.color || prior?.color || CLASS_NODE_DEFAULT_COLOR }
     })
     setOutputTable({ nodeId: node.id, sourceIds, rows, classes })
   }
@@ -369,6 +370,7 @@ export default function CombineAnnotationsPage() {
     const nextClasses = [...(outputTable.classes || [])]
     const mappings = outputTable.rows.map(({ sources, classId, label, color }) => {
       if (classId === NO_OUTPUT_CLASS) return { sources, exclude: true }
+      if (classId === NO_CHANGE_CLASS) return { sources, pass_through: true }
       let outputClass = classById.get(classId)
       if (!outputClass && label.trim()) {
         outputClass = nextClasses.find(candidate => candidate.name === label.trim())
@@ -504,7 +506,7 @@ export default function CombineAnnotationsPage() {
       return sourceId
     }
     const label = source.sublabels?.length ? `${source.name} · ${source.sublabels.join(', ')}` : source.name
-    return source.channel ? `${source.channel}: ${label}` : nodeLabel(source)
+    return source.channel ? `${source.channel}: ${label}` : label
   }
   const draftOutputClasses = (outputTable?.rows || [])
     .filter(row => row.classId === NEW_OUTPUT_CLASS && row.label.trim())
@@ -659,6 +661,7 @@ export default function CombineAnnotationsPage() {
                     {selectableOutputClasses.map(outputClass => <MenuItem key={outputClass.id} value={outputClass.id}>{outputClass.name}</MenuItem>)}
                     <MenuItem value={NEW_OUTPUT_CLASS}>Define new class</MenuItem>
                     <MenuItem value={NO_OUTPUT_CLASS}>No output</MenuItem>
+                    <MenuItem value={NO_CHANGE_CLASS}>Keep original</MenuItem>
                   </Select>
                   {isNew && <TextField size="small" placeholder="Class name" value={row.label} onChange={event => updateOutputTableRow(row.key, 'label', event.target.value)} />}
                 </Box>

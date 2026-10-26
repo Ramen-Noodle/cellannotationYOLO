@@ -256,14 +256,17 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
     consumed = set()
     produced = []
     for group in valid_groups:
-        consumed.update(item['source_index'] for item in group)
-        representative = max(group, key=lambda item: (_area(item), -(item.get('confidence') or -1)))
-        merged = deepcopy(representative)
         group_input_ids = sorted({_input_node_id(item, input_ids) for item in group})
         mapping = None
         if output_node and output_node.get('output_mappings'):
             mapping = next((candidate for candidate in output_node['output_mappings']
                             if set(candidate.get('sources') or []) == set(group_input_ids)), None)
+        if mapping and mapping.get('pass_through') is True:
+            produced.extend(deepcopy(item) for item in group)
+            continue
+        consumed.update(item['source_index'] for item in group)
+        representative = max(group, key=lambda item: (_area(item), -(item.get('confidence') or -1)))
+        merged = deepcopy(representative)
         if mapping and mapping.get('exclude') is True:
             continue
         merged['name'] = (mapping.get('label') if mapping and mapping.get('label') else _node_label(output_node)) if output_node else _node_label(rule_node)
