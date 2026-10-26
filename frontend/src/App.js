@@ -172,7 +172,7 @@ function App() {
           </Box>
           <Box sx={{ height: 'calc(100vh - 48px)', pt: '48px', boxSizing: 'border-box' }}>
             {page === 'annotations'
-              ? <CellAnnotationTool appliedMergedLayers={appliedMergedLayers} />
+              ? <CellAnnotationTool appliedMergedLayers={appliedMergedLayers} onApplyMergedLayer={applyMergedLayer} />
               : <CombineAnnotationsPage onApplyMergedLayer={applyMergedLayer} />}
           </Box>
         </Box>

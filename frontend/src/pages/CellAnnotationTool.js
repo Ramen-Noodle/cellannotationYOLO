@@ -1,6 +1,7 @@
 import ImageSetsModal from '../components/modals/ImageSetsModal'
 import ExportAnnotationsModal from '../components/modals/ExportAnnotationsModal'
 import BatchDetectionModal from '../components/modals/BatchDetectionModal'
+import ApplyMergeRecipeModal from '../components/modals/ApplyMergeRecipeModal'
 import CustomModelUploadModal from '../components/modals/CustomModelUploadModal'
 import TrainModelModal from '../components/modals/TrainModelModal'
 import ManageModelsModal from '../components/modals/ManageModelsModal'
@@ -20,6 +21,7 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import FolderOpenIcon from '@mui/icons-material/FolderOpen'
 import ImageSearch from '@mui/icons-material/ImageSearch'
 import ScreenSearchDesktop from '@mui/icons-material/ScreenSearchDesktop'
+import MergeTypeIcon from '@mui/icons-material/MergeType'
 import ModelTrainingIcon from '@mui/icons-material/ModelTraining'
 import CollectionsIcon from '@mui/icons-material/Collections'
 import SaveAsIcon from '@mui/icons-material/SaveAs'
@@ -57,9 +59,9 @@ const DEFAULT_MODEL_NAMES = ['MADM', 'SGN', 'StarDist']
 // Frontend-only for now - not persisted to the backend.
 const CHANNEL_COLOR_PALETTE = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
 
-export default function CellAnnotationTool({ appliedMergedLayers = {} }) {
+export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMergedLayer }) {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5002'
+  const API_BASE_URL = 'http://10.80.24.12:5001'
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('Processing...')
@@ -73,6 +75,10 @@ export default function CellAnnotationTool({ appliedMergedLayers = {} }) {
   // State for image operations
   const [imageList, setImageList] = useState([])
   const [imageSets, setImageSets] = useState([])
+  const [mergeRecipes, setMergeRecipes] = useState([])
+  const [mergeApplyModalOpen, setMergeApplyModalOpen] = useState(false)
+  const [mergeApplyLoading, setMergeApplyLoading] = useState(false)
+  const [mergeApplyError, setMergeApplyError] = useState('')
   const [imageID, setImageID] = useState('')
   const [importedPreview, setImportedPreview] = useState(null)
   const [uploadMenuAnchor, setUploadMenuAnchor] = useState(null)
@@ -1837,6 +1843,65 @@ export default function CellAnnotationTool({ appliedMergedLayers = {} }) {
     setBatchDetectModalOpen(true)
   }
 
+  async function handleOpenMergeApplyModal() {
+    setMergeApplyError('')
+    setMergeApplyModalOpen(true)
+    try {
+      const response = await fetch(`${API_BASE_URL}/merge-recipes`, { credentials: 'include' })
+      const data = await response.json().catch(() => [])
+      if (!response.ok) throw new Error(data.error || 'Could not load merge recipes.')
+      setMergeRecipes(data)
+    } catch (error) {
+      setMergeApplyError(error.message)
+    }
+  }
+
+  async function handleApplyMergeRecipe({ recipeId, sourceType, sourceId }) {
+    const recipe = mergeRecipes.find(candidate => candidate.id === recipeId)
+    if (!recipe) return
+    const targetIds = sourceType === 'set'
+      ? (imageSets.find(imageSet => imageSet.id === sourceId)?.images || []).map(image => image.id)
+      : [sourceId]
+    if (!targetIds.length) {
+      setMergeApplyError('The selected image set has no images.')
+      return
+    }
+    setMergeApplyLoading(true)
+    setMergeApplyError('')
+    try {
+      const results = await Promise.all(targetIds.map(async targetImageId => {
+        const response = await fetch(`${API_BASE_URL}/combine/preview`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ image_id: targetImageId, recipe: recipe.recipe }),
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(data.error || `Could not apply the recipe to ${targetImageId}.`)
+        return {
+          ...data,
+          layers: (data.layers || []).map((layer, index) => ({ ...layer, color: CHANNEL_COLOR_PALETTE[index % CHANNEL_COLOR_PALETTE.length] })),
+          id: `merged:${data.image_id}`,
+          imageId: data.image_id,
+          channelName: 'Merged annotations',
+          visible: true,
+        }
+      }))
+      const currentResult = results.find(result => result.imageId === imageID)
+      if (currentResult) {
+        await renderAnnotations(imageID, selectedChannelId)
+        setMergedLayer({ ...currentResult, visible: true })
+        setChannels(previous => previous.map(channel => ({ ...channel, visible: false })))
+      }
+      results.forEach(result => onApplyMergedLayer?.(result))
+      setMergeApplyModalOpen(false)
+    } catch (error) {
+      setMergeApplyError(error.message)
+    } finally {
+      setMergeApplyLoading(false)
+    }
+  }
+
   async function handleSelectBatchImageSet(setId) {
     const version = ++batchLoadVersion.current
     setBatchImageSetId(setId)
@@ -2502,6 +2567,25 @@ export default function CellAnnotationTool({ appliedMergedLayers = {} }) {
             <Typography variant='body1' sx={{ pt: 1, fontWeight: 'bold' }}>
               Manage Annotations
             </Typography>
+            <Tooltip title="Apply Merge Recipe" arrow>
+              <IconButton
+                color="primary"
+                onClick={handleOpenMergeApplyModal}
+                sx={{ p: 1.5 }}
+              >
+                <MergeTypeIcon />
+              </IconButton>
+            </Tooltip>
+            <ApplyMergeRecipeModal
+              open={mergeApplyModalOpen}
+              onClose={() => setMergeApplyModalOpen(false)}
+              recipes={mergeRecipes}
+              imageList={imageList}
+              imageSets={imageSets}
+              onApply={handleApplyMergeRecipe}
+              loading={mergeApplyLoading}
+              error={mergeApplyError}
+            />
             {/* 1. SAVE ANNOTATIONS */}
             <Tooltip title="Save Annotations" arrow>
               <IconButton 
