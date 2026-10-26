@@ -24,6 +24,7 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
     onCrop, currentClass, classes, imageSize, brightness, contrast, scale, onScaleChange, showLabels = true, currentSet, readOnly = false, viewportSize, initialOffset }) {
   const canvasRef = useRef(null)
   const imagesRef = useRef({})       // layerId -> loaded Image (non-tiled)
+  const imageSourcesRef = useRef({}) // layerId -> source URL for cache invalidation
   const tintCacheRef = useRef({})    // layerId -> { color, sourceImg, canvas } (non-tiled)
   const tilesRef = useRef({})        // "layerId:tx_ty" -> 'loading' | 'error' | Image (tiled)
   const tintedTilesRef = useRef({})  // "layerId:tx_ty" -> tinted canvas (tiled)
@@ -49,6 +50,61 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
   const [isNewImage, setIsNewImage] = useState(true)
   // Bumped whenever a layer image (or tile) finishes loading, to trigger a redraw.
   const [layerLoadVersion, setLayerLoadVersion] = useState(0)
+  const drawRequestRef = useRef(null)
+  const viewportWorkerRef = useRef(null)
+  const viewportRequestRef = useRef(0)
+  const [visibleBoxes, setVisibleBoxes] = useState(boxes)
+
+  // Viewport filtering is a useful worker workload because it can involve
+  // thousands of annotations while the user is panning or zooming.
+  useEffect(() => {
+    const worker = new Worker(new URL('./annotationViewportWorker.js', import.meta.url))
+    viewportWorkerRef.current = worker
+    worker.onmessage = ({ data }) => {
+      if (data.requestId !== viewportRequestRef.current) return
+      setVisibleBoxes(data.boxes)
+    }
+    return () => {
+      worker.terminate()
+      viewportWorkerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!imageSize?.width || !imageSize?.height) {
+      setVisibleBoxes(boxes)
+      return
+    }
+
+    const visibleLeft = Math.max(0, -offset.x / scale)
+    const visibleTop = Math.max(0, -offset.y / scale)
+    const canvasWidth = viewportSize?.width ?? window.innerWidth
+    const canvasHeight = viewportSize?.height ?? window.innerHeight
+    const visibleRight = Math.min(imageSize.width, (canvasWidth - offset.x) / scale)
+    const visibleBottom = Math.min(imageSize.height, (canvasHeight - offset.y) / scale)
+
+    // Avoid worker overhead for ordinary annotation counts.
+    if (boxes.length < 1000 || !viewportWorkerRef.current) {
+      setVisibleBoxes(boxes.filter(box => {
+        const boxLeft = Math.min(box.x, box.x + box.w)
+        const boxRight = Math.max(box.x, box.x + box.w)
+        const boxTop = Math.min(box.y, box.y + box.h)
+        const boxBottom = Math.max(box.y, box.y + box.h)
+        return !(boxRight < visibleLeft || boxLeft > visibleRight || boxBottom < visibleTop || boxTop > visibleBottom)
+      }))
+      return
+    }
+
+    const requestId = ++viewportRequestRef.current
+    viewportWorkerRef.current.postMessage({
+      requestId,
+      boxes,
+      left: visibleLeft,
+      top: visibleTop,
+      right: visibleRight,
+      bottom: visibleBottom,
+    })
+  }, [boxes, offset, scale, imageSize, windowSize, viewportSize])
 
   const [windowSize, setWindowSize] = useState({
     width: window.innerWidth,
@@ -79,14 +135,25 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
       return
     }
 
-    imagesRef.current = {}
-    tintCacheRef.current = {}
+    const activeLayerIds = new Set((layers || []).map(layer => layer.id))
+    Object.keys(imagesRef.current).forEach(id => {
+      if (!activeLayerIds.has(id)) delete imagesRef.current[id]
+    })
+    Object.keys(imageSourcesRef.current).forEach(id => {
+      if (!activeLayerIds.has(id)) delete imageSourcesRef.current[id]
+    })
+    Object.keys(tintCacheRef.current).forEach(id => {
+      if (!activeLayerIds.has(id)) delete tintCacheRef.current[id]
+    })
 
     ;(layers || []).forEach((layer, idx) => {
       if (!layer.src) return
+      if (imagesRef.current[layer.id] && imageSourcesRef.current[layer.id] === layer.src) return
       const img = new Image()
       img.onload = () => {
         imagesRef.current[layer.id] = img
+        imageSourcesRef.current[layer.id] = layer.src
+        delete tintCacheRef.current[layer.id]
         if (idx === 0) {
           if (isNewImage) {
             setboundaries({ xMin: 0, xMax: img.width, yMin: 0, yMax: img.height })
@@ -121,9 +188,16 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
 
   // draw loop
   useEffect(() => {
-    draw()
+    if (drawRequestRef.current) cancelAnimationFrame(drawRequestRef.current)
+    drawRequestRef.current = requestAnimationFrame(() => {
+      drawRequestRef.current = null
+      draw()
+    })
+    return () => {
+      if (drawRequestRef.current) cancelAnimationFrame(drawRequestRef.current)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scale, offset, boxes, currentBox, classes, brightness, contrast, windowSize, viewportSize, layerLoadVersion, layersKey, showLabels])
+  }, [scale, offset, visibleBoxes, currentBox, classes, brightness, contrast, windowSize, viewportSize, imageSize, layerLoadVersion, layersKey, showLabels])
 
   const getLabelTextColor = (hex) => {
     const r = parseInt(hex.slice(1, 3), 16)
@@ -245,7 +319,18 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
 
     const fontSize = 11 / scale
     ctx.font = `${fontSize}px sans-serif`
-    boxes.forEach((box) => {
+    // Skip annotations that cannot appear in the current viewport. This is
+    // especially important for large images with thousands of detections.
+    const visibleLeft = Math.max(0, -offset.x / scale)
+    const visibleTop = Math.max(0, -offset.y / scale)
+    const visibleRight = Math.min(imageSize?.width || Infinity, (canvas.width - offset.x) / scale)
+    const visibleBottom = Math.min(imageSize?.height || Infinity, (canvas.height - offset.y) / scale)
+    visibleBoxes.forEach((box) => {
+      const boxLeft = Math.min(box.x, box.x + box.w)
+      const boxRight = Math.max(box.x, box.x + box.w)
+      const boxTop = Math.min(box.y, box.y + box.h)
+      const boxBottom = Math.max(box.y, box.y + box.h)
+      if (boxRight < visibleLeft || boxLeft > visibleRight || boxBottom < visibleTop || boxTop > visibleBottom) return
       const style = box.renderStyle || 'solid'
 
       if (style === 'invisible') {

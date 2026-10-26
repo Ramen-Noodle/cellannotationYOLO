@@ -1385,7 +1385,12 @@ def load_annotations():
         return jsonify({"error": "Missing image_id in request body"}), 400
 
     image_id = data['image_id']
-    channel_ids = [c.id for c in Channel.query.filter_by(image_id=image_id).all()]
+    image_channel_ids = [c.id for c in Channel.query.filter_by(image_id=image_id).all()]
+    requested_channel_ids = data.get('channel_ids')
+    if requested_channel_ids is not None and not isinstance(requested_channel_ids, list):
+        return jsonify({"error": "channel_ids must be a list"}), 400
+    channel_ids = [channel_id for channel_id in image_channel_ids
+                   if requested_channel_ids is None or channel_id in requested_channel_ids]
     annotations = Annotation.query.filter(
         Annotation.user_id == g.user.id,
         Annotation.channel_id.in_(channel_ids)

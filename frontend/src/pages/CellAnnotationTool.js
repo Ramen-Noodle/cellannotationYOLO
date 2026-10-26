@@ -5,7 +5,7 @@ import ApplyMergeRecipeModal from '../components/modals/ApplyMergeRecipeModal'
 import CustomModelUploadModal from '../components/modals/CustomModelUploadModal'
 import TrainModelModal from '../components/modals/TrainModelModal'
 import ManageModelsModal from '../components/modals/ManageModelsModal'
-import { useState, useEffect, useRef, Fragment } from 'react'
+import { useState, useEffect, useRef, useMemo, Fragment } from 'react'
 import { Box, Button, Typography, IconButton, Checkbox, Popover, Paper, Select, FormControl, InputLabel, OutlinedInput, Chip } from '@mui/material'
 import PopupState, { bindTrigger, bindMenu } from 'material-ui-popup-state'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
@@ -679,25 +679,24 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
   // (e.g. after a crop) instead of always jumping back to the base channel.
   async function renderAnnotations(imgId, preferredChannelId = null) {
     try {
-      const [channelsRes, annosRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/load-channels`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image_id: imgId }),
-          credentials: 'include',
-        }),
-        fetch(`${API_BASE_URL}/load-annotations`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image_id: imgId }),
-          credentials: 'include',
-        }),
-      ])
+      const channelsRes = await fetch(`${API_BASE_URL}/load-channels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_id: imgId }),
+        credentials: 'include',
+      })
 
       if (!channelsRes.ok) throw new Error('Load channels failed')
-      if (!annosRes.ok) throw new Error('Load failed')
-
       const channelList = await channelsRes.json()
+      const baseChannel = channelList.find(channel => channel.id === preferredChannelId) || channelList.find(channel => channel.is_base) || channelList[0]
+      const requestedChannelIds = overlayChannels ? channelList.map(channel => channel.id) : (baseChannel ? [baseChannel.id] : [])
+      const annosRes = await fetch(`${API_BASE_URL}/load-annotations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_id: imgId, channel_ids: requestedChannelIds }),
+        credentials: 'include',
+      })
+      if (!annosRes.ok) throw new Error('Load failed')
       const data = await annosRes.json()
       const annoList = data.annotations || []
       setAnnotations(annoList)
@@ -2315,23 +2314,28 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
     }
   }
 
-  const selectedRow = detectionSettings.find(r => r.id === selectedDetectionSettingId)
-  const selectedRowModel = models.find(m => m.id === selectedRow?.selectedModelId)
+  const selectedRow = useMemo(() => detectionSettings.find(r => r.id === selectedDetectionSettingId), [detectionSettings, selectedDetectionSettingId])
+  const selectedRowModel = useMemo(() => models.find(m => m.id === selectedRow?.selectedModelId), [models, selectedRow])
   const selectedRowClasses = selectedRowModel?.label_set?.labels || []
   const [activeRowIds, setActiveRowIds] = useState([detectionSettings[0]?.id].filter(Boolean))
 
   // "Overlay channels" composites every visible channel (tinted by its assigned
   // color) onto the canvas; otherwise only the currently selected channel is shown.
-  const visibleChannelIds = new Set(channels.filter(c => c.visible !== false).map(c => c.id))
-  const canvasLayers = mergedActive ? mergedLayer.layers : overlayChannels
+  const visibleChannelIds = useMemo(() => new Set(channels.filter(c => c.visible !== false).map(c => c.id)), [channels])
+  const visibleBoxes = useMemo(() => overlayChannels
+    ? boxes.filter(box => visibleChannelIds.has(box.channel_id))
+    : boxes.filter(box => box.channel_id === selectedChannelId && visibleChannelIds.has(box.channel_id)),
+  [boxes, overlayChannels, selectedChannelId, visibleChannelIds])
+  const canvasLayers = useMemo(() => mergedActive ? mergedLayer.layers : overlayChannels
     ? channels.filter(c => visibleChannelIds.has(c.id)).map(c => ({ id: c.id, src: c.channelUrl, color: c.channelColor }))
-    : (selectedChannelId && visibleChannelIds.has(selectedChannelId) ? [{ id: selectedChannelId, src: imageURL, color: null }] : [])
+    : (selectedChannelId && visibleChannelIds.has(selectedChannelId) ? [{ id: selectedChannelId, src: imageURL, color: null }] : []),
+  [mergedActive, mergedLayer, overlayChannels, channels, visibleChannelIds, selectedChannelId, imageURL])
 
   useEffect(() => {
     console.log(detectionSettings)
   }, [detectionSettings])
 
-  const channelMenuRows = mergedLayer?.imageId === imageID ? [mergedLayer, ...channels] : channels
+  const channelMenuRows = useMemo(() => mergedLayer?.imageId === imageID ? [mergedLayer, ...channels] : channels, [mergedLayer, imageID, channels])
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100vw', overflow: 'hidden' }}>
@@ -3234,7 +3238,7 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
           <Box sx={{ flexGrow: 1, display: 'flex', justifyContent: 'center', bgcolor: '#111' }}>
             <ImageCanvas layers={canvasLayers} readOnly={!!importedPreview || !!mergedActive} boxes={mergedActive ? mergedLayer.boxes : importedPreview && importedPreview.imageId === imageID
               ? visibleImportedBoxes(importedPreview.boxes, overlayChannels, visibleChannelIds, selectedChannelId)
-              : overlayChannels ? boxes.filter(b => visibleChannelIds.has(b.channel_id)) : boxes.filter(b => b.channel_id === selectedChannelId && visibleChannelIds.has(b.channel_id))} onAddBox={handleAddBox}
+              : visibleBoxes} onAddBox={handleAddBox}
               onRemoveBox={handleRemoveBox} isCropping={isCropping && !mergedActive} onCrop={handleCrop}
               currentClass={currentClass} classes={classes} imageSize={imageSize}
               brightness={brightness} contrast={contrast}
