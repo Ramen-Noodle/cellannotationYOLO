@@ -387,13 +387,12 @@ export default function CombineAnnotationsPage() {
       const row = index % 3
       const column = Math.floor(index / 3)
       return [...previous, {
-        id: `${type === 'rule' ? 'rule' : 'output'}:${id}`, created: true, type, role: type === 'rule' ? 'rule' : 'output', name: type === 'rule' ? 'IoU rule' : 'New class', count: 0,
+        id: `${type === 'rule' ? 'rule' : 'output'}:${id}`, created: true, type, role: type === 'rule' ? 'rule' : 'output', name: type === 'rule' ? 'IoU node' : 'Output', count: 0,
         outputMappings: type === 'class' ? [] : undefined,
         ruleType: 'iou', threshold: 0.25, color: CLASS_NODE_DEFAULT_COLOR, x: 32 + channels.length * 250 + column * 230, y: 32 + row * 116,
       }]
     })
   }
-  const updateNodeName = (nodeId, name) => setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, name } : node))
   const updateNodeRule = (nodeId, field, value) => {
     if (field === 'ruleType') {
       setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, [field]: value } : node))
@@ -403,6 +402,9 @@ export default function CombineAnnotationsPage() {
     setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, threshold: Number.isFinite(numericValue) ? numericValue : 0 } : node))
   }
   const selectedImage = images.find(image => image.id === imageId)
+  const nodeLabel = node => node.type === 'rule'
+    ? `${node.ruleType === 'containment' ? 'Containment' : 'IoU'} node`
+    : node.role === 'output' ? 'Output' : node.name
   const openNewRecipe = () => {
     setEditingRecipe(null)
     setRecipeId('')
@@ -488,7 +490,7 @@ export default function CombineAnnotationsPage() {
     const source = displayNodes.find(node => node.id === sourceId)
     if (!source) return sourceId
     const label = source.sublabels?.length ? `${source.name} · ${source.sublabels.join(', ')}` : source.name
-    return source.channel ? `${source.channel}: ${label}` : label
+    return source.channel ? `${source.channel}: ${label}` : nodeLabel(source)
   }
   const draftOutputClasses = (outputTable?.rows || [])
     .filter(row => row.classId === NEW_OUTPUT_CLASS && row.label.trim())
@@ -498,7 +500,7 @@ export default function CombineAnnotationsPage() {
     version: 2,
     nodes: displayNodes.map(node => node.type === 'rule'
       ? { id: node.id, type: 'rule', rule_type: node.ruleType, threshold: node.threshold }
-      : { id: node.id, type: 'class', role: node.role, channel: node.channel, label: node.name, color: node.color, output_mappings: node.outputMappings || [] }),
+      : { id: node.id, type: 'class', role: node.role, channel: node.channel, label: nodeLabel(node), color: node.color, output_mappings: node.outputMappings || [] }),
     edges: connections.map(connection => ({ source: connection.source, target: connection.target })),
   })
   const formatPreview = data => {
@@ -545,7 +547,7 @@ export default function CombineAnnotationsPage() {
         </Box>
         <Stack direction="row" spacing={1}>
           <Button variant="outlined" size="small" onClick={openNewRecipe} disabled={loadingImages || images.length === 0}>New recipe</Button>
-          <Box component="button" type="button" onClick={() => addNode('class')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: 'divider', borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add output</Box>
+          <Box component="button" type="button" onClick={() => addNode('class')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: CLASS_NODE_DEFAULT_COLOR, borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add output</Box>
           <Box component="button" type="button" onClick={() => addNode('rule')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: CLASS_NODE_DEFAULT_COLOR, borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add rule</Box>
           <Button variant="outlined" size="small" onClick={previewMergedAnnotations} disabled={!imageId || loadingAnnotations || previewLoading}>{previewLoading ? 'Previewing…' : 'Preview'}</Button>
         </Stack>
@@ -589,11 +591,11 @@ export default function CombineAnnotationsPage() {
           sx={{ position: 'absolute', left: node.x, top: node.y + 24, width: 196, minHeight: 74, p: 1.25, boxSizing: 'border-box', border: `2px solid ${node.color}`, borderRadius: 1, bgcolor: 'rgba(25, 29, 40, 0.98)', cursor: 'grab', userSelect: 'none', '&:active': { cursor: 'grabbing' } }}>
           {node.created && <Box role="button" tabIndex={0} aria-label="Connect to node" onPointerUp={event => completeConnection(event, node)} sx={{ position: 'absolute', left: -7, top: 31, width: 12, height: 12, borderRadius: '50%', bgcolor: node.color, border: '2px solid #10131b', cursor: 'crosshair' }} />}
           <Box role="button" tabIndex={0} aria-label="Start connection" onPointerDown={event => beginConnection(event, node)} sx={{ position: 'absolute', right: -7, top: 31, width: 12, height: 12, borderRadius: '50%', bgcolor: node.color, border: '2px solid #10131b', cursor: 'crosshair' }} />
-          {node.created && <Box component="button" type="button" aria-label={`Delete ${node.name}`} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); removeNode(node.id) }} sx={{ position: 'absolute', right: 5, top: 4, width: 20, height: 20, p: 0, border: 0, bgcolor: 'transparent', color: 'text.secondary', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>×</Box>}
+          {node.created && <Box component="button" type="button" aria-label={`Delete ${nodeLabel(node)}`} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); removeNode(node.id) }} sx={{ position: 'absolute', right: 5, top: 4, width: 20, height: 20, p: 0, border: 0, bgcolor: 'transparent', color: 'text.secondary', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>×</Box>}
           {node.created
-            ? <Box component="input" aria-label={node.type === 'rule' ? 'Rule output class name' : 'Class name'} value={node.name} onChange={event => updateNodeName(node.id, event.target.value)} onPointerDown={event => event.stopPropagation()} title={node.name} sx={{ display: 'block', width: '100%', p: 0, border: 0, outline: 0, bgcolor: 'transparent', color: node.color, font: 'inherit', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} />
+            ? <Typography variant="body2" title={nodeLabel(node)} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nodeLabel(node)}</Typography>
             : <Typography variant="body2" title={node.sublabels?.length ? `${node.name} · ${node.sublabels.join(', ')}` : node.name} sx={{ color: node.color, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.sublabels?.length ? `${node.name} · ${node.sublabels.join(', ')}` : node.name}</Typography>}
-          {node.created && node.role === 'output' && <Button size="small" variant="outlined" onClick={event => { event.stopPropagation(); openOutputTable(node) }} onPointerDown={event => event.stopPropagation()} sx={{ mt: 0.75 }}>Edit table</Button>}
+          {node.created && node.role === 'output' && <Button size="small" variant="outlined" onClick={event => { event.stopPropagation(); openOutputTable(node) }} onPointerDown={event => event.stopPropagation()} sx={{ mt: 0.75, width: '100%', justifyContent: 'flex-start', color: 'text.primary', fontSize: 12, py: 0.7, px: 0.75 }}>Edit table</Button>}
           {node.created && node.type === 'rule'
             ? <Stack spacing={0.75} sx={{ mt: 0.75 }}>
                 <Stack direction="row" spacing={0.75}>
@@ -614,7 +616,7 @@ export default function CombineAnnotationsPage() {
         </Box>
       </Box>
       <Dialog open={Boolean(outputTable)} onClose={() => setOutputTable(null)} fullWidth maxWidth="md">
-        <DialogTitle>{displayNodes.find(node => node.id === outputTable?.nodeId)?.name || ''}</DialogTitle>
+        <DialogTitle>{displayNodes.find(node => node.id === outputTable?.nodeId) ? nodeLabel(displayNodes.find(node => node.id === outputTable?.nodeId)) : ''}</DialogTitle>
         <DialogContent dividers>
           <RowMenu
             rows={outputTable?.rows || []}
