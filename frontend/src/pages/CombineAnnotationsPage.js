@@ -43,6 +43,7 @@ export default function CombineAnnotationsPage() {
   const [recipeSourceType, setRecipeSourceType] = useState('image')
   const [recipeSourceId, setRecipeSourceId] = useState('')
   const [imageId, setImageId] = useState('')
+  const [annotationReloadKey, setAnnotationReloadKey] = useState(0)
   const [channels, setChannels] = useState([])
   const [annotations, setAnnotations] = useState([])
   const [nodes, setNodes] = useState([])
@@ -62,6 +63,7 @@ export default function CombineAnnotationsPage() {
   const dragRef = useRef(null)
   const panRef = useRef(null)
   const graphRef = useRef(null)
+  const loadedAnnotationsImageRef = useRef('')
 
   useEffect(() => {
     let cancelled = false
@@ -87,6 +89,7 @@ export default function CombineAnnotationsPage() {
   useEffect(() => {
     if (!imageId) return
     let cancelled = false
+    loadedAnnotationsImageRef.current = ''
     setLoadingAnnotations(true)
     setError('')
     Promise.all([
@@ -100,14 +103,14 @@ export default function CombineAnnotationsPage() {
         if (!annotationsResponse.ok) throw new Error(annotationData.error || 'Could not load annotations.')
         return { channelData, annotationData }
       })
-      .then(({ channelData, annotationData }) => { if (!cancelled) { setChannels(channelData); setAnnotations(annotationData.annotations || []) } })
+      .then(({ channelData, annotationData }) => { if (!cancelled) { setChannels(channelData); setAnnotations(annotationData.annotations || []); loadedAnnotationsImageRef.current = imageId } })
       .catch(loadError => { if (!cancelled) setError(loadError.message) })
       .finally(() => { if (!cancelled) setLoadingAnnotations(false) })
     return () => { cancelled = true }
-  }, [imageId])
+  }, [imageId, annotationReloadKey])
 
   useEffect(() => {
-    if (!pendingRecipe || loadingAnnotations) return
+    if (!pendingRecipe || loadingAnnotations || !imageId || loadedAnnotationsImageRef.current !== imageId) return
     const savedNodes = pendingRecipe.recipe?.nodes || []
     const created = savedNodes.filter(node => node.role !== 'input').map((node, index) => ({
       ...node,
@@ -132,7 +135,7 @@ export default function CombineAnnotationsPage() {
     }))
     setOutputClasses(savedClasses)
     setPendingRecipe(null)
-  }, [pendingRecipe, loadingAnnotations, channels.length])
+  }, [pendingRecipe, loadingAnnotations, imageId, channels.length])
 
   useEffect(() => {
     setCreatedNodes([])
@@ -380,11 +383,13 @@ export default function CombineAnnotationsPage() {
   const chooseRecipe = value => {
     const recipe = recipes.find(candidate => candidate.id === value)
     if (!recipe) return
+    loadedAnnotationsImageRef.current = ''
     setRecipeId(value)
     setEditingRecipe(recipe)
     setRecipeName(recipe.name)
     setPendingRecipe(recipe)
     setImageId(images[0]?.id || '')
+    setAnnotationReloadKey(previous => previous + 1)
   }
   const startRecipe = () => {
     if (!recipeName.trim()) {
