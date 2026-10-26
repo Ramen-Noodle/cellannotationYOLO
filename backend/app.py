@@ -2,7 +2,7 @@ import sys
 import json
 import re
 from difflib import SequenceMatcher
-from annotation_export import annotation_rows, yolo_line, serialize_annotations, channel_label
+from annotation_export import annotation_rows, yolo_line, serialize_annotations, channel_label, normalized_box, confidence_value
 from werkzeug.utils import secure_filename  # ADD THIS AT TOP OF FILE
 from flask import Flask, request, jsonify, send_from_directory, send_file, g
 import os
@@ -901,6 +901,57 @@ def _image_export(image_record, user_id, label_format, include_confidence):
     return files
 
 
+def _merged_layer_export(image_record, user_id, label_format, include_confidence):
+    """Build an export package from the image's persisted merged layer."""
+    layer = MergedLayer.query.filter_by(image_id=image_record.id, user_id=user_id).first()
+    if layer is None:
+        raise ValueError(f'No merged layer exists for image {image_record.id}')
+
+    boxes = layer.annotations or []
+    names = sorted({box.get('name') or box.get('output_node_id') or 'Class 0' for box in boxes})
+    class_mapping = [
+        {'id': index, 'name': name, 'color': next(
+            (box.get('color') for box in boxes if (box.get('name') or box.get('output_node_id') or 'Class 0') == name),
+            '#ffffff'
+        )}
+        for index, name in enumerate(names)
+    ]
+    class_ids = {entry['name']: entry['id'] for entry in class_mapping}
+    rows = []
+    for box in boxes:
+        name = box.get('name') or box.get('output_node_id') or 'Class 0'
+        rows.append({
+            'class_id': class_ids[name],
+            'class_name': name,
+            'box': normalized_box(box, image_record.width, image_record.height),
+            'confidence': confidence_value(box.get('confidence')),
+        })
+
+    lines = []
+    for row in rows:
+        label = row['class_name'] if label_format == 'name' else None
+        lines.append(yolo_line(row, label=label, include_confidence=include_confidence))
+    filename = f'{image_record.id}_merged.txt'
+    metadata = {
+        'schema_version': 2,
+        'image_id': image_record.id,
+        'image_name': image_record.base_channel.name if image_record.base_channel else None,
+        'width': image_record.width,
+        'height': image_record.height,
+        'coordinates': 'normalized_center_x_center_y_width_height',
+        'columns': ['class', 'center_x', 'center_y', 'width', 'height']
+                   + (['confidence'] if include_confidence else []),
+        'label_format': label_format,
+        'missing_confidence': None,
+        'layer': 'merged',
+        'class_mapping': class_mapping,
+    }
+    return {
+        filename: '\n'.join(lines),
+        f'{image_record.id}_merged.metadata.json': json.dumps(metadata, indent=2, allow_nan=False),
+    }
+
+
 @app.route('/export-annotations', methods=['POST'])
 def export_annotations():
     if not g.user:
@@ -910,8 +961,11 @@ def export_annotations():
         image_id, image_set_id = data.get('image_id'), data.get('image_set_id')
         label_format = data.get('label_format', 'name')
         include_confidence = bool(data.get('include_confidence', False))
+        layer = data.get('layer', 'original')
         if label_format not in ('name', 'number'):
             return jsonify({'error': 'Invalid label_format'}), 400
+        if layer not in ('original', 'merged'):
+            return jsonify({'error': 'Invalid annotation layer'}), 400
         if image_set_id:
             image_set = ImageSet.query.filter_by(id=image_set_id, user_id=g.user.id).first()
             if image_set is None:
@@ -930,7 +984,8 @@ def export_annotations():
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
             for image in images:
-                for filename, contents in _image_export(image, g.user.id, label_format, include_confidence).items():
+                exporter = _merged_layer_export if layer == 'merged' else _image_export
+                for filename, contents in exporter(image, g.user.id, label_format, include_confidence).items():
                     archive.writestr(filename, contents)
         buffer.seek(0)
         return send_file(buffer, mimetype='application/zip', as_attachment=True,

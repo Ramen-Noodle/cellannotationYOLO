@@ -195,6 +195,7 @@ def _convert(active, source_id, target_id, target_node, audit):
         if cell['node_id'] == source_id or cell.get('output_parent_id') == source_id:
             cell['node_id'] = target_id
             cell.pop('output_parent_id', None)
+            cell.pop('sublabel', None)
             cell['name'] = _node_label(target_node)
             cell['color'] = _node_color(target_node, cell.get('color', '#ffffff'))
             changed += 1
@@ -304,6 +305,9 @@ def _apply_rule(active, rule_id, rule_node, input_ids, output_id, output_node, a
         if mapping and mapping.get('exclude') is True:
             continue
         merged['name'] = (mapping.get('label') if mapping and mapping.get('label') else _node_label(output_node)) if output_node else _node_label(rule_node)
+        # Merged outputs use their output class name only. Source sublabels do
+        # not carry through to a newly created merged annotation.
+        merged.pop('sublabel', None)
         if output_node:
             merged['color'] = _node_color(mapping, _node_color(output_node, merged.get('color', '#ffffff'))) if mapping else _node_color(output_node, merged.get('color', '#ffffff'))
             if output_node.get('role') == 'output':

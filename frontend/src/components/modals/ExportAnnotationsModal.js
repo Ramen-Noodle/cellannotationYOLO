@@ -20,6 +20,8 @@ export default function ExportAnnotationsModal({
   setExportLabelFormat,
   exportIncludeConfidence,
   setExportIncludeConfidence,
+  exportLayer,
+  setExportLayer,
   exportAnnotations,
 }) {
   return (
@@ -114,6 +116,19 @@ export default function ExportAnnotationsModal({
               </Select>
             </FormControl>
           )}
+
+          <FormControl fullWidth size="small">
+            <InputLabel id="export-layer-label">Annotations</InputLabel>
+            <Select
+              labelId="export-layer-label"
+              label="Annotations"
+              value={exportLayer}
+              onChange={(e) => setExportLayer(e.target.value)}
+            >
+              <MenuItem value="original">Original annotations</MenuItem>
+              <MenuItem value="merged">Merged layer</MenuItem>
+            </Select>
+          </FormControl>
     
           <Divider />
     

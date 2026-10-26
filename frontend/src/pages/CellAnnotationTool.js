@@ -1183,7 +1183,7 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
 
       // Only the currently active image can have unsaved edits sitting in the
       // canvas, so flush those before export to avoid downloading a stale file.
-      if (isImageSet || exportImageId === imageID) {
+      if (exportLayer === 'original' && (isImageSet || exportImageId === imageID)) {
         if (!(await saveAnnotations())) throw new Error('Save failed; export cancelled')
       }
 
@@ -1192,6 +1192,7 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...(isImageSet ? { image_set_id: exportImageSetId } : { image_id: exportImageId }),
+          layer: exportLayer,
           label_format: exportLabelFormat,
           include_confidence: exportIncludeConfidence,
         }),
@@ -1842,6 +1843,7 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
   const [exportImageSetId, setExportImageSetId] = useState(null)
   const [exportLabelFormat, setExportLabelFormat] = useState('name') // 'name' | 'number'
   const [exportIncludeConfidence, setExportIncludeConfidence] = useState(false)
+  const [exportLayer, setExportLayer] = useState('original')
   const [clearModalOpen, setClearModalOpen] = useState(false)
   const [batchDetectModalOpen, setBatchDetectModalOpen] = useState(false)
   function currentBatchRows() {
@@ -2636,12 +2638,13 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
             {/* 2. EXPORT ANNOTATIONS (Triggers new Configuration Modal) */}
             <Tooltip title="Download Options" arrow>
               <IconButton
-                disabled={!!importedPreview || !!mergedActive}
+                disabled={!!importedPreview}
                 color="primary"
                 onClick={() => {
                   // Default to the currently active image on open
                   setExportImageId(imageID)
                   setExportImageSetId(null)
+                  setExportLayer(mergedActive ? 'merged' : 'original')
                   setExportModalOpen(true)
                 }}
                 sx={{ p: 1.5 }}
@@ -2665,6 +2668,8 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
               setExportLabelFormat={setExportLabelFormat}
               exportIncludeConfidence={exportIncludeConfidence}
               setExportIncludeConfidence={setExportIncludeConfidence}
+              exportLayer={exportLayer}
+              setExportLayer={setExportLayer}
               exportAnnotations={exportAnnotations}
             />
 
