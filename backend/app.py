@@ -55,7 +55,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # Session expires after 24 hours
 
 from database import db
-from models import User, ImageRecord, Channel, ImageSet, Annotation, LabelSet, Weights, DetectionSetting
+from models import User, ImageRecord, Channel, ImageSet, Annotation, LabelSet, Weights, DetectionSetting, MergeRecipe
 from annotation_merging import evaluate_recipe, RecipeError
 from flask_migrate import Migrate
 
@@ -1485,6 +1485,133 @@ def combine_preview():
         'recipe': recipe,
     }), 200
 
+
+
+def _merge_recipe_payload(recipe):
+    return {
+        'id': recipe.id,
+        'name': recipe.name,
+        'recipe': recipe.recipe,
+        'source_classes': recipe.source_classes,
+    }
+
+
+@app.route('/merge-recipes', methods=['GET'])
+def list_merge_recipes():
+    if not g.user:
+        return jsonify({'error': 'No active session'}), 401
+    recipes = MergeRecipe.query.filter_by(user_id=g.user.id).order_by(MergeRecipe.name.asc()).all()
+    return jsonify([_merge_recipe_payload(recipe) for recipe in recipes]), 200
+
+
+@app.route('/merge-recipes', methods=['POST'])
+def create_merge_recipe():
+    if not g.user:
+        return jsonify({'error': 'No active session'}), 401
+    data = request.get_json()
+    if not data or 'name' not in data or 'recipe' not in data or 'source_classes' not in data:
+        return jsonify({'error': 'Missing name, recipe, or source_classes in request body'}), 400
+    if not isinstance(data['name'], str) or not data['name'].strip():
+        return jsonify({'error': 'Recipe name must be a non-empty string'}), 400
+    if not isinstance(data['recipe'], dict) or data['recipe'].get('version') != 2 or not isinstance(data['recipe'].get('nodes'), list) or not isinstance(data['recipe'].get('edges'), list):
+        return jsonify({'error': 'recipe must be a version 2 graph recipe'}), 400
+    if not isinstance(data['source_classes'], list):
+        return jsonify({'error': 'source_classes must be a list'}), 400
+    source_classes = []
+    for source in data['source_classes']:
+        if not isinstance(source, dict):
+            return jsonify({'error': 'Each source class must be an object'}), 400
+        channel = source.get('channel')
+        class_name = source.get('class_name')
+        label = source.get('label', '')
+        if not isinstance(channel, str) or not channel.strip() or not isinstance(class_name, str) or not class_name.strip():
+            return jsonify({'error': 'Each source class requires a channel and class_name'}), 400
+        if label is None:
+            label = ''
+        if not isinstance(label, str):
+            return jsonify({'error': 'Source class label must be a string'}), 400
+        source_classes.append({'channel': channel.strip(), 'class_name': class_name.strip(), 'label': label.strip()})
+    try:
+        recipe = MergeRecipe(
+            id=str(uuid.uuid4()), user_id=g.user.id, name=data['name'].strip(),
+            recipe=data['recipe'], source_classes=source_classes,
+        )
+        db.session.add(recipe)
+        db.session.commit()
+        return jsonify(_merge_recipe_payload(recipe)), 201
+    except Exception:
+        db.session.rollback()
+        app.logger.exception('Could not create merge recipe')
+        return jsonify({'error': 'Could not create merge recipe.'}), 500
+
+
+@app.route('/merge-recipes/<recipe_id>', methods=['PUT'])
+def update_merge_recipe(recipe_id):
+    if not g.user:
+        return jsonify({'error': 'No active session'}), 401
+    recipe = MergeRecipe.query.filter_by(id=recipe_id, user_id=g.user.id).first()
+    if not recipe:
+        return jsonify({'error': 'Merge recipe not found or unauthorized'}), 404
+    data = request.get_json()
+    if not data or 'name' not in data or 'recipe' not in data or 'source_classes' not in data:
+        return jsonify({'error': 'Missing name, recipe, or source_classes in request body'}), 400
+    if not isinstance(data['name'], str) or not data['name'].strip():
+        return jsonify({'error': 'Recipe name must be a non-empty string'}), 400
+    if not isinstance(data['recipe'], dict) or data['recipe'].get('version') != 2 or not isinstance(data['recipe'].get('nodes'), list) or not isinstance(data['recipe'].get('edges'), list):
+        return jsonify({'error': 'recipe must be a version 2 graph recipe'}), 400
+    if not isinstance(data['source_classes'], list):
+        return jsonify({'error': 'source_classes must be a list'}), 400
+    source_classes = []
+    for source in data['source_classes']:
+        if not isinstance(source, dict):
+            return jsonify({'error': 'Each source class must be an object'}), 400
+        channel = source.get('channel')
+        class_name = source.get('class_name')
+        label = source.get('label', '')
+        if not isinstance(channel, str) or not channel.strip() or not isinstance(class_name, str) or not class_name.strip():
+            return jsonify({'error': 'Each source class requires a channel and class_name'}), 400
+        if label is None:
+            label = ''
+        if not isinstance(label, str):
+            return jsonify({'error': 'Source class label must be a string'}), 400
+        source_classes.append({'channel': channel.strip(), 'class_name': class_name.strip(), 'label': label.strip()})
+    try:
+        recipe.name = data['name'].strip()
+        recipe.recipe = data['recipe']
+        recipe.source_classes = source_classes
+        db.session.commit()
+        return jsonify(_merge_recipe_payload(recipe)), 200
+    except Exception:
+        db.session.rollback()
+        app.logger.exception('Could not update merge recipe %s', recipe_id)
+        return jsonify({'error': 'Could not update merge recipe.'}), 500
+
+
+@app.route('/merge-recipes/<recipe_id>', methods=['GET'])
+def get_merge_recipe(recipe_id):
+    if not g.user:
+        return jsonify({'error': 'No active session'}), 401
+    recipe = MergeRecipe.query.filter_by(id=recipe_id, user_id=g.user.id).first()
+    if not recipe:
+        return jsonify({'error': 'Merge recipe not found or unauthorized'}), 404
+    return jsonify(_merge_recipe_payload(recipe)), 200
+
+
+@app.route('/merge-recipes/<recipe_id>', methods=['DELETE'])
+def delete_merge_recipe(recipe_id):
+    if not g.user:
+        return jsonify({'error': 'No active session'}), 401
+    recipe = MergeRecipe.query.filter_by(id=recipe_id, user_id=g.user.id).first()
+    if not recipe:
+        return jsonify({'error': 'Merge recipe not found or unauthorized'}), 404
+    try:
+        db.session.delete(recipe)
+        db.session.commit()
+        return jsonify({'success': True}), 200
+    except Exception:
+        db.session.rollback()
+        app.logger.exception('Could not delete merge recipe %s', recipe_id)
+        return jsonify({'error': 'Could not delete merge recipe.'}), 500
 
 
 # *----------* Data Removal Endpoints *----------* #

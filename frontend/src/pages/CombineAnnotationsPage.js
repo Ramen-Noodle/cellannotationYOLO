@@ -31,9 +31,17 @@ function annotationSublabels(annotation, labelIndex) {
   return [...new Set([...configured, ...perBox])]
 }
 
-export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
+export default function CombineAnnotationsPage() {
   const [images, setImages] = useState([])
   const [imageSets, setImageSets] = useState([])
+  const [recipes, setRecipes] = useState([])
+  const [recipeId, setRecipeId] = useState('')
+  const [editingRecipe, setEditingRecipe] = useState(null)
+  const [pendingRecipe, setPendingRecipe] = useState(null)
+  const [recipeModalOpen, setRecipeModalOpen] = useState(false)
+  const [recipeName, setRecipeName] = useState('')
+  const [recipeSourceType, setRecipeSourceType] = useState('image')
+  const [recipeSourceId, setRecipeSourceId] = useState('')
   const [imageId, setImageId] = useState('')
   const [channels, setChannels] = useState([])
   const [annotations, setAnnotations] = useState([])
@@ -60,14 +68,17 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     Promise.all([
       fetch(`${API_BASE_URL}/user-images`, { credentials: 'include' }),
       fetch(`${API_BASE_URL}/user-image-sets`, { credentials: 'include' }),
+      fetch(`${API_BASE_URL}/merge-recipes`, { credentials: 'include' }),
     ])
-      .then(async ([imagesResponse, setsResponse]) => {
+      .then(async ([imagesResponse, setsResponse, recipesResponse]) => {
         const data = await imagesResponse.json().catch(() => ({}))
         const sets = await setsResponse.json().catch(() => [])
+        const savedRecipes = await recipesResponse.json().catch(() => [])
         if (!imagesResponse.ok) throw new Error(data.error || 'Could not load images.')
-        return { data, sets: setsResponse.ok ? sets : [] }
+        if (!recipesResponse.ok) throw new Error(savedRecipes.error || 'Could not load recipes.')
+        return { data, sets: setsResponse.ok ? sets : [], savedRecipes }
       })
-      .then(({ data, sets }) => { if (!cancelled) { setImages(data); setImageSets(sets); if (data[0]) setImageId(data[0].id) } })
+      .then(({ data, sets, savedRecipes }) => { if (!cancelled) { setImages(data); setImageSets(sets); setRecipes(savedRecipes); } })
       .catch(loadError => { if (!cancelled) setError(loadError.message) })
       .finally(() => { if (!cancelled) setLoadingImages(false) })
     return () => { cancelled = true }
@@ -94,6 +105,34 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
       .finally(() => { if (!cancelled) setLoadingAnnotations(false) })
     return () => { cancelled = true }
   }, [imageId])
+
+  useEffect(() => {
+    if (!pendingRecipe || loadingAnnotations) return
+    const savedNodes = pendingRecipe.recipe?.nodes || []
+    const created = savedNodes.filter(node => node.role !== 'input').map((node, index) => ({
+      ...node,
+      created: true,
+      x: node.x ?? 32 + channels.length * 250 + Math.floor(index / 3) * 230,
+      y: node.y ?? 32 + (index % 3) * 116,
+      ruleType: node.rule_type || node.ruleType || 'iou',
+      threshold: node.threshold ?? 0.25,
+      outputMappings: node.output_mappings || node.outputMappings || [],
+    }))
+    setCreatedNodes(created)
+    setConnections((pendingRecipe.recipe?.edges || []).map(edge => ({
+      id: `${edge.source}->${edge.target}`,
+      source: edge.source,
+      target: edge.target,
+    })))
+    const savedClasses = []
+    created.forEach(node => (node.outputMappings || []).forEach(mapping => {
+      if (mapping.label && !savedClasses.some(outputClass => outputClass.name === mapping.label)) {
+        savedClasses.push({ id: mapping.class_id || `saved-output:${savedClasses.length}`, name: mapping.label, color: mapping.color || CLASS_NODE_DEFAULT_COLOR })
+      }
+    }))
+    setOutputClasses(savedClasses)
+    setPendingRecipe(null)
+  }, [pendingRecipe, loadingAnnotations, channels.length])
 
   useEffect(() => {
     setCreatedNodes([])
@@ -330,6 +369,85 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
     setCreatedNodes(previous => previous.map(node => node.id === nodeId ? { ...node, threshold: Number.isFinite(numericValue) ? numericValue : 0 } : node))
   }
   const selectedImage = images.find(image => image.id === imageId)
+  const openNewRecipe = () => {
+    setEditingRecipe(null)
+    setRecipeId('')
+    setRecipeName('')
+    setRecipeSourceType('image')
+    setRecipeSourceId(images[0]?.id || '')
+    setRecipeModalOpen(true)
+  }
+  const chooseRecipe = value => {
+    const recipe = recipes.find(candidate => candidate.id === value)
+    if (!recipe) return
+    setRecipeId(value)
+    setEditingRecipe(recipe)
+    setRecipeName(recipe.name)
+    setPendingRecipe(recipe)
+    setImageId(images[0]?.id || '')
+  }
+  const startRecipe = () => {
+    if (!recipeName.trim()) {
+      setError('Enter a recipe name.')
+      return
+    }
+    const targetImageId = recipeSourceType === 'set'
+      ? imageSets.find(imageSet => imageSet.id === recipeSourceId)?.images?.[0]?.id
+      : recipeSourceId
+    if (!targetImageId) {
+      setError('Choose an image or image set.')
+      return
+    }
+    setError('')
+    setEditingRecipe(null)
+    setRecipeId('')
+    setPendingRecipe(null)
+    setCreatedNodes([])
+    setConnections([])
+    setOutputClasses([])
+    setMergePreview(null)
+    setImageId(targetImageId)
+    setRecipeModalOpen(false)
+  }
+  const sourceClassesForRecipe = () => displayNodes
+    .filter(node => node.role === 'input')
+    .flatMap(node => (node.sublabels?.length ? node.sublabels : ['']).map(label => ({
+      channel: node.channel,
+      class_name: node.name,
+      label,
+    })))
+  const saveRecipe = async () => {
+    if (!recipeName.trim() && !editingRecipe?.name) {
+      setError('Enter a recipe name.')
+      return
+    }
+    setPreviewLoading(true)
+    setError('')
+    const payload = {
+      name: recipeName.trim() || editingRecipe.name,
+      recipe: buildRecipe(),
+      source_classes: sourceClassesForRecipe(),
+    }
+    try {
+      const response = await fetch(editingRecipe ? `${API_BASE_URL}/merge-recipes/${editingRecipe.id}` : `${API_BASE_URL}/merge-recipes`, {
+        method: editingRecipe ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || 'Could not save recipe.')
+      setRecipes(previous => editingRecipe ? previous.map(recipe => recipe.id === data.id ? data : recipe) : [...previous, data])
+      setRecipeId(data.id)
+      setEditingRecipe(data)
+      setRecipeName(data.name)
+      setMergePreview(null)
+    } catch (saveError) {
+      setError(saveError.message)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
   const sourceDisplayName = sourceId => {
     const source = displayNodes.find(node => node.id === sourceId)
     if (!source) return sourceId
@@ -382,26 +500,6 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
       setPreviewLoading(false)
     }
   }
-  const applyRecipe = async target => {
-    if (!imageId || !onApplyMergedLayer) return
-    setPreviewLoading(true)
-    setError('')
-    try {
-      const targetIds = target.type === 'set'
-        ? (imageSets.find(imageSet => imageSet.id === target.imageSetId)?.images || []).map(image => image.id)
-        : [imageId]
-      if (!targetIds.length) throw new Error('The selected image set has no images.')
-      const results = await Promise.all(targetIds.map(previewRecipeForImage))
-      results.forEach(onApplyMergedLayer)
-      const currentResult = results.find(result => result.imageId === imageId)
-      if (currentResult) setMergePreview(currentResult)
-    } catch (applyError) {
-      setError(applyError.message)
-    } finally {
-      setPreviewLoading(false)
-    }
-  }
-
   return (
     <Box sx={{ height: '100%', p: 3, boxSizing: 'border-box', bgcolor: 'background.default', overflow: 'auto' }}>
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }} sx={{ mb: 2 }}>
@@ -410,20 +508,21 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
           <Typography color="text.secondary" variant="body2">Connect loaded classes into user-created nodes to define merge relationships.</Typography>
         </Box>
         <Stack direction="row" spacing={1}>
+          <Button variant="outlined" size="small" onClick={openNewRecipe} disabled={loadingImages || images.length === 0}>New recipe</Button>
           <Box component="button" type="button" onClick={() => addNode('class')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: 'divider', borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add output</Box>
           <Box component="button" type="button" onClick={() => addNode('rule')} disabled={!imageId} sx={{ px: 1.5, py: 0.75, border: 1, borderColor: CLASS_NODE_DEFAULT_COLOR, borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', cursor: imageId ? 'pointer' : 'not-allowed' }}>Add rule</Box>
           <Button variant="outlined" size="small" onClick={previewMergedAnnotations} disabled={!imageId || loadingAnnotations || previewLoading}>{previewLoading ? 'Previewing…' : 'Preview'}</Button>
         </Stack>
-        <FormControl size="small" sx={{ minWidth: 280 }} disabled={loadingImages || images.length === 0}>
-          <InputLabel id="combine-image-label">Image</InputLabel>
-          <Select labelId="combine-image-label" label="Image" value={imageId} onChange={event => setImageId(event.target.value)}>
-            {images.map(image => <MenuItem key={image.id} value={image.id}>{image.name || image.id}</MenuItem>)}
+        <FormControl size="small" sx={{ minWidth: 280 }} disabled={loadingImages || recipes.length === 0}>
+          <InputLabel id="combine-recipe-label">Recipe</InputLabel>
+          <Select labelId="combine-recipe-label" label="Recipe" value={recipeId} onChange={event => chooseRecipe(event.target.value)}>
+            {recipes.map(recipe => <MenuItem key={recipe.id} value={recipe.id}>{recipe.name}</MenuItem>)}
           </Select>
         </FormControl>
       </Stack>
       {loadingImages && <Stack direction="row" spacing={1} alignItems="center"><CircularProgress size={18} /><Typography>Loading images…</Typography></Stack>}
       {error && <Alert severity="info" sx={{ mb: 2 }}>{error}</Alert>}
-      {!loadingImages && images.length === 0 && !error && <Alert severity="info">No images are available yet.</Alert>}
+      {!loadingImages && recipes.length === 0 && !error && <Alert severity="info">No recipes are available yet.</Alert>}
       {loadingAnnotations && <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}><CircularProgress size={18} /><Typography>Loading channel annotations…</Typography></Stack>}
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>Connect classes directly to relabel them. Connect classes to a rule node to merge with IoU or containment, then choose output classes in the output table.</Typography>
       <Box ref={graphRef} onPointerDown={beginGraphPan} onPointerMove={event => { dragGraphPan(event); dragNode(event); dragConnection(event) }} onPointerUp={event => { finishGraphPan(event); finishDrag(event); cancelConnection() }} onPointerCancel={event => { finishGraphPan(event); finishDrag(event); cancelConnection() }} onWheel={handleGraphWheel} onContextMenu={event => event.preventDefault()}
@@ -521,12 +620,40 @@ export default function CombineAnnotationsPage({ onApplyMergedLayer }) {
           <Button variant="contained" onClick={saveOutputTable}>Save</Button>
         </DialogActions>
       </Dialog>
+      <Dialog open={recipeModalOpen} onClose={() => setRecipeModalOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>New recipe</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <TextField label="Name" value={recipeName} onChange={event => setRecipeName(event.target.value)} autoFocus />
+            <FormControl fullWidth size="small">
+              <InputLabel id="recipe-source-type-label">Source</InputLabel>
+              <Select labelId="recipe-source-type-label" label="Source" value={recipeSourceType} onChange={event => {
+                const type = event.target.value
+                setRecipeSourceType(type)
+                setRecipeSourceId(type === 'image' ? (images[0]?.id || '') : (imageSets[0]?.id || ''))
+              }}>
+                <MenuItem value="image">Image</MenuItem>
+                <MenuItem value="set">Image set</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl fullWidth size="small">
+              <InputLabel id="recipe-source-label">{recipeSourceType === 'image' ? 'Image' : 'Image set'}</InputLabel>
+              <Select labelId="recipe-source-label" label={recipeSourceType === 'image' ? 'Image' : 'Image set'} value={recipeSourceId} onChange={event => setRecipeSourceId(event.target.value)}>
+                {(recipeSourceType === 'image' ? images : imageSets).map(source => <MenuItem key={source.id} value={source.id}>{source.name || source.id}</MenuItem>)}
+              </Select>
+            </FormControl>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRecipeModalOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={startRecipe}>Create</Button>
+        </DialogActions>
+      </Dialog>
       {selectedImage && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{selectedImage.name} · {channels.length} channel{channels.length === 1 ? '' : 's'} · {displayNodes.length} node{displayNodes.length === 1 ? '' : 's'} · {connections.length} connection{connections.length === 1 ? '' : 's'}</Typography>}
       <MergePreviewModal
         preview={mergePreview}
         onClose={() => setMergePreview(null)}
-        onApply={applyRecipe}
-        applyTargets={{ sets: imageSets }}
+        onSave={saveRecipe}
       />
     </Box>
   )

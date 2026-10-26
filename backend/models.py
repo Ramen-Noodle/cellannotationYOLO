@@ -13,6 +13,7 @@ class User(db.Model):
     label_sets = db.relationship('LabelSet', cascade='all, delete-orphan', backref='user')
     weights = db.relationship('Weights', cascade='all, delete-orphan', backref='user')
     detection_settings = db.relationship('DetectionSetting', cascade='all, delete-orphan', backref='user')
+    merge_recipes = db.relationship('MergeRecipe', cascade='all, delete-orphan', backref='user')
     # Add this inside class User(db.Model):
     image_sets = db.relationship('ImageSet', cascade='all, delete-orphan', backref='user')
 
@@ -175,6 +176,16 @@ class DetectionSetting(db.Model):
 
     annotations = db.relationship('Annotation', backref='detection_setting')
 
+
+
+class MergeRecipe(db.Model):
+    __tablename__ = 'merge_recipe'
+
+    id = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.String(36), db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    name = db.Column(db.String(255), nullable=False)
+    recipe = db.Column(db.JSON, nullable=False)
+    source_classes = db.Column(db.JSON, nullable=False, default=list)
 
 
 class Annotation(db.Model):
