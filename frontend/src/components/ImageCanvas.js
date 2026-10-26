@@ -104,7 +104,7 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
       right: visibleRight,
       bottom: visibleBottom,
     })
-  }, [boxes, offset, scale, imageSize, windowSize, viewportSize])
+  }, [boxes, offset, scale, imageSize, viewportSize])
 
   const [windowSize, setWindowSize] = useState({
     width: window.innerWidth,
