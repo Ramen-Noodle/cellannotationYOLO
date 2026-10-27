@@ -5,6 +5,7 @@ import CssBaseline from '@mui/material/CssBaseline'
 import CellAnnotationTool from './pages/CellAnnotationTool'
 import ErrorBoundary from './components/ErrorBoundary'
 import CombineAnnotationsPage from './pages/CombineAnnotationsPage'
+import CombineAnnotationsTwoPhasePage from './pages/CombineAnnotationsTwoPhasePage'
 
 const theme = createTheme({
   palette: {
@@ -169,11 +170,20 @@ function App() {
             >
               Combine Annotations
             </Button>
+            <Button
+              size="small"
+              variant={page === 'combine-two-phase' ? 'contained' : 'text'}
+              onClick={() => setPage('combine-two-phase')}
+            >
+              Combine Annotations — Two Phase
+            </Button>
           </Box>
           <Box sx={{ height: 'calc(100vh - 48px)', pt: '48px', boxSizing: 'border-box' }}>
             {page === 'annotations'
               ? <CellAnnotationTool appliedMergedLayers={appliedMergedLayers} onApplyMergedLayer={applyMergedLayer} />
-              : <CombineAnnotationsPage onApplyMergedLayer={applyMergedLayer} />}
+              : page === 'combine'
+                ? <CombineAnnotationsPage onApplyMergedLayer={applyMergedLayer} />
+                : <CombineAnnotationsTwoPhasePage />}
           </Box>
         </Box>
       </ErrorBoundary>
