@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
+import TwoPhaseWithinChannelGraph from '../components/TwoPhaseWithinChannelGraph'
+import { evaluateWithinChannel } from '../utils/twoPhaseWithinChannel.mjs'
 import {
   Alert, Box, Button, Checkbox, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, FormControl, FormControlLabel, InputLabel,
@@ -49,58 +51,6 @@ function mergeGroup(group, label) {
   return { ...representative, name: label, label, originalLabel: label, members: group }
 }
 
-function applyWithinRules(cells, rules) {
-  let active = cells.map(cell => ({ ...cell }))
-  rules.forEach(rule => {
-    const candidates = active.map((cell, index) => ({ cell, index })).filter(item => item.cell.channel === rule.channel && rule.inputs.includes(item.cell.originalLabel))
-    const consumed = new Set()
-    const produced = []
-    candidates.forEach(seed => {
-      if (consumed.has(seed.index)) return
-      const group = [seed]
-      candidates.forEach(candidate => {
-        if (candidate.index === seed.index || consumed.has(candidate.index) || group.some(item => item.index === candidate.index)) return
-        const score = overlap(seed.cell, candidate.cell)
-        if (score.iou >= rule.iou || score.containment >= rule.containment) group.push(candidate)
-      })
-      const present = new Set(group.map(item => item.cell.originalLabel))
-      if (group.length < 2 || rule.inputs.some(input => !present.has(input))) return
-      group.forEach(item => consumed.add(item.index))
-      const sourceBoxes = group.map(item => item.cell)
-      const representative = rule.strategy === 'dominance'
-        ? sourceBoxes.find(cell => cell.originalLabel === rule.inputs[0]) || sourceBoxes[0]
-        : sourceBoxes.slice().sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0]
-      produced.push({ ...mergeGroup(sourceBoxes, rule.label), ...representative, name: rule.label, label: rule.label, originalLabel: rule.label, members: sourceBoxes, supports: sourceBoxes.flatMap(cell => cell.supports || [cell]) })
-    })
-    active = active.filter((_, index) => !consumed.has(index)).concat(produced)
-  })
-  return active
-}
-
-function automaticContainmentCleanup(cells, threshold = 0.95) {
-  const active = []
-  const byChannel = new Map()
-  cells.forEach((cell, index) => {
-    if (!['C1', 'C2'].includes(cell.channel)) {
-      active.push({ ...cell, sourceIndex: index })
-      return
-    }
-    const list = byChannel.get(cell.channel) || []
-    list.push({ ...cell, sourceIndex: index })
-    byChannel.set(cell.channel, list)
-  })
-  byChannel.forEach(channelCells => {
-    const consumed = new Set()
-    channelCells.slice().sort((a, b) => (b.w * b.h) - (a.w * a.h)).forEach(large => {
-      if (consumed.has(large.sourceIndex)) return
-      const duplicates = channelCells.filter(small => small.sourceIndex !== large.sourceIndex && !consumed.has(small.sourceIndex) && overlap(large, small).containment > threshold)
-      duplicates.forEach(small => consumed.add(small.sourceIndex))
-      active.push({ ...large, members: [large, ...duplicates] })
-    })
-  })
-  return active.sort((a, b) => a.sourceIndex - b.sourceIndex).map(cell => { const { sourceIndex, ...rest } = cell; return rest })
-}
-
 function compatible(first, second, iou, containment) {
   const firstSupports = first.supports || [first]
   const secondSupports = second.supports || [second]
@@ -137,10 +87,13 @@ function automaticIntersections(channels, cells, iou, containment) {
   return groups
 }
 
-function combinations(channels, cells) {
+function combinations(channels, cells, terminalClasses) {
   const labels = Object.fromEntries(channels.map(channel => [channelName(channel), new Set()]))
+  terminalClasses.forEach(entry => labels[entry.channel]?.add(entry.label))
   cells.forEach(group => group.members.forEach(member => labels[member.channel]?.add(member.label)))
-  const options = channels.map(channel => [null, ...labels[channelName(channel)]])
+  const options = channels.map(channel => [null, ...[...labels[channelName(channel)]].sort()])
+  const size = options.reduce((product, entries) => product * entries.length, 1) - 1
+  if (size > 10000) throw new Error(`${size.toLocaleString()} combinations exceed the 10,000-category limit. Merge more classes within channels first.`)
   const rows = []
   const visit = (index, states) => {
     if (index === options.length) {
@@ -178,17 +131,6 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
   const [channels, setChannels] = useState([])
   const [annotations, setAnnotations] = useState([])
   const [withinRules, setWithinRules] = useState([])
-  const [currentChannelId, setCurrentChannelId] = useState('')
-  const [channelGraphs, setChannelGraphs] = useState({})
-  const currentChannelRecord = channels.find(channel => channel.id === currentChannelId)
-  const currentChannel = currentChannelRecord ? channelName(currentChannelRecord) : ''
-  const graphPositions = channelGraphs[currentChannelId] || {}
-  const [connectionStart, setConnectionStart] = useState(null)
-  const [draggingNode, setDraggingNode] = useState(null)
-  const [selectedSources, setSelectedSources] = useState([])
-  const [ruleDialogOpen, setRuleDialogOpen] = useState(false)
-  const [ruleStrategy, setRuleStrategy] = useState('neutral')
-  const [ruleLabel, setRuleLabel] = useState('')
   const [phase, setPhase] = useState(1)
   const [iouThreshold, setIouThreshold] = useState(0.3)
   const [containmentThreshold, setContainmentThreshold] = useState(0.6)
@@ -216,9 +158,8 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
     if (!imageId) return
     let cancelled = false
     setLoading(true); setError('')
-    setChannels([]); setAnnotations([]); setCurrentChannelId(''); setChannelGraphs({})
+    setChannels([]); setAnnotations([])
     setWithinRules([]); setRows([]); setSelectedRows([]); setHistory([]); setPhase(1)
-    setConnectionStart(null); setDraggingNode(null); setSelectedSources([]); setRuleDialogOpen(false)
     Promise.all([
       fetch(`${API_BASE_URL}/load-channels`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ image_id: imageId }) }),
       fetch(`${API_BASE_URL}/load-annotations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ image_id: imageId }) }),
@@ -228,7 +169,6 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
       if (cancelled) return
       if (!channelResponse.ok || !annotationResponse.ok) throw new Error(loadedChannels.error || loadedAnnotations.error || 'Could not load annotations.')
       setChannels(loadedChannels); setAnnotations(loadedAnnotations.annotations || [])
-      setCurrentChannelId(loadedChannels[0]?.id || '')
     }).catch(loadError => { if (!cancelled) setError(loadError.message) }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [imageId])
@@ -251,73 +191,34 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
     return [...result.values()]
   }, [annotations, channels])
 
-  useEffect(() => {
-    if (!currentChannelId) return
-    const sourceRows = classRows.filter(row => row.channelId === currentChannelId)
-    setChannelGraphs(previous => {
-      const next = { ...previous[currentChannelId] }
-      sourceRows.forEach((row, index) => {
-        if (!next[`class:${row.key}`]) next[`class:${row.key}`] = { x: 24, y: 48 + index * 92 }
-      })
-      withinRules.filter(rule => rule.channelId === currentChannelId).forEach((rule, index) => {
-        if (!next[`rule:${rule.id}`]) next[`rule:${rule.id}`] = { x: 390, y: 72 + index * 112 }
-      })
-      return { ...previous, [currentChannelId]: next }
-    })
-  }, [classRows, currentChannelId, withinRules])
-
-  const graphRows = classRows.filter(row => row.channelId === currentChannelId)
-  const graphRules = withinRules.filter(rule => rule.channelId === currentChannelId)
-  const selectChannel = channelId => {
-    setCurrentChannelId(channelId)
-    setConnectionStart(null); setDraggingNode(null); setSelectedSources([])
-    setRuleDialogOpen(false); setRuleLabel('')
-  }
-  const graphWidth = Math.max(760, 680)
-  const graphHeight = Math.max(360, 110 + Math.max(graphRows.length, graphRules.length) * 92)
-  const graphNodeLabel = key => key.replace(`${currentChannel}:`, '')
-
-  const beginConnection = key => setConnectionStart(key)
-  const finishConnection = key => {
-    const visibleKeys = new Set([...graphRows.map(row => row.key), ...graphRules.map(rule => `rule:${rule.id}`)])
-    if (!visibleKeys.has(connectionStart) || !visibleKeys.has(key)) { setConnectionStart(null); return }
-    if (!connectionStart || connectionStart === key) { setConnectionStart(null); return }
-    const sourceIsRule = connectionStart.startsWith('rule:')
-    const targetIsRule = key.startsWith('rule:')
-    if (sourceIsRule || targetIsRule) {
-      const ruleId = sourceIsRule ? connectionStart.slice(5) : key.slice(5)
-      const classKey = sourceIsRule ? key : connectionStart
-      const label = classKey.slice(classKey.indexOf(':') + 1)
-      setWithinRules(previous => previous.map(rule => rule.id === ruleId && !rule.inputs.includes(label) ? { ...rule, inputs: [...rule.inputs, label] } : rule))
-      setConnectionStart(null)
-      return
+  const withinResult = useMemo(() => {
+    try {
+      return { ...evaluateWithinChannel(flattenCells(channels, annotations), withinRules, classRows), error: '' }
+    } catch (evaluationError) {
+      return { cells: [], terminal: [], audit: [], error: evaluationError.message }
     }
-    setSelectedSources([connectionStart, key])
-    setRuleLabel('')
-    setRuleDialogOpen(true)
-    setConnectionStart(null)
-  }
+  }, [channels, annotations, withinRules, classRows])
 
-  const moveGraphNode = (event, key) => {
-    if (!draggingNode || draggingNode.key !== key || draggingNode.channelId !== currentChannelId) return
-    setChannelGraphs(previous => ({ ...previous, [currentChannelId]: { ...previous[currentChannelId], [key]: { x: Math.max(8, draggingNode.origin.x + event.clientX - draggingNode.startX), y: Math.max(28, draggingNode.origin.y + event.clientY - draggingNode.startY) } } }))
-  }
-
-  const removeRule = ruleId => setWithinRules(previous => previous.filter(rule => rule.id !== ruleId))
-
-  const createWithinRule = () => {
-    if (selectedSources.length < 2 || selectedSources.some(source => !graphRows.some(row => row.key === source))) return
-    const channel = selectedSources[0].split(':')[0]
-    const inputs = selectedSources.map(source => source.slice(source.indexOf(':') + 1))
-    setWithinRules(previous => [...previous, { id: `within-${Date.now()}`, channelId: currentChannelId, channel, inputs, strategy: ruleStrategy, label: ruleLabel.trim() || inputs.join('+'), iou: Number(iouThreshold), containment: Number(containmentThreshold) }])
-    setSelectedSources([]); setRuleLabel(''); setRuleDialogOpen(false)
+  const changeWithinRules = next => {
+    setWithinRules(next)
+    setRows([]); setSelectedRows([]); setHistory([]); setPhase(1)
   }
 
   const runPhaseTwo = () => {
-    const cleaned = automaticContainmentCleanup(flattenCells(channels, annotations), 0.95)
-    const cells = applyWithinRules(cleaned, withinRules)
-    const groups = automaticIntersections(channels, cells, Number(iouThreshold), Number(containmentThreshold))
-    setRows(combinations(channels, groups))
+    if (withinResult.error) { setError(withinResult.error); return }
+    const iou = Number(iouThreshold), containment = Number(containmentThreshold)
+    if ([iouThreshold, containmentThreshold].some(value => String(value).trim() === '') || ![iou, containment].every(value => Number.isFinite(value) && value >= 0 && value <= 1)) {
+      setError('Cross-channel thresholds must be between 0 and 1.')
+      return
+    }
+    setError('')
+    try {
+      const groups = automaticIntersections(channels, withinResult.cells, iou, containment)
+      setRows(combinations(channels, groups, withinResult.terminal))
+    } catch (combinationError) {
+      setError(combinationError.message)
+      return
+    }
     setHistory([])
     setSelectedRows([]); setPage(0); setPhase(2)
   }
@@ -362,36 +263,21 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
       {error && <Alert severity="error">{error}</Alert>}
       <FormControl size="small" sx={{ maxWidth: 420 }}><InputLabel id="two-phase-image-label">Image</InputLabel><Select labelId="two-phase-image-label" label="Image" value={imageId} onChange={event => setImageId(event.target.value)}>{images.map(image => <MenuItem key={image.id} value={image.id}>{image.name}</MenuItem>)}</Select></FormControl>
       {loading && <CircularProgress size={24} />}
-      {imageId && !loading && <>
-        <Typography variant="h6">Phase 1: within-channel merges</Typography>
-        <Typography variant="body2" color="text.secondary">Select two or more classes from one channel. Matching boxes are collapsed into one class before cross-channel matching.</Typography>
-        <Stack direction="row" spacing={1}>{channels.map((channel, index) => <Button key={channel.id} size="small" variant={currentChannelId === channel.id ? 'contained' : 'outlined'} onClick={() => selectChannel(channel.id)} sx={{ color: CHANNEL_COLORS[index % CHANNEL_COLORS.length] }}>{channelName(channel)}</Button>)}</Stack>
-        <Typography variant="body2" color="text.secondary">Connect the right dot of one class to the left dot of another. Connect a rule output to another class to extend the merge tree. Drag cards to arrange the graph.</Typography>
-        <Box key={`${imageId}:${currentChannelId}`} role="region" aria-label={`${currentChannel} within-channel graph`} onPointerMove={event => draggingNode && moveGraphNode(event, draggingNode.key)} onPointerUp={() => setDraggingNode(null)} onPointerLeave={() => setDraggingNode(null)} sx={{ position: 'relative', width: '100%', height: graphHeight, minHeight: 360, overflow: 'auto', bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1 }}>
-          <Box sx={{ position: 'relative', width: graphWidth, height: graphHeight }}>
-            <svg width={graphWidth} height={graphHeight} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-              <defs><marker id="two-phase-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#00b7ce" /></marker></defs>
-              {graphRules.flatMap(rule => rule.inputs.map(input => {
-                const from = graphPositions[`class:${currentChannel}:${input}`]
-                const to = graphPositions[`rule:${rule.id}`]
-                if (!from || !to) return null
-                return <line key={`${rule.id}-${input}`} x1={from.x + 204} y1={from.y + 37} x2={to.x} y2={to.y + 37} stroke="#00b7ce" strokeWidth="2" markerEnd="url(#two-phase-arrow)" />
-              }))}
-            </svg>
-            {graphRows.map(row => { const key = `class:${row.key}`; const position = graphPositions[key] || { x: 24, y: 48 }; return <Box key={row.key} onPointerDown={event => { if (event.target.closest('button')) return; setDraggingNode({ key, channelId: currentChannelId, startX: event.clientX, startY: event.clientY, origin: position }) }} sx={{ position: 'absolute', left: position.x, top: position.y, width: 204, minHeight: 74, p: 1.25, border: `2px solid ${CHANNEL_COLORS[(Number(currentChannel.slice(1)) - 1) % CHANNEL_COLORS.length]}`, borderRadius: 1, bgcolor: '#191d28', cursor: 'grab' }}><Typography variant="caption" sx={{ color: CHANNEL_COLORS[(Number(currentChannel.slice(1)) - 1) % CHANNEL_COLORS.length] }}>{currentChannel} · INPUT</Typography><Typography variant="body2" sx={{ fontWeight: 700 }}>{row.name}</Typography><Typography variant="caption" color="text.secondary">{row.count} detections</Typography><Box component="button" type="button" aria-label={`Connect into ${row.name}`} onClick={() => finishConnection(row.key)} sx={{ position: 'absolute', left: -8, top: 30, width: 16, height: 16, borderRadius: '50%', border: '2px solid #10131b', bgcolor: connectionStart ? '#00e5ff' : '#00b7ce', cursor: 'crosshair' }} /><Box component="button" type="button" aria-label={`Connect from ${row.name}`} onClick={() => beginConnection(row.key)} sx={{ position: 'absolute', right: -8, top: 30, width: 16, height: 16, borderRadius: '50%', border: '2px solid #10131b', bgcolor: '#00b7ce', cursor: 'crosshair' }} /></Box> })}
-            {graphRules.map(rule => { const key = `rule:${rule.id}`; const position = graphPositions[key] || { x: 390, y: 72 }; return <Box key={rule.id} onPointerDown={event => { if (event.target.closest('button')) return; setDraggingNode({ key, channelId: currentChannelId, startX: event.clientX, startY: event.clientY, origin: position }) }} sx={{ position: 'absolute', left: position.x, top: position.y, width: 230, minHeight: 88, p: 1.25, border: '2px solid #cf8af5', borderRadius: 1, bgcolor: '#211d2d', cursor: 'grab' }}><Typography variant="caption" sx={{ color: '#cf8af5' }}>MERGED GROUP · {rule.strategy === 'neutral' ? 'NO DOMINANCE' : 'DOMINANCE'}</Typography><Typography variant="body2" sx={{ fontWeight: 700 }}>{rule.label}</Typography><Typography variant="caption" color="text.secondary">{rule.inputs.join(' + ')}</Typography><Button size="small" onClick={() => removeRule(rule.id)} sx={{ position: 'absolute', right: 2, top: 0, minWidth: 22, p: 0, color: 'text.secondary' }}>×</Button><Box component="button" type="button" aria-label={`Extend ${rule.label}`} onClick={() => beginConnection(`rule:${rule.id}`)} sx={{ position: 'absolute', right: -8, top: 34, width: 16, height: 16, borderRadius: '50%', border: '2px solid #10131b', bgcolor: '#cf8af5', cursor: 'crosshair' }} /><Box component="button" type="button" aria-label={`Connect into ${rule.label}`} onClick={() => finishConnection(`rule:${rule.id}`)} sx={{ position: 'absolute', left: -8, top: 34, width: 16, height: 16, borderRadius: '50%', border: '2px solid #10131b', bgcolor: connectionStart ? '#00e5ff' : '#cf8af5', cursor: 'crosshair' }} /></Box> })}
-            {connectionStart && <Typography sx={{ position: 'absolute', left: 24, bottom: 12, color: '#00e5ff' }}>Connecting from {graphNodeLabel(connectionStart.replace(/^(class:|rule:)/, ''))}. Select a target dot.</Typography>}
-            {!graphRows.length && <Typography color="text.secondary" sx={{ p: 3 }}>No detections in this channel.</Typography>}
-          </Box>
-        </Box>
-        <Stack direction="row" spacing={1} alignItems="center"><TextField size="small" type="number" label="IoU" value={iouThreshold} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => setIouThreshold(event.target.value)} /><TextField size="small" type="number" label="Containment" value={containmentThreshold} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => setContainmentThreshold(event.target.value)} /><Button variant="contained" onClick={runPhaseTwo}>Open cross-channel table</Button></Stack>
-      </>}
+      {imageId && !loading && <Box sx={{ display: phase === 1 ? 'block' : 'none' }}>
+        <Stack spacing={2}>
+          <TwoPhaseWithinChannelGraph key={imageId} channels={channels} classes={classRows} rules={withinRules} onChange={changeWithinRules} audit={withinResult.audit} evaluationError={withinResult.error} />
+          <Stack direction="row" spacing={1} alignItems="center">
+            <TextField size="small" type="number" label="Cross-channel IoU" value={iouThreshold} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => setIouThreshold(event.target.value)} />
+            <TextField size="small" type="number" label="Cross-channel containment" value={containmentThreshold} inputProps={{ min: 0, max: 1, step: 0.01 }} onChange={event => setContainmentThreshold(event.target.value)} />
+            <Button variant="contained" disabled={Boolean(withinResult.error)} onClick={runPhaseTwo}>Open cross-channel table</Button>
+          </Stack>
+        </Stack>
+      </Box>}
       {phase === 2 && <><Typography variant="h6">Phase 2: cross-channel combinations</Typography><Typography variant="body2" color="text.secondary">Rows are the complete positive/negative combination catalog. Counts come from deterministic one-to-one cross-channel matching; zero-count rows remain available for naming.</Typography><Stack direction="row" spacing={1} alignItems="center"><TextField size="small" label="Search" value={search} onChange={event => { setSearch(event.target.value); setPage(0) }} /><FormControlLabel control={<Checkbox checked={observedOnly} onChange={event => { setObservedOnly(event.target.checked); setPage(0) }} />} label="Only rows with detections" /><Typography variant="body2" color="text.secondary">{filteredRows.length.toLocaleString()} rows</Typography><Button variant="contained" disabled={!selectedRows.length} onClick={() => setMergeDialogOpen(true)}>{selectedRows.length > 1 ? 'Merge selected rows' : 'Rename selected row'}</Button><Button variant="outlined" disabled={!history.length} onClick={undoClassEdit}>Undo</Button><Button variant="outlined" disabled={!resultBoxes.length} onClick={applyResult}>Use merged layer in annotation tool</Button></Stack>
         <Table size="small" stickyHeader><TableHead><TableRow><TableCell>Select</TableCell><TableCell>Output</TableCell>{channels.map(channel => <TableCell key={channel.id}>{channelName(channel)}</TableCell>)}<TableCell>Cells</TableCell></TableRow></TableHead><TableBody>{pageRows.map(row => <TableRow key={row.key} selected={selectedRows.includes(row.key)}><TableCell><Checkbox checked={selectedRows.includes(row.key)} onChange={() => setSelectedRows(previous => previous.includes(row.key) ? previous.filter(key => key !== row.key) : [...previous, row.key])} /></TableCell><TableCell>{row.output || row.key}</TableCell>{channels.map(channel => <TableCell key={channel.id}>{row.states[channelName(channel)] || 'negative'}</TableCell>)}<TableCell>{row.count}</TableCell></TableRow>)}</TableBody></Table>
         <Stack direction="row" spacing={1} alignItems="center"><Button disabled={page === 0} onClick={() => setPage(previous => previous - 1)}>Previous</Button><Typography variant="body2">Page {page + 1} of {pageCount}</Typography><Button disabled={page >= pageCount - 1} onClick={() => setPage(previous => previous + 1)}>Next</Button><Button onClick={() => setPhase(1)}>Back to phase 1</Button></Stack>
       </>}
     </Stack>
-    <Dialog open={ruleDialogOpen} onClose={() => setRuleDialogOpen(false)}><DialogTitle>Within-channel merge</DialogTitle><DialogContent><Stack spacing={2} sx={{ pt: 1 }}><Typography variant="body2">{selectedSources.join(' + ')}</Typography><FormControl fullWidth size="small"><InputLabel id="within-strategy-label">Interaction</InputLabel><Select labelId="within-strategy-label" label="Interaction" value={ruleStrategy} onChange={event => setRuleStrategy(event.target.value)}><MenuItem value="neutral">No dominance</MenuItem><MenuItem value="dominance">Dominance</MenuItem></Select></FormControl><TextField label="Output class" value={ruleLabel} onChange={event => setRuleLabel(event.target.value)} autoFocus /></Stack></DialogContent><DialogActions><Button onClick={() => setRuleDialogOpen(false)}>Cancel</Button><Button variant="contained" onClick={createWithinRule}>Save rule</Button></DialogActions></Dialog>
     <Dialog open={mergeDialogOpen} onClose={() => setMergeDialogOpen(false)}><DialogTitle>Merge selected rows</DialogTitle><DialogContent><TextField label="Output class" value={mergeLabel} onChange={event => setMergeLabel(event.target.value)} autoFocus sx={{ mt: 1 }} /></DialogContent><DialogActions><Button onClick={() => setMergeDialogOpen(false)}>Cancel</Button><Button variant="contained" onClick={mergeSelectedRows}>Save</Button></DialogActions></Dialog>
   </Box>
 }
