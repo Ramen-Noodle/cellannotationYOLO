@@ -183,7 +183,7 @@ function App() {
               ? <CellAnnotationTool appliedMergedLayers={appliedMergedLayers} onApplyMergedLayer={applyMergedLayer} />
               : page === 'combine'
                 ? <CombineAnnotationsPage onApplyMergedLayer={applyMergedLayer} />
-                : <CombineAnnotationsTwoPhasePage onApplyMergedLayer={applyMergedLayer} />}
+                : <CombineAnnotationsTwoPhasePage />}
           </Box>
         </Box>
       </ErrorBoundary>
