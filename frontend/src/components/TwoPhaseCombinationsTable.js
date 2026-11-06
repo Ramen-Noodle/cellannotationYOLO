@@ -1,39 +1,58 @@
 /* global BigInt */
 import { useEffect, useMemo, useState } from 'react'
-import { Box, Button, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material'
-import { combinationCatalog } from '../utils/twoPhaseCombinations.mjs'
+import { Box, Button, Checkbox, FormControlLabel, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material'
+import { combinationCatalog, combinationKey } from '../utils/twoPhaseCombinations.mjs'
 
 const PAGE_SIZE = 50n
-
-export default function TwoPhaseCombinationsTable({ channels, classes }) {
+export default function TwoPhaseCombinationsTable({ channels, outputs, preview }) {
   const [page, setPage] = useState(0n)
-  const catalog = useMemo(() => combinationCatalog(channels, classes), [channels, classes])
-  useEffect(() => { setPage(0n) }, [channels, classes])
-  const pages = catalog.total === 0n ? 1n : (catalog.total + PAGE_SIZE - 1n) / PAGE_SIZE
+  const [observedOnly, setObservedOnly] = useState(false)
+  const catalog = useMemo(() => combinationCatalog(channels, outputs), [channels, outputs])
+  const observed = useMemo(() => new Map(preview?.combinations.map(row => [row.key, row])), [preview])
+  useEffect(() => { setPage(0n) }, [catalog, preview])
+  const showingObserved = observedOnly && Boolean(preview)
+  const total = showingObserved ? BigInt(observed.size) : catalog.total
+  const pages = total === 0n ? 1n : (total + PAGE_SIZE - 1n) / PAGE_SIZE
   const currentPage = page < pages ? page : pages - 1n
   const start = currentPage * PAGE_SIZE
-  const end = start + PAGE_SIZE < catalog.total ? start + PAGE_SIZE : catalog.total
-  const rows = []
-  for (let index = start; index < end; index += 1n) rows.push({ id: index.toString(), states: catalog.rowAt(index) })
+  const end = start + PAGE_SIZE < total ? start + PAGE_SIZE : total
+  const rows = showingObserved ? preview.combinations.slice(Number(start), Number(end)) : []
+  if (!showingObserved) {
+    for (let index = start; index < end; index += 1n) {
+      const states = catalog.rowAt(index)
+      const key = combinationKey(states)
+      rows.push(observed.get(key) || { key, states, name: `Combination ${(index + 1n).toLocaleString()}`, count: 0 })
+    }
+  }
 
   return <Stack spacing={1.5}>
     <Box>
       <Typography variant="h6">Cross-channel combinations</Typography>
       <Typography variant="body2" color="text.secondary">
-        {catalog.total.toLocaleString()} possible categories from the image’s classes. Each channel is either negative or positive for one class; the all-negative category is excluded. The graph does not change this table yet.
+        {catalog.total.toLocaleString()} possible combinations from the channel graph outputs.
+        {preview ? ` ${observed.size.toLocaleString()} combinations have detections.` : ' Run the preview to see detection counts.'}
       </Typography>
+      <FormControlLabel label="Only rows with detections" control={<Checkbox size="small" disabled={!preview}
+        checked={showingObserved} onChange={event => { setObservedOnly(event.target.checked); setPage(0n) }} />} />
     </Box>
     <Box sx={{ overflowX: 'auto', maxHeight: 520, border: 1, borderColor: 'divider', borderRadius: 1 }}>
       <Table size="small" stickyHeader aria-label="Possible cross-channel class combinations">
-        <TableHead><TableRow><TableCell>Combination</TableCell>{catalog.options.map(option => <TableCell key={option.channel}>{option.channel}</TableCell>)}</TableRow></TableHead>
+        <TableHead><TableRow><TableCell>Combination</TableCell>{catalog.options.map(option => <TableCell key={option.channel}>{option.channel}</TableCell>)}
+          <TableCell align="right">Detections</TableCell></TableRow></TableHead>
         <TableBody>
-          {rows.map(row => <TableRow key={row.id}>
-            <TableCell>{(BigInt(row.id) + 1n).toLocaleString()}</TableCell>
+          {rows.map(row => <TableRow key={row.key}>
+            <TableCell><Stack direction="row" spacing={1} alignItems="center">
+              {row.color && <Box aria-hidden="true" sx={{ bgcolor: row.color, width: 10, height: 10, borderRadius: '50%', flexShrink: 0 }} />}
+              <span>{row.name}</span>
+            </Stack></TableCell>
             {row.states.map((value, index) => <TableCell key={catalog.options[index].channel} sx={{ minWidth: 150 }}>
-              {value === null ? <Typography variant="body2" color="text.secondary">negative</Typography> : `${value} positive`}
+              {value === null ? <Typography variant="body2" color="text.secondary">No match</Typography> : `${value.name} positive`}
             </TableCell>)}
+            <TableCell align="right">{preview ? row.count.toLocaleString() : '—'}</TableCell>
           </TableRow>)}
-          {!rows.length && <TableRow><TableCell colSpan={catalog.options.length + 1}>No class combinations are available for this image.</TableCell></TableRow>}
+          {!rows.length && <TableRow><TableCell colSpan={catalog.options.length + 2}>
+            {showingObserved ? 'The preview found no detections.' : 'Connect and name an output node to create combinations.'}
+          </TableCell></TableRow>}
         </TableBody>
       </Table>
     </Box>

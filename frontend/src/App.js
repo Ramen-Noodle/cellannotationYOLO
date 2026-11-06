@@ -165,13 +165,6 @@ function App() {
             </Button>
             <Button
               size="small"
-              variant={page === 'combine' ? 'contained' : 'text'}
-              onClick={() => setPage('combine')}
-            >
-              Combine Annotations
-            </Button>
-            <Button
-              size="small"
               variant={page === 'combine-two-phase' ? 'contained' : 'text'}
               onClick={() => setPage('combine-two-phase')}
             >
@@ -183,7 +176,7 @@ function App() {
               ? <CellAnnotationTool appliedMergedLayers={appliedMergedLayers} onApplyMergedLayer={applyMergedLayer} />
               : page === 'combine'
                 ? <CombineAnnotationsPage onApplyMergedLayer={applyMergedLayer} />
-                : <CombineAnnotationsTwoPhasePage />}
+                : <CombineAnnotationsTwoPhasePage onApplyMergedLayer={applyMergedLayer} />}
           </Box>
         </Box>
       </ErrorBoundary>

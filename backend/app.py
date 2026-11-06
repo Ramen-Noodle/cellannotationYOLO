@@ -57,6 +57,7 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # Session expire
 from database import db
 from models import User, ImageRecord, Channel, ImageSet, Annotation, LabelSet, Weights, DetectionSetting, MergeRecipe, MergedLayer
 from annotation_merging import evaluate_recipe, RecipeError
+from two_phase_merging import evaluate_two_phase, validate_recipe as validate_two_phase_recipe
 from flask_migrate import Migrate
 
 db.init_app(app)
@@ -1493,8 +1494,11 @@ def combine_preview():
     image = ImageRecord.query.filter_by(id=image_id, user_id=g.user.id).first()
     if not image:
         return jsonify({"error": "Image record not found or unauthorized"}), 404
-    payload = _combine_result_for_image(image, recipe, request.host_url.rstrip('/'))
-    return jsonify(payload), 200
+    try:
+        payload = _combine_result_for_image(image, recipe, request.host_url.rstrip('/'))
+        return jsonify(payload), 200
+    except RecipeError as error:
+        return jsonify({'error': str(error)}), 400
 
 
 @app.route('/merged-layers/<image_id>', methods=['GET'])
@@ -1514,15 +1518,18 @@ def get_merged_layer(image_id):
     }}), 200
 
 
-def _combine_cells_for_image(image):
+def _combine_cells_for_image(image, recipe=None):
+    if recipe and recipe.get('version') == 3:
+        validate_two_phase_recipe(recipe)
     channels = sorted(image.channels, key=lambda channel: channel.order_index or 0)
     channel_by_id = {channel.id: channel for channel in channels}
     channel_names = {channel.id: f'C{(channel.order_index or 0) + 1}' for channel in channels}
     annotations = Annotation.query.filter(
         Annotation.user_id == g.user.id,
         Annotation.channel_id.in_(list(channel_by_id))
-    ).all() if channel_by_id else []
+    ).order_by(Annotation.id.asc()).all() if channel_by_id else []
     cells = []
+    available_sources = set()
     for annotation in annotations:
         setting = annotation.detection_setting
         weights = db.session.get(Weights, setting.weights_id) if setting else None
@@ -1532,28 +1539,48 @@ def _combine_cells_for_image(image):
         channel_name = channel_names[annotation.channel_id]
         setting_id = annotation.detection_setting_id or annotation.id
         configured_sublabel = (setting.params or {}).get('sublabel') if setting else None
+        source_boxes = (annotation.annotations_detected or []) + (annotation.annotations_drawn or [])
+        class_indices = set(range(len(labels))) | {int(box.get('class', 0)) for box in source_boxes}
+        for class_index in class_indices:
+            label = labels[class_index] if 0 <= class_index < len(labels) else {}
+            class_boxes = [box for box in source_boxes if int(box.get('class', 0)) == class_index]
+            sublabels = {configured_sublabel} if configured_sublabel else {box.get('sublabel') or '' for box in class_boxes} or {''}
+            for sublabel in sublabels:
+                available_sources.add((channel_name, setting_id, label.get('name', f'Class {class_index}'), sublabel))
         for source, boxes in (('detected', annotation.annotations_detected or []), ('drawn', annotation.annotations_drawn or [])):
             for box in boxes:
                 class_index = int(box.get('class', 0))
-                label = labels[class_index] if class_index < len(labels) else {}
+                label = labels[class_index] if 0 <= class_index < len(labels) else {}
                 cells.append({
                     'x': float(box.get('x', 0)), 'y': float(box.get('y', 0)),
                     'w': float(box.get('w', 0)), 'h': float(box.get('h', 0)),
                     'confidence': box.get('confidence'), 'class': class_index,
                     'name': label.get('name', f'Class {class_index}'),
                     'color': label.get('color', '#ffffff'),
-                    'sublabel': box.get('sublabel') or configured_sublabel,
+                    'sublabel': configured_sublabel or box.get('sublabel') or '',
+                    'detection_setting_id': setting_id,
                     'renderStyle': 'dashed' if source == 'detected' else 'solid',
                     'channel': channel_name, 'channel_ids': [channel_name],
                     'channel_id': annotation.channel_id,
                     'node_id': f'input:{channel_name}:{setting_id}:{label.get("name", f"Class {class_index}")}',
                 })
+    if recipe and recipe.get('version') == 3:
+        for source in recipe['inputs']:
+            key = (source['channel'], source['detection_setting_id'], source['class_name'], source.get('sublabel', ''))
+            if key not in available_sources:
+                raise RecipeError(f"Image {image.id} is missing {source['channel']} / {source['class_name']} from the recipe's detection setting.")
     return channels, cells
 
 
+def _evaluate_combine(cells, recipe, channels, image):
+    if recipe.get('version') == 3:
+        return evaluate_two_phase(cells, recipe, channels)
+    return evaluate_recipe(cells, recipe, image_size=(image.width, image.height))
+
+
 def _combine_result_for_image(image, recipe, host_url):
-    channels, cells = _combine_cells_for_image(image)
-    result = evaluate_recipe(cells, recipe, image_size=(image.width, image.height))
+    channels, cells = _combine_cells_for_image(image, recipe)
+    result = _evaluate_combine(cells, recipe, channels, image)
     return _combine_payload(image, channels, recipe, result, host_url)
 
 
@@ -1568,8 +1595,7 @@ def _combine_payload(image, channels, recipe, result, host_url):
         'image_id': image.id,
         'imageSize': {'width': image.width, 'height': image.height},
         'layers': layers,
-        'boxes': result['boxes'],
-        'audit': result['audit'],
+        **result,
         'recipe': recipe,
     }
 
@@ -1596,10 +1622,10 @@ def combine_apply():
     if missing_ids:
         return jsonify({'error': 'One or more images were not found or unauthorized', 'image_ids': missing_ids}), 404
     try:
-        prepared = [(image_by_id[image_id], *_combine_cells_for_image(image_by_id[image_id])) for image_id in image_ids]
+        prepared = [(image_by_id[image_id], *_combine_cells_for_image(image_by_id[image_id], recipe)) for image_id in image_ids]
         def evaluate_prepared(item):
             image, channels, cells = item
-            return image, channels, evaluate_recipe(cells, recipe, image_size=(image.width, image.height))
+            return image, channels, _evaluate_combine(cells, recipe, channels, image)
         with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
             evaluated = list(executor.map(evaluate_prepared, prepared))
         results = [_combine_payload(image, channels, recipe, result, request.host_url.rstrip('/'))
@@ -1619,8 +1645,10 @@ def combine_apply():
         db.session.commit()
         return jsonify({'results': results}), 200
     except RecipeError as error:
+        db.session.rollback()
         return jsonify({'error': str(error)}), 400
     except Exception:
+        db.session.rollback()
         app.logger.exception('Could not apply merge recipe')
         return jsonify({'error': 'Could not apply merge recipe.'}), 500
 
@@ -1640,7 +1668,7 @@ def list_merge_recipes():
     if not g.user:
         return jsonify({'error': 'No active session'}), 401
     recipes = MergeRecipe.query.filter_by(user_id=g.user.id).order_by(MergeRecipe.name.asc()).all()
-    return jsonify([_merge_recipe_payload(recipe) for recipe in recipes]), 200
+    return jsonify([_merge_recipe_payload(recipe) for recipe in recipes if isinstance(recipe.recipe, dict) and recipe.recipe.get('version') == 3]), 200
 
 
 @app.route('/merge-recipes', methods=['POST'])
@@ -1650,10 +1678,12 @@ def create_merge_recipe():
     data = request.get_json()
     if not data or 'name' not in data or 'recipe' not in data or 'source_classes' not in data:
         return jsonify({'error': 'Missing name, recipe, or source_classes in request body'}), 400
-    if not isinstance(data['name'], str) or not data['name'].strip():
-        return jsonify({'error': 'Recipe name must be a non-empty string'}), 400
-    if not isinstance(data['recipe'], dict) or data['recipe'].get('version') != 2 or not isinstance(data['recipe'].get('nodes'), list) or not isinstance(data['recipe'].get('edges'), list):
-        return jsonify({'error': 'recipe must be a version 2 graph recipe'}), 400
+    if not isinstance(data['name'], str) or not data['name'].strip() or len(data['name'].strip()) > 255:
+        return jsonify({'error': 'Recipe name must contain between 1 and 255 characters'}), 400
+    try:
+        validate_two_phase_recipe(data['recipe'])
+    except RecipeError as error:
+        return jsonify({'error': str(error)}), 400
     if not isinstance(data['source_classes'], list):
         return jsonify({'error': 'source_classes must be a list'}), 400
     source_classes = []
@@ -1694,10 +1724,12 @@ def update_merge_recipe(recipe_id):
     data = request.get_json()
     if not data or 'name' not in data or 'recipe' not in data or 'source_classes' not in data:
         return jsonify({'error': 'Missing name, recipe, or source_classes in request body'}), 400
-    if not isinstance(data['name'], str) or not data['name'].strip():
-        return jsonify({'error': 'Recipe name must be a non-empty string'}), 400
-    if not isinstance(data['recipe'], dict) or data['recipe'].get('version') != 2 or not isinstance(data['recipe'].get('nodes'), list) or not isinstance(data['recipe'].get('edges'), list):
-        return jsonify({'error': 'recipe must be a version 2 graph recipe'}), 400
+    if not isinstance(data['name'], str) or not data['name'].strip() or len(data['name'].strip()) > 255:
+        return jsonify({'error': 'Recipe name must contain between 1 and 255 characters'}), 400
+    try:
+        validate_two_phase_recipe(data['recipe'])
+    except RecipeError as error:
+        return jsonify({'error': str(error)}), 400
     if not isinstance(data['source_classes'], list):
         return jsonify({'error': 'source_classes must be a list'}), 400
     source_classes = []

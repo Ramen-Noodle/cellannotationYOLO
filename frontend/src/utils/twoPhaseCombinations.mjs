@@ -1,12 +1,46 @@
 /* global BigInt */
+export function channelGraphIncoming(classes, graph) {
+  const sources = new Set(classes.map(entry => entry.id))
+  const nodes = graph.created || []
+  const targets = new Set(nodes.map(node => node.id))
+  nodes.filter(node => node.type === 'rule').forEach(node => sources.add(node.id))
+  const incoming = new Map()
+  for (const { source, target } of graph.edges || []) {
+    if (!sources.has(source) || !targets.has(target)) continue
+    if (!incoming.has(target)) incoming.set(target, new Set())
+    incoming.get(target).add(source)
+  }
+  return incoming
+}
+
+export function terminalChannelClasses(channels, classes, graphs) {
+  return channels.flatMap(channel => {
+    const graph = graphs[channel.id] || {}
+    const channelClasses = classes.filter(entry => entry.channelId === channel.id)
+    const inputs = new Set(channelClasses.map(entry => entry.id))
+    const created = graph.created || []
+    const incoming = channelGraphIncoming(channelClasses, graph)
+    const hasInput = (id, visited = new Set()) => {
+      if (inputs.has(id)) return true
+      if (visited.has(id)) return false
+      visited.add(id)
+      return [...(incoming.get(id) || [])].some(source => hasInput(source, visited))
+    }
+    return created.filter(node => node.type === 'output' && node.name?.trim() && hasInput(node.id))
+      .map(node => ({ id: node.id, channelId: channel.id, name: node.name.trim() }))
+  })
+}
+
+export const combinationKey = states => JSON.stringify(states.map(output => output?.id ?? null))
+
 // Enumerate category possibilities without generating an exponential array.
-export function combinationCatalog(channels, classes) {
+export function combinationCatalog(channels, outputs) {
   const options = channels.map(channel => ({
     channel: `C${(channel.order_index ?? 0) + 1}`,
-    values: [null, ...new Set(classes.filter(entry => entry.channelId === channel.id).map(entry => entry.tableName))].sort((a, b) => {
+    values: [null, ...outputs.filter(entry => entry.channelId === channel.id)].sort((a, b) => {
       if (a === null) return -1
       if (b === null) return 1
-      return a.localeCompare(b)
+      return a.name.localeCompare(b.name) || a.id.localeCompare(b.id)
     }),
   }))
   const total = options.reduce((count, entry) => count * BigInt(entry.values.length), 1n) - 1n
