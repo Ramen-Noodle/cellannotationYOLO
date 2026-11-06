@@ -9,6 +9,35 @@ def selector(source):
     return (source['channel'], source['detection_setting_id'], source['class_name'], source.get('sublabel', ''))
 
 
+def phase_one_mapping_targets(mappings, inputs):
+    if not isinstance(mappings, list):
+        raise RecipeError('Phase 1 output mappings must be a list.')
+    seen = set()
+    redirects = defaultdict(int)
+    targets = set()
+    for row in mappings:
+        if not isinstance(row, dict) or 'target' not in row:
+            raise RecipeError('Each Phase 1 mapping needs source classes and a target.')
+        ids, target = row.get('sources'), row['target']
+        if (not isinstance(ids, list) or not ids or
+                any(not isinstance(key, str) or key not in inputs for key in ids)):
+            raise RecipeError('Phase 1 combinations must reference classes feeding the output table.')
+        combination = frozenset(ids)
+        if len(combination) != len(ids) or combination in seen:
+            raise RecipeError('Phase 1 mappings must use unique input combinations.')
+        seen.add(combination)
+        if target is None:
+            continue
+        if not isinstance(target, str) or target not in inputs:
+            raise RecipeError('Phase 1 outputs must use an existing class feeding the output table.')
+        targets.add(target)
+        for key in combination - {target}:
+            redirects[key] += 1
+    # An input survives if at least one row containing it uses its default or No change.
+    combinations_per_input = 1 << (len(inputs) - 1)
+    return targets | {key for key in inputs if redirects[key] < combinations_per_input}
+
+
 def validate_recipe(recipe):
     if not isinstance(recipe, dict) or recipe.get('version') != 3:
         raise RecipeError('A version 3 two-phase recipe is required.')
@@ -43,10 +72,6 @@ def validate_recipe(recipe):
                 if node.get('ruleType') not in ('iou', 'containment'):
                     raise RecipeError('Unknown overlap rule.')
                 threshold(node.get('threshold'))
-            elif not isinstance(node.get('name'), str) or not node['name'].strip():
-                raise RecipeError('Name every connected output.')
-            else:
-                output_channels[node['id']] = channel
             node_ids.add(node['id'])
             nodes[node['id']] = node
         incoming, outgoing = defaultdict(list), {}
@@ -62,14 +87,24 @@ def validate_recipe(recipe):
         output_channels.update({key: channel for key, node in nodes.items()
                                 if node['type'] == 'input' and key not in outgoing})
         pending = set(nodes)
+        input_ancestors = {}
         while pending:
             ready = {key for key in pending if not any(source in pending for source in incoming[key])}
             if not ready:
                 raise RecipeError('Channel graph contains a cycle.')
+            for key in ready:
+                if nodes[key]['type'] == 'input':
+                    input_ancestors[key] = {key}
+                else:
+                    input_ancestors[key] = set().union(*(input_ancestors[source] for source in incoming[key]))
             pending -= ready
         for node in graph['nodes']:
-            if not incoming[node['id']]:
+            if not input_ancestors[node['id']]:
                 raise RecipeError('Every saved rule and output must have an input.')
+            if node['type'] != 'output':
+                continue
+            targets = phase_one_mapping_targets(node.get('mappings'), input_ancestors[node['id']])
+            output_channels.update({target: channel for target in targets})
     if any(source['channel'] not in seen_channels for source in sources.values()) or not output_channels:
         raise RecipeError('Recipe inputs must belong to a channel graph, and the recipe needs at least one output.')
     threshold(recipe.get('cross_iou'))
@@ -93,6 +128,7 @@ def validate_recipe(recipe):
         if combination in seen_combinations:
             raise RecipeError('Each combination can have only one output assignment.')
         seen_combinations.add(combination)
+    return output_channels
 
 
 def threshold(value):
@@ -146,8 +182,26 @@ def merged_annotation(box, *, name, color, output_id, channel_ids):
     }
 
 
+def phase_one_members(candidate):
+    return candidate.get('members') or [candidate]
+
+
+def apply_phase_one_table(boxes, mappings, input_outputs, input_colors):
+    targets = {frozenset(row['sources']): row['target'] for row in mappings}
+    for candidate in boxes:
+        members = phase_one_members(candidate)
+        combination = frozenset(member['input_id'] for member in members)
+        default = next(iter(combination)) if len(combination) == 1 else None
+        target = targets.get(combination, default)
+        if target is None:
+            for member in members:
+                yield dict(member, output=input_outputs[member['input_id']])
+        else:
+            yield dict(candidate, output=input_outputs[target], color=input_colors.get(target) or color_for(target))
+
+
 def evaluate_two_phase(cells, recipe, channels):
-    validate_recipe(recipe)
+    output_channels = validate_recipe(recipe)
     channel_ids = {f'C{(channel.order_index or 0) + 1}': channel.id for channel in channels}
     if any(graph['channel'] not in channel_ids for graph in recipe['channels']):
         raise RecipeError('This image is missing a channel required by the recipe.')
@@ -168,9 +222,18 @@ def evaluate_two_phase(cells, recipe, channels):
                 confidence = None
             if confidence is not None and not math.isfinite(confidence):
                 confidence = None
-            streams[sources[key]].append(dict(cell, confidence=confidence, sourceIndex=index))
+            input_id = sources[key]
+            streams[input_id].append(dict(cell, confidence=confidence, sourceIndex=index, input_id=input_id))
     routed_count = sum(map(len, streams.values()))
-    channel_boxes, outputs, audit = [], [], []
+    input_outputs = {}
+    for source in recipe['inputs']:
+        name = source['class_name']
+        if source.get('sublabel'):
+            name = f"{name} · {source['sublabel']}"
+        input_outputs[source['id']] = {'id': source['id'], 'channelId': channel_ids[source['channel']], 'name': name}
+    input_colors = {key: boxes[0].get('color') for key, boxes in streams.items()}
+    outputs = [output for key, output in input_outputs.items() if key in output_channels]
+    channel_boxes, audit = [], []
     for graph in recipe['channels']:
         nodes = {node['id']: node for node in graph['nodes']}
         incoming = defaultdict(list)
@@ -190,15 +253,19 @@ def evaluate_two_phase(cells, recipe, channels):
                     for index, box in enumerate(ordered):
                         if index in consumed:
                             continue
-                        result.append(box)
-                        consumed.update(other for other in query(box) if other > index and
-                                        _overlap(box, ordered[other])[metric] > node['threshold'])
+                        matches = sorted(other for other in query(box) if other > index and other not in consumed and
+                                         _overlap(box, ordered[other])[metric] > node['threshold'])
+                        if matches:
+                            members = [member for position in [index, *matches]
+                                       for member in phase_one_members(ordered[position])]
+                            result.append(dict(box, members=members))
+                        else:
+                            result.append(box)
+                        consumed.update(matches)
                     audit.append({'node': key, 'input_count': len(boxes), 'produced': len(result)})
                     streams[key] = result
                 else:
-                    output = {'id': key, 'channelId': channel_ids[graph['channel']], 'name': node['name'].strip()}
-                    outputs.append(output)
-                    streams[key] = [dict(box, output=output) for box in boxes]
+                    streams[key] = list(apply_phase_one_table(boxes, node['mappings'], input_outputs, input_colors))
                 pending.remove(key)
         for node in graph['nodes']:
             if node['type'] == 'output':
@@ -207,12 +274,7 @@ def evaluate_two_phase(cells, recipe, channels):
         for source in recipe['inputs']:
             if source['channel'] != graph['channel'] or source['id'] in connected_sources:
                 continue
-            name = source['class_name']
-            if source.get('sublabel'):
-                name = f"{name} · {source['sublabel']}"
-            output = {'id': source['id'], 'channelId': channel_ids[graph['channel']], 'name': name}
-            outputs.append(output)
-            channel_boxes.extend(dict(box, output=output) for box in streams[source['id']])
+            channel_boxes.extend(dict(box, output=input_outputs[source['id']]) for box in streams[source['id']])
     query = candidate_index(channel_boxes)
     def compatible(a, b):
         iou, containment = _overlap(a, b)

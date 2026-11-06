@@ -79,7 +79,7 @@ export default function TwoPhaseCombinationsTable({ channels, outputs, preview, 
             </TableRow>
           })}
           {!rows.length && <TableRow><TableCell colSpan={catalog.options.length + 3}>
-            {showingObserved ? 'The preview found no detections.' : 'Combinations appear for unconnected input classes and connected, named outputs.'}
+            {showingObserved ? 'The preview found no detections.' : 'Combinations appear for unconnected input classes and connected output tables.'}
           </TableCell></TableRow>}
         </TableBody>
       </Table>

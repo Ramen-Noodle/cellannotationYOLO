@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Box, Button, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
+import PhaseOneOutputTable from './PhaseOneOutputTable'
+import { channelGraphIncoming, inputClassName, outputTableInputs } from '../utils/twoPhaseCombinations.mjs'
 
 const NODE_WIDTH = 196
 const NODE_HEIGHT = 84
@@ -22,6 +24,7 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
   const [connecting, setConnecting] = useState(null)
   const [pointer, setPointer] = useState(null)
   const [error, setError] = useState('')
+  const [openOutputId, setOpenOutputId] = useState(null)
   const connectionRef = useRef(null)
   const dragRef = useRef(null)
   const viewportRef = useRef(null)
@@ -37,6 +40,7 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
   const nodeById = new Map(nodes.map(node => [node.id, node]))
   const edges = graph.edges || []
   const connectedSources = new Set(edges.map(edge => edge.source))
+  const openOutput = nodeById.get(openOutputId)
   const width = Math.max(760, ...nodes.map(node => node.x + NODE_WIDTH + 50))
   const height = Math.max(390, ...nodes.map(node => node.y + NODE_HEIGHT + 50))
   const activeColor = classes[0]?.color || '#cbd5e1'
@@ -87,7 +91,8 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
   const addNode = type => {
     const count = graph.created?.length || 0
     const id = `${type}:${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${count}`}`
-    const node = { id, type, name: type === 'rule' ? 'IoU node' : '', ruleType: 'iou', threshold: 0.25,
+    const config = type === 'rule' ? { name: 'IoU node', ruleType: 'iou', threshold: 0.25 } : { name: 'Output table', mappings: [] }
+    const node = { id, type, ...config,
       x: 280 + Math.floor(count / 4) * 230, y: 32 + (count % 4) * (NODE_HEIGHT + 24), color: '#cbd5e1' }
     update({ created: [...(graph.created || []), node] })
   }
@@ -133,7 +138,7 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
       <Button size="small" onClick={() => { update({ zoom: Math.max(0.4, Math.min(1, (viewportRef.current?.clientWidth || 800) / width)) }); viewportRef.current?.scrollTo?.(0, 0) }}>Fit</Button>
       <Button size="small" onClick={() => update({ positions: {}, zoom: 1 })}>Arrange</Button>
     </Stack>
-    <Typography variant="body2" color="text.secondary">Unconnected input classes pass through as outputs. For connected classes and rules, add a named output node to send their results to the cross-channel table.</Typography>
+    <Typography variant="body2" color="text.secondary">Unconnected input classes pass through. Connect a rule to an output table to choose an existing input class for each combination.</Typography>
     {error && <Alert severity="warning">{error}</Alert>}
     <Box ref={viewportRef} sx={{ height: 500, overflow: 'auto', bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1 }}>
       <Box sx={{ width: width * zoom, height: height * zoom, minWidth: '100%' }}>
@@ -157,9 +162,9 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
             sx={{ position: 'absolute', left: node.x, top: node.y, width: NODE_WIDTH, height: NODE_HEIGHT, boxSizing: 'border-box', p: 1.25,
               border: `2px solid ${node.color || activeColor}`, borderRadius: 1, bgcolor: 'rgba(25, 29, 40, 0.98)', cursor: 'grab', userSelect: 'none', touchAction: 'none' }}>
             {node.type === 'input' ? <>
-              <Typography variant="body2" title={node.sublabel ? `${node.name} · ${node.sublabel}` : node.name}
+              <Typography variant="body2" title={inputClassName(node)}
                 sx={{ color: node.color || activeColor, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {node.sublabel ? `${node.name} · ${node.sublabel}` : node.name}
+                {inputClassName(node)}
               </Typography>
               <Typography variant="caption" display="block" color="text.secondary" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {channelName(channel)} · {node.count} detections
@@ -179,10 +184,9 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
                   sx={{ width: 74, '& input': { py: 0.6, px: 0.5, fontSize: 12 }, '& label': { fontSize: 10 } }} />
               </Stack>
             </> : <>
-              <Typography variant="body2" sx={{ color: node.color, fontWeight: 700 }}>Output</Typography>
-              <TextField size="small" placeholder="Output name" value={node.name} onPointerDown={event => event.stopPropagation()}
-                onChange={event => updateNode(node.id, { name: event.target.value })}
-                sx={{ mt: 0.75, width: '100%', '& input': { py: 0.6, px: 0.75, fontSize: 12 } }} />
+              <Typography variant="body2" sx={{ color: node.color, fontWeight: 700 }}>Output table</Typography>
+              <Button variant="outlined" size="small" onPointerDown={event => event.stopPropagation()}
+                onClick={() => setOpenOutputId(node.id)} sx={{ mt: 0.75, width: '100%' }}>Edit combinations</Button>
             </>}
             {node.type !== 'input' && <><Button size="small" aria-label={`Delete ${node.name || 'output node'}`} onPointerDown={event => event.stopPropagation()} onClick={() => removeNode(node.id)}
               sx={{ position: 'absolute', top: 1, right: 1, minWidth: 20, p: 0 }}>×</Button>{port(node, 'in')}</>}
@@ -193,5 +197,8 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
       </Box>
     </Box>
     {connecting && <Stack direction="row" alignItems="center"><Typography variant="body2" sx={{ flexGrow: 1 }}>Connecting from {nodeById.get(connecting)?.name || 'node'}. Select a left dot.</Typography><Button size="small" onClick={clearConnection}>Cancel</Button></Stack>}
+    {openOutput && <PhaseOneOutputTable key={openOutput.id}
+      inputs={outputTableInputs(classes, channelGraphIncoming(classes, graph), openOutput.id)} mappings={openOutput.mappings}
+      onChange={mappings => updateNode(openOutput.id, { mappings })} onClose={() => setOpenOutputId(null)} />}
   </Stack>
 }

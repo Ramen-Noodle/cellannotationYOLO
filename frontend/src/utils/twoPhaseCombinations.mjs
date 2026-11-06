@@ -13,28 +13,50 @@ export function channelGraphIncoming(classes, graph) {
   return incoming
 }
 
+export const inputClassName = input => input.sublabel ? `${input.name} · ${input.sublabel}` : input.name
+
+export function outputTableInputs(classes, incoming, outputId) {
+  const visited = new Set()
+  const pending = [outputId]
+  while (pending.length) {
+    const id = pending.pop()
+    if (visited.has(id)) continue
+    visited.add(id)
+    for (const source of incoming.get(id) || []) pending.push(source)
+  }
+  return classes.filter(input => visited.has(input.id))
+}
+
+export function availableOutputMappings(inputs, mappings = []) {
+  const ids = new Set(inputs.map(input => input.id))
+  return mappings.filter(({ sources, target }) => sources.length && sources.every(id => ids.has(id)) &&
+    (target === null || ids.has(target)))
+}
+
 export function terminalChannelClasses(channels, classes, graphs) {
   return channels.flatMap(channel => {
     const graph = graphs[channel.id] || {}
     const channelClasses = classes.filter(entry => entry.channelId === channel.id)
-    const inputs = new Set(channelClasses.map(entry => entry.id))
-    const created = graph.created || []
     const incoming = channelGraphIncoming(channelClasses, graph)
-    const hasInput = (id, visited = new Set()) => {
-      if (inputs.has(id)) return true
-      if (visited.has(id)) return false
-      visited.add(id)
-      return [...(incoming.get(id) || [])].some(source => hasInput(source, visited))
-    }
-    const namedOutputs = created.filter(node => node.type === 'output' && node.name?.trim() && hasInput(node.id))
-      .map(node => ({ id: node.id, channelId: channel.id, name: node.name.trim() }))
     const connectedSources = new Set([...incoming.values()].flatMap(sources => [...sources]))
-    const directOutputs = channelClasses.filter(input => !connectedSources.has(input.id)).map(input => ({
+    const outputIds = new Set(channelClasses.filter(input => !connectedSources.has(input.id)).map(input => input.id))
+    for (const node of graph.created || []) {
+      if (node.type !== 'output') continue
+      const inputs = outputTableInputs(channelClasses, incoming, node.id)
+      if (!inputs.length) continue
+      const mappings = availableOutputMappings(inputs, node.mappings)
+      const combinationsPerInput = 1n << BigInt(inputs.length - 1)
+      for (const input of inputs) {
+        // By default every combination containing this input can emit it.
+        const redirected = mappings.filter(row => row.target && row.target !== input.id && row.sources.includes(input.id)).length
+        if (BigInt(redirected) < combinationsPerInput || mappings.some(row => row.target === input.id)) outputIds.add(input.id)
+      }
+    }
+    return channelClasses.filter(input => outputIds.has(input.id)).map(input => ({
       id: input.id,
       channelId: channel.id,
-      name: input.sublabel ? `${input.name} · ${input.sublabel}` : input.name,
+      name: inputClassName(input),
     }))
-    return [...namedOutputs, ...directOutputs]
   })
 }
 
