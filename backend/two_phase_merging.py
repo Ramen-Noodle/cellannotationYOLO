@@ -138,6 +138,14 @@ def color_for(key):
     return '#' + ''.join(f'{80 + ((value >> shift) & 255) % 176:02x}' for shift in (0, 8, 16))
 
 
+def merged_annotation(box, *, name, color, output_id, channel_ids):
+    return {
+        'x': box['x'], 'y': box['y'], 'w': box['w'], 'h': box['h'],
+        'confidence': box['confidence'], 'name': name, 'color': color,
+        'output_node_id': output_id, 'channel_ids': channel_ids,
+    }
+
+
 def evaluate_two_phase(cells, recipe, channels):
     validate_recipe(recipe)
     channel_ids = {f'C{(channel.order_index or 0) + 1}': channel.id for channel in channels}
@@ -249,16 +257,16 @@ def evaluate_two_phase(cells, recipe, channels):
         if not label:
             for member in group:
                 output = member['output']
-                box = {field: member[field] for field in ('x', 'y', 'w', 'h', 'confidence')}
-                box.update(name=output['name'], color=member.get('color') or color_for(output['id']),
-                           output_node_id=output['id'], channel_ids=[member['channel']])
-                boxes.append(box)
+                boxes.append(merged_annotation(
+                    member, name=output['name'], color=member.get('color') or color_for(output['id']),
+                    output_id=output['id'], channel_ids=[member['channel']],
+                ))
             continue
         best = min(group, key=representative)
-        box = {field: best[field] for field in ('x', 'y', 'w', 'h', 'confidence')}
-        box.update(name=label, color=combination['color'], output_node_id=f'output-class:{label}',
-                   channel_ids=[f'C{(channel.order_index or 0) + 1}' for channel in channels if channel.id in positives])
-        boxes.append(box)
+        boxes.append(merged_annotation(
+            best, name=label, color=combination['color'], output_id=f'output-class:{label}',
+            channel_ids=[f'C{(channel.order_index or 0) + 1}' for channel in channels if channel.id in positives],
+        ))
     return dict(boxes=boxes, outputs=outputs, combinations=sorted(combinations.values(), key=lambda row: (-row['count'], row['name'])),
                 sourceCount=valid_count, routedCount=routed_count, invalidCount=invalid_count,
                 channelOutputCount=len(channel_boxes), audit=audit)

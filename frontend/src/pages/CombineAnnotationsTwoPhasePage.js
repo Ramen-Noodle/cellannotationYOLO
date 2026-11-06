@@ -204,7 +204,7 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
         {observedPreview && <>
           <Alert severity={observedPreview.boxes.length ? 'info' : 'warning'}>
             Phase 1 routed {observedPreview.routedCount.toLocaleString()} of {observedPreview.sourceCount.toLocaleString()} usable detections to outputs and produced {observedPreview.channelOutputCount.toLocaleString()} boxes.
-            {' '}Phase 2 produced {observedPreview.boxes.length.toLocaleString()} boxes in {observedPreview.combinations.length.toLocaleString()} observed combinations.
+            {' '}After both phases, the preview contains {observedPreview.boxes.length.toLocaleString()} boxes from {observedPreview.combinations.length.toLocaleString()} observed combinations.
             {observedPreview.invalidCount > 0 && ` Skipped ${observedPreview.invalidCount.toLocaleString()} detections with invalid box coordinates.`}
           </Alert>
         </>}
