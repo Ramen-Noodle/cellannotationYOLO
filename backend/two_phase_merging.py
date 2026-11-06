@@ -59,6 +59,7 @@ def validate_recipe(recipe):
                 raise RecipeError('Each class or rule result must feed one destination.')
             outgoing[source] = target
             incoming[target].append(source)
+        output_count += sum(node['type'] == 'input' and key not in outgoing for key, node in nodes.items())
         pending = set(nodes)
         while pending:
             ready = {key for key in pending if not any(source in pending for source in incoming[key])}
@@ -69,7 +70,7 @@ def validate_recipe(recipe):
             if not incoming[node['id']]:
                 raise RecipeError('Every saved rule and output must have an input.')
     if any(source['channel'] not in seen_channels for source in sources.values()) or not output_count:
-        raise RecipeError('Recipe inputs must belong to a channel graph with named outputs.')
+        raise RecipeError('Recipe inputs must belong to a channel graph, and the recipe needs at least one output.')
     threshold(recipe.get('cross_iou'))
     threshold(recipe.get('cross_containment'))
 
@@ -174,6 +175,16 @@ def evaluate_two_phase(cells, recipe, channels):
         for node in graph['nodes']:
             if node['type'] == 'output':
                 channel_boxes.extend(streams[node['id']])
+        connected_sources = {edge['source'] for edge in graph['edges']}
+        for source in recipe['inputs']:
+            if source['channel'] != graph['channel'] or source['id'] in connected_sources:
+                continue
+            name = source['class_name']
+            if source.get('sublabel'):
+                name = f"{name} · {source['sublabel']}"
+            output = {'id': source['id'], 'channelId': channel_ids[graph['channel']], 'name': name}
+            outputs.append(output)
+            channel_boxes.extend(dict(box, output=output) for box in streams[source['id']])
     query = candidate_index(channel_boxes)
     def compatible(a, b):
         iou, containment = _overlap(a, b)

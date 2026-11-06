@@ -155,7 +155,7 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
   return <Box sx={{ height: '100%', overflow: 'auto', p: 3, boxSizing: 'border-box', bgcolor: 'background.default' }}>
     <Stack spacing={2} sx={{ maxWidth: 1500, mx: 'auto' }}>
       <Box><Typography variant="h5">Combine Annotations — Two Phase</Typography>
-        <Typography variant="body2" color="text.secondary">Connect classes to named outputs within each channel, then review every cross-channel output combination. Preview the results, save a recipe, or apply the merge to this image.</Typography></Box>
+        <Typography variant="body2" color="text.secondary">Merge classes within each channel and review the cross-channel combinations. Unconnected classes pass through to Phase 2. Preview the results, save a recipe, or apply the merge to this image.</Typography></Box>
       {error && <Alert severity="error">{error}</Alert>}
       <FormControl size="small" sx={{ width: 320, maxWidth: '100%' }} disabled={loadingImages || saving}>
         <InputLabel id="two-phase-image-label">Image</InputLabel>
@@ -192,7 +192,7 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
         {completed?.error && <Alert severity="error">{completed.error}</Alert>}
         {preview && <>
           <Alert severity={preview.boxes.length ? 'info' : 'warning'}>
-            Phase 1 routed {preview.routedCount.toLocaleString()} of {preview.sourceCount.toLocaleString()} usable detections to named outputs and produced {preview.channelOutputCount.toLocaleString()} boxes.
+            Phase 1 routed {preview.routedCount.toLocaleString()} of {preview.sourceCount.toLocaleString()} usable detections to outputs and produced {preview.channelOutputCount.toLocaleString()} boxes.
             {' '}Phase 2 produced {preview.boxes.length.toLocaleString()} boxes in {preview.combinations.length.toLocaleString()} observed combinations.
             {preview.invalidCount > 0 && ` Skipped ${preview.invalidCount.toLocaleString()} detections with invalid box coordinates.`}
           </Alert>

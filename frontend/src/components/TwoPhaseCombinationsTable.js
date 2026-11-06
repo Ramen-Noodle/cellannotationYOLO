@@ -51,7 +51,7 @@ export default function TwoPhaseCombinationsTable({ channels, outputs, preview }
             <TableCell align="right">{preview ? row.count.toLocaleString() : '—'}</TableCell>
           </TableRow>)}
           {!rows.length && <TableRow><TableCell colSpan={catalog.options.length + 2}>
-            {showingObserved ? 'The preview found no detections.' : 'Connect and name an output node to create combinations.'}
+            {showingObserved ? 'The preview found no detections.' : 'Combinations appear for unconnected input classes and connected, named outputs.'}
           </TableCell></TableRow>}
         </TableBody>
       </Table>

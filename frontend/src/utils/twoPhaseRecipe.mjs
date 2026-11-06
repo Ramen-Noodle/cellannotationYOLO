@@ -8,7 +8,7 @@ export function buildTwoPhaseRecipe(channels, classes, graphs, thresholds) {
     if (value === '' || !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 1) throw new Error('Cross-channel thresholds must be between 0 and 1.')
   }
   const outputs = terminalChannelClasses(channels, classes, graphs)
-  if (!outputs.length) throw new Error('Connect and name an output before previewing.')
+  if (!outputs.length) throw new Error('Preview needs an unconnected input class or a connected, named output.')
   const inputs = []
   const recipeChannels = channels.map(channel => {
     const graph = graphs[channel.id] || {}

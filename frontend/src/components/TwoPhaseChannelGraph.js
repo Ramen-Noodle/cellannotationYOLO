@@ -36,6 +36,7 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
   ].map(node => ({ ...node, ...(graph.positions?.[node.id] || {}) })), [classes, graph.created, graph.positions])
   const nodeById = new Map(nodes.map(node => [node.id, node]))
   const edges = graph.edges || []
+  const connectedSources = new Set(edges.map(edge => edge.source))
   const width = Math.max(760, ...nodes.map(node => node.x + NODE_WIDTH + 50))
   const height = Math.max(390, ...nodes.map(node => node.y + NODE_HEIGHT + 50))
   const activeColor = classes[0]?.color || '#cbd5e1'
@@ -132,7 +133,7 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
       <Button size="small" onClick={() => { update({ zoom: Math.max(0.4, Math.min(1, (viewportRef.current?.clientWidth || 800) / width)) }); viewportRef.current?.scrollTo?.(0, 0) }}>Fit</Button>
       <Button size="small" onClick={() => update({ positions: {}, zoom: 1 })}>Arrange</Button>
     </Stack>
-    <Typography variant="body2" color="text.secondary">Drag cards to arrange them. Connect a class or rule into an output node and give it a name. Each output node defines one class for the cross-channel table.</Typography>
+    <Typography variant="body2" color="text.secondary">Unconnected input classes pass through as outputs. For connected classes and rules, add a named output node to send their results to the cross-channel table.</Typography>
     {error && <Alert severity="warning">{error}</Alert>}
     <Box ref={viewportRef} sx={{ height: 500, overflow: 'auto', bgcolor: '#10131b', border: 1, borderColor: 'divider', borderRadius: 1 }}>
       <Box sx={{ width: width * zoom, height: height * zoom, minWidth: '100%' }}>
@@ -163,6 +164,7 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
               <Typography variant="caption" display="block" color="text.secondary" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {channelName(channel)} · {node.count} detections
               </Typography>
+              {!connectedSources.has(node.id) && <Typography variant="caption" color="text.secondary">Passes through to Phase 2</Typography>}
             </> : node.type === 'rule' ? <>
               <Typography variant="body2" sx={{ color: node.color, fontWeight: 700 }}>{node.ruleType === 'containment' ? 'Containment' : 'IoU'} node</Typography>
               <Stack direction="row" spacing={0.75} sx={{ mt: 0.75 }}>

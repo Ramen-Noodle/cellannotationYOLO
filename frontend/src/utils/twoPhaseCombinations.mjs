@@ -26,8 +26,15 @@ export function terminalChannelClasses(channels, classes, graphs) {
       visited.add(id)
       return [...(incoming.get(id) || [])].some(source => hasInput(source, visited))
     }
-    return created.filter(node => node.type === 'output' && node.name?.trim() && hasInput(node.id))
+    const namedOutputs = created.filter(node => node.type === 'output' && node.name?.trim() && hasInput(node.id))
       .map(node => ({ id: node.id, channelId: channel.id, name: node.name.trim() }))
+    const connectedSources = new Set([...incoming.values()].flatMap(sources => [...sources]))
+    const directOutputs = channelClasses.filter(input => !connectedSources.has(input.id)).map(input => ({
+      id: input.id,
+      channelId: channel.id,
+      name: input.sublabel ? `${input.name} · ${input.sublabel}` : input.name,
+    }))
+    return [...namedOutputs, ...directOutputs]
   })
 }
 
