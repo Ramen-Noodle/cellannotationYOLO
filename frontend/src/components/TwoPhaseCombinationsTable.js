@@ -36,6 +36,7 @@ export default function TwoPhaseCombinationsTable({ channels, outputs, preview, 
         {catalog.total.toLocaleString()} possible combinations from the channel graph outputs.
         {preview ? ` ${observed.size.toLocaleString()} combinations have detections.` : ' Run the preview to see detection counts.'}
       </Typography>
+      <Typography variant="body2" color="text.secondary">No change keeps each Phase 1 box and its class.</Typography>
       {previewOutdated && <Typography variant="body2" color="text.secondary">Preview again to see your output class changes.</Typography>}
       <FormControlLabel label="Only rows with detections" control={<Checkbox size="small" disabled={!preview}
         checked={showingObserved} onChange={event => { setObservedOnly(event.target.checked); setPage(0n) }} />} />
@@ -43,7 +44,7 @@ export default function TwoPhaseCombinationsTable({ channels, outputs, preview, 
     <Box sx={{ overflowX: 'auto', maxHeight: 520, border: 1, borderColor: 'divider', borderRadius: 1 }}>
       <Table size="small" stickyHeader aria-label="Possible cross-channel class combinations">
         <TableHead><TableRow><TableCell>Combination</TableCell>{catalog.options.map(option => <TableCell key={option.channel}>{option.channel}</TableCell>)}
-          <TableCell align="right">Detections</TableCell><TableCell>Output class</TableCell></TableRow></TableHead>
+          <TableCell align="right">Groups</TableCell><TableCell>Output class</TableCell></TableRow></TableHead>
         <TableBody>
           {rows.map(row => {
             const assignmentKey = outputAssignmentKey(row.states.filter(Boolean).map(output => output.id))
@@ -70,7 +71,7 @@ export default function TwoPhaseCombinationsTable({ channels, outputs, preview, 
                       onAssign(assignmentKey, value ? JSON.parse(value) : '')
                     }
                   }}>
-                  <MenuItem value="">Use combination name</MenuItem>
+                  <MenuItem value="">No change</MenuItem>
                   {classNames.map(name => <MenuItem key={name} value={JSON.stringify(name)}>{name}</MenuItem>)}
                   <MenuItem value="new">New output class…</MenuItem>
                 </Select>

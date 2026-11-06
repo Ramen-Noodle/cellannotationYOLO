@@ -241,14 +241,22 @@ def evaluate_two_phase(cells, recipe, channels):
         key = json.dumps([state['id'] if state else None for state in states], separators=(',', ':'), ensure_ascii=False)
         name = ' + '.join(f"C{(channel.order_index or 0) + 1}: {state['name']}" for channel, state in zip(channels, states) if state)
         label = assignments.get(frozenset(state['id'] for state in positives.values()))
-        output_id = f'output-class:{label}' if label else key
         if key not in combinations:
-            combinations[key] = dict(key=key, states=states, name=name, color=color_for(output_id), count=0)
+            color = color_for(f'output-class:{label}') if label else None
+            combinations[key] = dict(key=key, states=states, name=name, color=color, count=0)
         combination = combinations[key]
         combination['count'] += 1
+        if not label:
+            for member in group:
+                output = member['output']
+                box = {field: member[field] for field in ('x', 'y', 'w', 'h', 'confidence')}
+                box.update(name=output['name'], color=member.get('color') or color_for(output['id']),
+                           output_node_id=output['id'], channel_ids=[member['channel']])
+                boxes.append(box)
+            continue
         best = min(group, key=representative)
         box = {field: best[field] for field in ('x', 'y', 'w', 'h', 'confidence')}
-        box.update(name=label or name, color=combination['color'], output_node_id=output_id,
+        box.update(name=label, color=combination['color'], output_node_id=f'output-class:{label}',
                    channel_ids=[f'C{(channel.order_index or 0) + 1}' for channel in channels if channel.id in positives])
         boxes.append(box)
     return dict(boxes=boxes, outputs=outputs, combinations=sorted(combinations.values(), key=lambda row: (-row['count'], row['name'])),
