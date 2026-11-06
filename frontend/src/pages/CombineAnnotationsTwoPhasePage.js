@@ -45,6 +45,7 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
   const [annotations, setAnnotations] = useState([])
   const [activeChannelId, setActiveChannelId] = useState('')
   const [graphs, setGraphs] = useState({})
+  const [outputAssignments, setOutputAssignments] = useState({})
   const [loadingImages, setLoadingImages] = useState(true)
   const [loadingAnnotations, setLoadingAnnotations] = useState(false)
   const [error, setError] = useState('')
@@ -70,6 +71,7 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
     let cancelled = false
     setChannels([]); setAnnotations([]); setActiveChannelId(''); setGraphs({}); setError(''); setLoadingAnnotations(true)
     setPreviewRun(null); setCompletedRun(null); setPreviewOpen(false)
+    setOutputAssignments({})
     setCrossThresholds({ iou: 0.30, containment: 0.60 })
     Promise.all([
       fetch(`${API_BASE_URL}/load-channels`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ image_id: imageId }) }),
@@ -93,7 +95,8 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
   const activeRun = previewRun && previewRun.imageId === imageId && previewRun.classes === classes && previewRun.crossThresholds === crossThresholds && channels.every(({ id }) =>
     graphs[id]?.created === previewRun.graphs[id]?.created && graphs[id]?.edges === previewRun.graphs[id]?.edges) ? previewRun : null
   const completed = activeRun && completedRun?.run === activeRun ? completedRun : null
-  const preview = completed?.result
+  const observedPreview = completed?.result
+  const preview = activeRun?.outputAssignments === outputAssignments ? observedPreview : null
   const previewing = Boolean(activeRun && !completed)
 
   useEffect(() => {
@@ -128,19 +131,27 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
     setError('')
     try {
       if (!preview) {
-        const recipe = buildTwoPhaseRecipe(channels, classes, graphs, crossThresholds)
-        setPreviewRun({ imageId, channels, classes, graphs, crossThresholds, recipe })
+        const recipe = buildTwoPhaseRecipe(channels, classes, graphs, crossThresholds, outputAssignments)
+        setPreviewRun({ imageId, channels, classes, graphs, crossThresholds, outputAssignments, recipe })
       }
       setPreviewOpen(true)
     } catch (error) { setError(error.message) }
   }
   const loadRecipe = recipe => {
     const restored = restoreTwoPhaseRecipe(recipe, channels, classes)
-    setGraphs(restored)
+    setGraphs(restored.graphs)
+    setOutputAssignments(restored.outputAssignments)
     setCrossThresholds({ iou: recipe.cross_iou, containment: recipe.cross_containment })
     setPreviewRun(null)
     setCompletedRun(null)
   }
+  const assignOutput = (key, name) => setOutputAssignments(previous => {
+    if ((previous[key] || '') === name) return previous
+    const next = { ...previous }
+    if (name) next[key] = name
+    else delete next[key]
+    return next
+  })
   const applied = result => {
     onApplyMergedLayer?.({ ...result, imageId: result.image_id, id: `merged:${result.image_id}`,
       channelName: 'Merged annotations', visible: true })
@@ -190,14 +201,16 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
         </Stack>
         </Box>
         {completed?.error && <Alert severity="error">{completed.error}</Alert>}
-        {preview && <>
-          <Alert severity={preview.boxes.length ? 'info' : 'warning'}>
-            Phase 1 routed {preview.routedCount.toLocaleString()} of {preview.sourceCount.toLocaleString()} usable detections to outputs and produced {preview.channelOutputCount.toLocaleString()} boxes.
-            {' '}Phase 2 produced {preview.boxes.length.toLocaleString()} boxes in {preview.combinations.length.toLocaleString()} observed combinations.
-            {preview.invalidCount > 0 && ` Skipped ${preview.invalidCount.toLocaleString()} detections with invalid box coordinates.`}
+        {observedPreview && <>
+          <Alert severity={observedPreview.boxes.length ? 'info' : 'warning'}>
+            Phase 1 routed {observedPreview.routedCount.toLocaleString()} of {observedPreview.sourceCount.toLocaleString()} usable detections to outputs and produced {observedPreview.channelOutputCount.toLocaleString()} boxes.
+            {' '}Phase 2 produced {observedPreview.boxes.length.toLocaleString()} boxes in {observedPreview.combinations.length.toLocaleString()} observed combinations.
+            {observedPreview.invalidCount > 0 && ` Skipped ${observedPreview.invalidCount.toLocaleString()} detections with invalid box coordinates.`}
           </Alert>
         </>}
-        <TwoPhaseCombinationsTable key={imageId} channels={channels} outputs={outputs} preview={preview} />
+        <TwoPhaseCombinationsTable key={imageId} channels={channels} outputs={outputs} preview={observedPreview}
+          assignments={outputAssignments} onAssign={assignOutput} editingDisabled={saving || previewing}
+          previewOutdated={Boolean(observedPreview && !preview)} />
       </>}
       {imageId && !loadingAnnotations && !error && channels.length === 0 && <Alert severity="info">This image has no channels.</Alert>}
       <MergePreviewModal preview={previewOpen ? previewImage : null} onClose={() => setPreviewOpen(false)} />

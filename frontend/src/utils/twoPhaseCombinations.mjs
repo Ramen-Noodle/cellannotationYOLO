@@ -39,6 +39,7 @@ export function terminalChannelClasses(channels, classes, graphs) {
 }
 
 export const combinationKey = states => JSON.stringify(states.map(output => output?.id ?? null))
+export const outputAssignmentKey = ids => JSON.stringify([...ids].sort())
 
 // Enumerate category possibilities without generating an exponential array.
 export function combinationCatalog(channels, outputs) {

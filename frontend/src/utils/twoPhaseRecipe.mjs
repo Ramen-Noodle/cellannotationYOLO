@@ -1,9 +1,9 @@
-import { channelGraphIncoming, terminalChannelClasses } from './twoPhaseCombinations.mjs'
+import { channelGraphIncoming, outputAssignmentKey, terminalChannelClasses } from './twoPhaseCombinations.mjs'
 
 const channelName = channel => `C${(channel.order_index ?? 0) + 1}`
 const sourceKey = source => JSON.stringify([source.channel, source.detection_setting_id, source.class_name, source.sublabel || ''])
 
-export function buildTwoPhaseRecipe(channels, classes, graphs, thresholds) {
+export function buildTwoPhaseRecipe(channels, classes, graphs, thresholds, outputAssignments) {
   for (const value of Object.values(thresholds)) {
     if (value === '' || !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 1) throw new Error('Cross-channel thresholds must be between 0 and 1.')
   }
@@ -36,7 +36,15 @@ export function buildTwoPhaseRecipe(channels, classes, graphs, thresholds) {
         .map(({ source, target }) => ({ source, target })),
     }
   })
-  return { version: 3, inputs, channels: recipeChannels, cross_iou: Number(thresholds.iou), cross_containment: Number(thresholds.containment) }
+  const outputIds = new Set(outputs.map(output => output.id))
+  const output_assignments = Object.entries(outputAssignments).flatMap(([key, label]) => {
+    const sources = JSON.parse(key)
+    return sources.every(id => outputIds.has(id)) ? [{ sources, label }] : []
+  })
+  return {
+    version: 3, inputs, channels: recipeChannels, output_assignments,
+    cross_iou: Number(thresholds.iou), cross_containment: Number(thresholds.containment),
+  }
 }
 
 export function restoreTwoPhaseRecipe(recipe, channels, classes) {
@@ -51,7 +59,7 @@ export function restoreTwoPhaseRecipe(recipe, channels, classes) {
     if (!id) throw new Error(`This image is missing ${source.channel} / ${source.class_name} from the recipe's detection setting.`)
     return [source.id, id]
   }))
-  return Object.fromEntries(recipe.channels.map(graph => {
+  const graphs = Object.fromEntries(recipe.channels.map(graph => {
     const channel = byName.get(graph.channel)
     if (!channel) throw new Error(`This image is missing ${graph.channel}.`)
     return [channel.id, {
@@ -64,4 +72,8 @@ export function restoreTwoPhaseRecipe(recipe, channels, classes) {
       positions: {}, zoom: 1,
     }]
   }))
+  const outputAssignments = Object.fromEntries((recipe.output_assignments || []).map(({ sources, label }) => [
+    outputAssignmentKey(sources.map(id => sourceIds.get(id) || id)), label,
+  ]))
+  return { graphs, outputAssignments }
 }

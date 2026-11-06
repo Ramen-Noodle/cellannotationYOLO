@@ -25,7 +25,7 @@ def validate_recipe(recipe):
             raise RecipeError('Recipe inputs must be unique.')
         sources[source['id']] = source
         selectors.add(selector(source))
-    seen_channels, node_ids, output_count = set(), set(sources), 0
+    seen_channels, node_ids, output_channels = set(), set(sources), {}
     for graph in recipe['channels']:
         if not isinstance(graph, dict) or not isinstance(graph.get('channel'), str) or graph['channel'] in seen_channels:
             raise RecipeError('Each channel graph needs a unique channel.')
@@ -46,7 +46,7 @@ def validate_recipe(recipe):
             elif not isinstance(node.get('name'), str) or not node['name'].strip():
                 raise RecipeError('Name every connected output.')
             else:
-                output_count += 1
+                output_channels[node['id']] = channel
             node_ids.add(node['id'])
             nodes[node['id']] = node
         incoming, outgoing = defaultdict(list), {}
@@ -59,7 +59,8 @@ def validate_recipe(recipe):
                 raise RecipeError('Each class or rule result must feed one destination.')
             outgoing[source] = target
             incoming[target].append(source)
-        output_count += sum(node['type'] == 'input' and key not in outgoing for key, node in nodes.items())
+        output_channels.update({key: channel for key, node in nodes.items()
+                                if node['type'] == 'input' and key not in outgoing})
         pending = set(nodes)
         while pending:
             ready = {key for key in pending if not any(source in pending for source in incoming[key])}
@@ -69,10 +70,29 @@ def validate_recipe(recipe):
         for node in graph['nodes']:
             if not incoming[node['id']]:
                 raise RecipeError('Every saved rule and output must have an input.')
-    if any(source['channel'] not in seen_channels for source in sources.values()) or not output_count:
+    if any(source['channel'] not in seen_channels for source in sources.values()) or not output_channels:
         raise RecipeError('Recipe inputs must belong to a channel graph, and the recipe needs at least one output.')
     threshold(recipe.get('cross_iou'))
     threshold(recipe.get('cross_containment'))
+    assignments = recipe.get('output_assignments', [])
+    if not isinstance(assignments, list):
+        raise RecipeError('Output assignments must be a list.')
+    seen_combinations = set()
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            raise RecipeError('Each output assignment needs source outputs and a class name.')
+        ids, label = assignment.get('sources'), assignment.get('label')
+        if (not isinstance(ids, list) or not ids or
+                any(not isinstance(key, str) or key not in output_channels for key in ids)):
+            raise RecipeError('Output assignments must reference existing Phase 1 outputs.')
+        if len({output_channels[key] for key in ids}) != len(ids):
+            raise RecipeError('Each combination can contain only one output per channel.')
+        if not isinstance(label, str) or not 1 <= len(label.strip()) <= 255:
+            raise RecipeError('Output class names must contain between 1 and 255 characters.')
+        combination = frozenset(ids)
+        if combination in seen_combinations:
+            raise RecipeError('Each combination can have only one output assignment.')
+        seen_combinations.add(combination)
 
 
 def threshold(value):
@@ -213,19 +233,22 @@ def evaluate_two_phase(cells, recipe, channels):
                for a in groups[first] for b in groups[second]):
             parent[second] = first
             groups[first].extend(groups.pop(second))
+    assignments = {frozenset(row['sources']): row['label'].strip() for row in recipe.get('output_assignments', [])}
     combinations, boxes = {}, []
     for group in groups.values():
         positives = {box['output']['channelId']: box['output'] for box in group}
         states = [positives.get(channel.id) for channel in channels]
         key = json.dumps([state['id'] if state else None for state in states], separators=(',', ':'), ensure_ascii=False)
         name = ' + '.join(f"C{(channel.order_index or 0) + 1}: {state['name']}" for channel, state in zip(channels, states) if state)
+        label = assignments.get(frozenset(state['id'] for state in positives.values()))
+        output_id = f'output-class:{label}' if label else key
         if key not in combinations:
-            combinations[key] = dict(key=key, states=states, name=name, color=color_for(key), count=0)
+            combinations[key] = dict(key=key, states=states, name=name, color=color_for(output_id), count=0)
         combination = combinations[key]
         combination['count'] += 1
         best = min(group, key=representative)
         box = {field: best[field] for field in ('x', 'y', 'w', 'h', 'confidence')}
-        box.update(name=name, color=combination['color'], output_node_id=key,
+        box.update(name=label or name, color=combination['color'], output_node_id=output_id,
                    channel_ids=[f'C{(channel.order_index or 0) + 1}' for channel in channels if channel.id in positives])
         boxes.append(box)
     return dict(boxes=boxes, outputs=outputs, combinations=sorted(combinations.values(), key=lambda row: (-row['count'], row['name'])),
