@@ -1,4 +1,5 @@
 import { useRef, useState, useEffect } from 'react'
+import { API_BASE_URL } from '../apiConfig'
 
 const TILE_SIZE = 2048
 const LARGE_IMAGE_THRESHOLD = 16000
@@ -252,8 +253,7 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
 
     ;(layers || []).forEach(layer => {
       if (!layer.src) return
-      const filename = layer.src.split('/').pop()
-      const baseURL = new URL(layer.src).origin
+      const filename = new URL(layer.src, API_BASE_URL).pathname.split('/').pop()
 
       for (let ty = tyMin; ty < tyMax; ty++) {
         for (let tx = txMin; tx < txMax; tx++) {
@@ -270,7 +270,7 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
               setLayerLoadVersion(v => v + 1)
             }
             img.onerror = () => { tilesRef.current[key] = 'error' }
-            img.src = `${baseURL}/tile/${filename}/${tx}/${ty}/${TILE_SIZE}`
+            img.src = `${API_BASE_URL}/tile/${filename}/${tx}/${ty}/${TILE_SIZE}`
           } else if (cached !== 'loading' && cached !== 'error') {
             const drawX = tx * TILE_SIZE
             const drawY = ty * TILE_SIZE

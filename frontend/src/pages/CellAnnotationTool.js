@@ -1,4 +1,5 @@
 import ImageSetsModal from '../components/modals/ImageSetsModal'
+import { API_BASE_URL } from '../apiConfig'
 import ExportAnnotationsModal from '../components/modals/ExportAnnotationsModal'
 import BatchDetectionModal from '../components/modals/BatchDetectionModal'
 import ApplyMergeRecipeModal from '../components/modals/ApplyMergeRecipeModal'
@@ -61,7 +62,6 @@ const CHANNEL_COLOR_PALETTE = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF0
 
 export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMergedLayer }) {
   // Base URL for the backend API
-  const API_BASE_URL = 'http://10.80.24.12:5002'
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('Processing...')

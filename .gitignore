@@ -10,3 +10,4 @@ backend/snapshots
 backend/data
 backend/backups
 backend/pretrain_images
+/.env

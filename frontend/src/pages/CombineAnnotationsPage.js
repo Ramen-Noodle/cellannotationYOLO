@@ -3,8 +3,8 @@ import { Alert, Box, Button, CircularProgress, Dialog, DialogActions, DialogCont
 import ELK from 'elkjs/lib/elk.bundled.js'
 import MergePreviewModal from '../components/modals/MergePreviewModal'
 import RowMenu from '../components/RowMenu'
+import { API_BASE_URL } from '../apiConfig'
 
-const API_BASE_URL = 'http://10.80.24.12:5002'
 // Keep the image-layer tint palette identical to the main canvas. These
 // colors belong to channels; annotation/class colors are kept on boxes and
 // graph nodes separately.

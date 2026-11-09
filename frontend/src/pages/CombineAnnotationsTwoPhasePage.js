@@ -6,8 +6,8 @@ import MergePreviewModal from '../components/modals/MergePreviewModal'
 import TwoPhaseRecipeControls from '../components/TwoPhaseRecipeControls'
 import { buildTwoPhaseRecipe, restoreTwoPhaseRecipe } from '../utils/twoPhaseRecipe.mjs'
 import { terminalChannelClasses } from '../utils/twoPhaseCombinations.mjs'
+import { API_BASE_URL } from '../apiConfig'
 
-const API_BASE_URL = 'http://10.80.24.12:5002'
 const CHANNEL_COLORS = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
 const channelName = channel => `C${(channel.order_index ?? 0) + 1}`
 

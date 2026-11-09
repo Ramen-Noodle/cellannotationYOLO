@@ -6,7 +6,12 @@ from annotation_export import annotation_rows, yolo_line, serialize_annotations,
 from werkzeug.utils import secure_filename  # ADD THIS AT TOP OF FILE
 from flask import Flask, request, jsonify, send_from_directory, send_file, g
 import os
-os.environ.setdefault('XLA_FLAGS', '--xla_gpu_cuda_data_dir=/home/cdlee3/miniconda3/envs/cellv2')
+from secrets import token_hex
+from dotenv import load_dotenv
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, '..', '.env'))
+
 from PIL import Image
 import uuid
 from flask_cors import CORS
@@ -34,7 +39,6 @@ from ultralytics import YOLO
 from scripts.normalization import normalize_image
 from scripts.stardist_detect import stardist_detect_to_yolo
 from scripts import sahi_worker
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Gets directory where app.py is
 os.chdir(BASE_DIR)
 from PIL import Image
 import tifffile
@@ -48,9 +52,10 @@ data_folder = os.path.join(os.getcwd(), 'data')
 app = Flask(__name__, static_folder=data_folder, static_url_path='/static')
 CORS(app, supports_credentials=True, expose_headers=['Content-Disposition'])  # This will allow all domains to access your API
 
-app.secret_key = 'test'  # Replace with a real secret key
+app.secret_key = os.getenv('SECRET_KEY') or token_hex(32)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///biolab.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///biolab.db')
+app.config['API_BASE_URL'] = os.environ['REACT_APP_API_BASE_URL'].strip().rstrip('/')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # Session expires after 24 hours
 
@@ -277,6 +282,7 @@ def execute_detection(channel, model_record, threshold, cell_diameter, sublabel,
             scaling_factor=prep_data['scaling_factor'],
             model_path=model_path,
             threshold=threshold,
+            device=os.getenv('DETECTION_DEVICE', 'cpu'),
         )
 
     # 3. Parse Output Strings & Convert Coordinates back to front-end canvas space
@@ -1425,7 +1431,8 @@ def get_user_image_sets():
         set_data = img_set.to_dict()
         # Prepend the API base URL to all inner image URLs
         for img in set_data['images']:
-            img['url'] = f"{request.host_url.rstrip('/')}{img['url']}"
+            if img['url']:
+                img['url'] = f"{app.config['API_BASE_URL']}{img['url']}"
         results.append(set_data)
         
     return jsonify(results), 200
@@ -1495,7 +1502,7 @@ def combine_preview():
     if not image:
         return jsonify({"error": "Image record not found or unauthorized"}), 404
     try:
-        payload = _combine_result_for_image(image, recipe, request.host_url.rstrip('/'))
+        payload = _combine_result_for_image(image, recipe)
         return jsonify(payload), 200
     except RecipeError as error:
         return jsonify({'error': str(error)}), 400
@@ -1578,17 +1585,17 @@ def _evaluate_combine(cells, recipe, channels, image):
     return evaluate_recipe(cells, recipe, image_size=(image.width, image.height))
 
 
-def _combine_result_for_image(image, recipe, host_url):
+def _combine_result_for_image(image, recipe):
     channels, cells = _combine_cells_for_image(image, recipe)
     result = _evaluate_combine(cells, recipe, channels, image)
-    return _combine_payload(image, channels, recipe, result, host_url)
+    return _combine_payload(image, channels, recipe, result)
 
 
-def _combine_payload(image, channels, recipe, result, host_url):
+def _combine_payload(image, channels, recipe, result):
     channel_palette = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
     layers = [{
         'id': channel.id,
-        'src': f"{host_url}/static/{channel.normalized_path}",
+        'src': f"{app.config['API_BASE_URL']}/static/{channel.normalized_path}",
         'color': channel_palette[index % len(channel_palette)],
     } for index, channel in enumerate(channels)]
     return {
@@ -1628,7 +1635,7 @@ def combine_apply():
             return image, channels, _evaluate_combine(cells, recipe, channels, image)
         with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
             evaluated = list(executor.map(evaluate_prepared, prepared))
-        results = [_combine_payload(image, channels, recipe, result, request.host_url.rstrip('/'))
+        results = [_combine_payload(image, channels, recipe, result)
                    for image, channels, result in evaluated]
         for payload in results:
             layer = MergedLayer.query.filter_by(
@@ -2917,4 +2924,9 @@ if __name__ == '__main__':
     print('starting application')
     # Schema is managed by Flask-Migrate now. Run `flask db upgrade` before
     # starting the app to create/update tables instead of db.create_all().
-    app.run(host='0.0.0.0', port=5002, debug=True, threaded=True)
+    app.run(
+        host=os.environ['API_HOST'],
+        port=int(os.environ['API_PORT']),
+        debug=os.getenv('API_DEBUG', '0') == '1',
+        threaded=True,
+    )

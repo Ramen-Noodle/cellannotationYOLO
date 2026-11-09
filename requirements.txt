@@ -70,6 +70,7 @@ pyOpenSSL
 pyparsing==3.2.3
 PySocks
 python-dateutil==2.9.0.post0
+python-dotenv
 python-utils==3.9.1
 pytz==2025.2
 PyYAML

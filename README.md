@@ -73,30 +73,21 @@ You must have **Conda** installed on your system. We recommend [Miniconda](https
     ```
 ### **Running the Application**
 
-1.  **Activate the environment:**
-    **Note:** You must run this command every time you open a new terminal to work on the project.
-    ```bash
-    conda activate cellv2
-    ```
+Copy `.env.example` to `.env` at the repository root on either machine.
+In `REACT_APP_API_BASE_URL`, use `localhost` for local testing or the IP address
+of the machine running the API when accessing it remotely.
 
-2.  **Launch the Flask application:**
-    ```bash
-    cd backend
-    python app.py
-    ```
+Flask loads the root `.env` automatically. React reads the same file through
+`frontend/.env`. Settings already exported in your shell take precedence.
+If you previously sourced the file, start a fresh terminal after changing the port.
 
-3. **Launch the React Application:**
-   ```bash
-    cd frontend
-    npm start
-    ```
+For Flask, activate your Python environment (`cellv2-mac` on the Mac or `cellv2`
+on the server), then run `cd backend` and `python app.py`. To upgrade an existing
+database, back it up and run `flask --app app db upgrade` from `backend` first.
 
-The application will start on port **5001**. You can access it in your web browser at one of the following URLs:
-
-* **Local Machine:** `http://localhost:3000`
-* **Internal Server:** `http://<YOUR_SERVER_IP>:3000`
-
-> **Note:** The web interface will only be able to access user data and most app functionality while app.py is running
+In the frontend terminal, run `cd frontend`, `npm ci` for the first install, then
+`npm start`. Open `http://localhost:3000` locally. React reads the API URL at startup
+or build time, so restart the dev server or rebuild the frontend after changing it.
 
 ## Annotation export contract
 
