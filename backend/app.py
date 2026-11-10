@@ -1,4 +1,5 @@
 import sys
+import csv
 import json
 import re
 from difflib import SequenceMatcher
@@ -915,6 +916,12 @@ def _merged_layer_export(image_record, user_id, label_format, include_confidence
         raise ValueError(f'No merged layer exists for image {image_record.id}')
 
     boxes = layer.annotations or []
+    # Use the channel labels recorded at merge time so later edits to the
+    # image's channels do not change the meaning of these positions.
+    input_channels = sorted(
+        {key for box in boxes for key in box if re.fullmatch(r'C[1-9][0-9]*', key)},
+        key=lambda key: int(key[1:]),
+    )
     names = sorted({box.get('name') or box.get('output_node_id') or 'Class 0' for box in boxes})
     class_mapping = [
         {'id': index, 'name': name, 'color': next(
@@ -935,24 +942,32 @@ def _merged_layer_export(image_record, user_id, label_format, include_confidence
         })
 
     lines = []
-    for row in rows:
+    for row, box in zip(rows, boxes):
         label = row['class_name'] if label_format == 'name' else None
-        lines.append(yolo_line(row, label=label, include_confidence=include_confidence))
+        line = yolo_line(row, label=label, include_confidence=include_confidence)
+        if input_channels:
+            inputs = io.StringIO()
+            csv.writer(inputs).writerow(box.get(channel, '') for channel in input_channels)
+            line += ' ' + inputs.getvalue().removesuffix('\r\n')
+        lines.append(line)
     filename = f'{image_record.id}_merged.txt'
     metadata = {
-        'schema_version': 2,
+        'schema_version': 3 if input_channels else 2,
         'image_id': image_record.id,
         'image_name': image_record.base_channel.name if image_record.base_channel else None,
         'width': image_record.width,
         'height': image_record.height,
         'coordinates': 'normalized_center_x_center_y_width_height',
         'columns': ['class', 'center_x', 'center_y', 'width', 'height']
-                   + (['confidence'] if include_confidence else []),
+                   + (['confidence'] if include_confidence else [])
+                   + (['channel_inputs'] if input_channels else []),
         'label_format': label_format,
         'missing_confidence': None,
         'layer': 'merged',
         'class_mapping': class_mapping,
     }
+    if input_channels:
+        metadata['channel_input_order'] = input_channels
     return {
         filename: '\n'.join(lines),
         f'{image_record.id}_merged.metadata.json': json.dumps(metadata, indent=2, allow_nan=False),

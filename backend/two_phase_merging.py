@@ -174,11 +174,11 @@ def color_for(key):
     return '#' + ''.join(f'{80 + ((value >> shift) & 255) % 176:02x}' for shift in (0, 8, 16))
 
 
-def merged_annotation(box, *, name, color, output_id, channel_ids):
+def merged_annotation(box, *, name, color, output_id, channel_ids, channel_inputs):
     return {
         'x': box['x'], 'y': box['y'], 'w': box['w'], 'h': box['h'],
         'confidence': box['confidence'], 'name': name, 'color': color,
-        'output_node_id': output_id, 'channel_ids': channel_ids,
+        'output_node_id': output_id, 'channel_ids': channel_ids, **channel_inputs,
     }
 
 
@@ -322,12 +322,17 @@ def evaluate_two_phase(cells, recipe, channels):
                 boxes.append(merged_annotation(
                     member, name=output['name'], color=member.get('color') or color_for(output['id']),
                     output_id=output['id'], channel_ids=[member['channel']],
+                    channel_inputs={channel: output['name'] if channel == member['channel'] else ''
+                                    for channel in channel_ids},
                 ))
             continue
         best = min(group, key=representative)
+        channel_inputs = {channel: positives[channel_id]['name'] if channel_id in positives else ''
+                          for channel, channel_id in channel_ids.items()}
         boxes.append(merged_annotation(
             best, name=label, color=combination['color'], output_id=f'output-class:{label}',
-            channel_ids=[f'C{(channel.order_index or 0) + 1}' for channel in channels if channel.id in positives],
+            channel_ids=[channel for channel, channel_id in channel_ids.items() if channel_id in positives],
+            channel_inputs=channel_inputs,
         ))
     return dict(boxes=boxes, outputs=outputs, combinations=sorted(combinations.values(), key=lambda row: (-row['count'], row['name'])),
                 sourceCount=valid_count, routedCount=routed_count, invalidCount=invalid_count,
