@@ -9,7 +9,10 @@ export default function TwoPhaseCombinationsTable({ channels, outputs, preview, 
   const [observedOnly, setObservedOnly] = useState(false)
   const [newClassRow, setNewClassRow] = useState(null)
   const [newClassName, setNewClassName] = useState('')
-  const classNames = useMemo(() => [...new Set(Object.values(assignments))].sort((a, b) => a.localeCompare(b)), [assignments])
+  const classNames = useMemo(() => {
+    const names = [...outputs.map(output => output.name), ...Object.values(assignments)]
+    return [...new Set(names)].sort((a, b) => a.localeCompare(b))
+  }, [outputs, assignments])
   const catalog = useMemo(() => combinationCatalog(channels, outputs), [channels, outputs])
   const observed = useMemo(() => new Map(preview?.combinations.map(row => [row.key, row])), [preview])
   useEffect(() => { setPage(0n) }, [catalog, preview])
