@@ -19,14 +19,16 @@ export default function TwoPhaseRecipeControls({ apiUrl, imageId, recipe, onLoad
     return () => controller.abort()
   }, [apiUrl])
 
-  const load = id => {
+  const load = async id => {
     setError(''); setMessage('')
     const record = recipes.find(record => record.id === id)
+    if (record) { setBusy(true); onBusy(true) }
     try {
-      if (record) onLoad(record.recipe)
+      if (record) await onLoad(record.recipe)
       setRecipeId(id)
       setName(record?.name || '')
     } catch (error) { setError(error.message) }
+    finally { if (record) { setBusy(false); onBusy(false) } }
   }
   const submit = async apply => {
     setBusy(true); onBusy(true); setError(''); setMessage('')
@@ -64,7 +66,7 @@ export default function TwoPhaseRecipeControls({ apiUrl, imageId, recipe, onLoad
       </FormControl>
       <TextField size="small" label="Recipe name" value={name} disabled={busy} inputProps={{ maxLength: 255 }} onChange={event => setName(event.target.value)} />
       <Button disabled={busy || !recipe || !name.trim()} onClick={() => submit(false)}>{recipeId ? 'Update recipe' : 'Save recipe'}</Button>
-      <Button variant="outlined" disabled={busy || !recipe} onClick={() => submit(true)}>{busy ? 'Saving…' : 'Apply to image'}</Button>
+      <Button variant="outlined" disabled={busy || !recipe} onClick={() => submit(true)}>{busy ? 'Working…' : 'Apply to image'}</Button>
     </Stack>
     <Typography variant="caption" color="text.secondary">Preview the current graph to enable saving. Apply replaces this image’s merged annotation layer.</Typography>
     {error && <Alert severity="error">{error}</Alert>}

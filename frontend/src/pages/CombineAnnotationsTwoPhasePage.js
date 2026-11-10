@@ -6,6 +6,7 @@ import MergePreviewModal from '../components/modals/MergePreviewModal'
 import TwoPhaseRecipeControls from '../components/TwoPhaseRecipeControls'
 import { buildTwoPhaseRecipe, restoreTwoPhaseRecipe } from '../utils/twoPhaseRecipe.mjs'
 import { terminalChannelClasses } from '../utils/twoPhaseCombinations.mjs'
+import { layoutPhaseOneGraph } from '../utils/graphLayout'
 import { API_BASE_URL } from '../apiConfig'
 
 const CHANNEL_COLORS = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
@@ -137,9 +138,13 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
       setPreviewOpen(true)
     } catch (error) { setError(error.message) }
   }
-  const loadRecipe = recipe => {
+  const loadRecipe = async recipe => {
     const restored = restoreTwoPhaseRecipe(recipe, channels, classes)
-    setGraphs(restored.graphs)
+    const arranged = await Promise.all(Object.entries(restored.graphs).map(async ([channelId, graph]) => {
+      const positions = await layoutPhaseOneGraph(classes.filter(entry => entry.channelId === channelId), graph)
+      return [channelId, { ...graph, positions }]
+    }))
+    setGraphs(Object.fromEntries(arranged))
     setOutputAssignments(restored.outputAssignments)
     setCrossThresholds({ iou: recipe.cross_iou, containment: recipe.cross_containment })
     setPreviewRun(null)

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Box, Button, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
-import ELK from 'elkjs/lib/elk.bundled.js'
+import { layoutGraph } from '../utils/graphLayout'
 import MergePreviewModal from '../components/modals/MergePreviewModal'
 import RowMenu from '../components/RowMenu'
 import { API_BASE_URL } from '../apiConfig'
@@ -179,24 +179,10 @@ export default function CombineAnnotationsPage() {
     }
     layoutRequestedRef.current = false
     let cancelled = false
-    const elk = new ELK()
-    elk.layout({
-      id: 'combine-graph',
-      layoutOptions: {
-        'elk.algorithm': 'layered',
-        'elk.direction': 'RIGHT',
-        'elk.spacing.nodeNode': '36',
-        'elk.layered.spacing.nodeNodeBetweenLayers': '90',
-        'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
-        'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
-      },
-      children: displayNodes.map(node => ({ id: node.id, width: 196, height: 74 })),
-      edges: connections.map(connection => ({ id: connection.id, sources: [connection.source], targets: [connection.target] })),
-    }).then(result => {
-      if (cancelled || !result.children) return
-      const positions = new Map(result.children.map(node => [node.id, { x: Math.max(8, (node.x || 0) + 24), y: Math.max(8, (node.y || 0) + 24) }]))
-      setNodes(previous => previous.map(node => positions.has(node.id) ? { ...node, ...positions.get(node.id) } : node))
-      setCreatedNodes(previous => previous.map(node => positions.has(node.id) ? { ...node, ...positions.get(node.id) } : node))
+    layoutGraph(displayNodes.map(node => node.id), connections, 196, 74).then(positions => {
+      if (cancelled) return
+      setNodes(previous => previous.map(node => ({ ...node, ...positions[node.id] })))
+      setCreatedNodes(previous => previous.map(node => ({ ...node, ...positions[node.id] })))
     }).catch(() => {})
     return () => { cancelled = true }
   }, [displayNodes, connections])

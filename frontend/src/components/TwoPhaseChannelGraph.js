@@ -2,9 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Box, Button, FormControl, InputLabel, MenuItem, Select, Stack, TextField, Typography } from '@mui/material'
 import PhaseOneOutputTable from './PhaseOneOutputTable'
 import { channelGraphIncoming, inputClassName, outputTableInputs } from '../utils/twoPhaseCombinations.mjs'
-
-const NODE_WIDTH = 196
-const NODE_HEIGHT = 84
+import { layoutPhaseOneGraph, PHASE_ONE_NODE_HEIGHT as NODE_HEIGHT, PHASE_ONE_NODE_WIDTH as NODE_WIDTH } from '../utils/graphLayout'
 const channelName = channel => `C${(channel.order_index ?? 0) + 1}`
 const emptyGraph = { created: [], edges: [], positions: {}, zoom: 1 }
 
@@ -32,6 +30,9 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
   const connectRef = useRef(null)
   const clearRef = useRef(null)
   const zoomRef = useRef(1)
+  const graphRef = useRef(graph)
+  const layoutRequestRef = useRef(null)
+  graphRef.current = graph
   const zoom = graph.zoom || 1
   const nodes = useMemo(() => [
     ...classes.map((entry, index) => ({ ...entry, type: 'input', x: 32, y: 32 + index * (NODE_HEIGHT + 24) })),
@@ -45,6 +46,19 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
   const height = Math.max(390, ...nodes.map(node => node.y + NODE_HEIGHT + 50))
   const activeColor = classes[0]?.color || '#cbd5e1'
   const update = change => onChange(previous => ({ ...emptyGraph, ...previous, ...change }))
+  const arrange = async () => {
+    const request = {}
+    layoutRequestRef.current = request
+    setError('')
+    try {
+      const positions = await layoutPhaseOneGraph(classes, graph)
+      if (layoutRequestRef.current !== request || graphRef.current !== graph) return
+      update({ positions, zoom: 1 })
+      viewportRef.current?.scrollTo?.(0, 0)
+    } catch {
+      if (layoutRequestRef.current === request) setError('Could not arrange the graph.')
+    }
+  }
   const clearConnection = () => { connectionRef.current = null; setConnecting(null); setPointer(null) }
   const connect = (source, target) => {
     clearConnection()
@@ -81,6 +95,7 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
     window.addEventListener('blur', cancel)
     window.addEventListener('keydown', key)
     return () => {
+      layoutRequestRef.current = null
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', cancel)
@@ -136,7 +151,7 @@ export default function TwoPhaseChannelGraph({ channel, classes, graph = emptyGr
       <Typography variant="caption">{Math.round(zoom * 100)}%</Typography>
       <Button size="small" aria-label="Zoom in" onClick={() => update({ zoom: Math.min(1.5, zoom + 0.1) })}>+</Button>
       <Button size="small" onClick={() => { update({ zoom: Math.max(0.4, Math.min(1, (viewportRef.current?.clientWidth || 800) / width)) }); viewportRef.current?.scrollTo?.(0, 0) }}>Fit</Button>
-      <Button size="small" onClick={() => update({ positions: {}, zoom: 1 })}>Arrange</Button>
+      <Button size="small" onClick={arrange}>Arrange</Button>
     </Stack>
     <Typography variant="body2" color="text.secondary">Unconnected input classes pass through. Connect a rule to an output table to choose an existing input class for each combination.</Typography>
     {error && <Alert severity="warning">{error}</Alert>}
