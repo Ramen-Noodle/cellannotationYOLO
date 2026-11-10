@@ -33,15 +33,21 @@ export function buildTwoPhaseRecipe(channels, classes, graphs, thresholds, outpu
       id: source.id, channel: channelName(channel), detection_setting_id: source.settingId,
       class_name: source.name, sublabel: source.sublabel,
     })))
+    const edges = (graph.edges || []).filter(edge => used.has(edge.source) && used.has(edge.target))
+    if (new Set(edges.map(edge => edge.source)).size !== edges.length) {
+      throw new Error('Each class or rule result must feed one destination.')
+    }
     return {
       channel: channelName(channel),
       nodes: (graph.created || []).filter(node => used.has(node.id)).map(node => {
         if (node.type === 'output') return { id: node.id, type: 'output', mappings: tables.get(node.id) }
-        if (node.threshold === '' || !Number.isFinite(Number(node.threshold))) throw new Error('Enter a valid overlap threshold.')
-        return { id: node.id, type: 'rule', ruleType: node.ruleType, threshold: Number(node.threshold) }
+        const threshold = Number(node.threshold)
+        if (node.threshold === '' || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+          throw new Error('Overlap thresholds must be between 0 and 1.')
+        }
+        return { id: node.id, type: 'rule', ruleType: node.ruleType, threshold }
       }),
-      edges: (graph.edges || []).filter(edge => used.has(edge.source) && used.has(edge.target))
-        .map(({ source, target }) => ({ source, target })),
+      edges: edges.map(({ source, target }) => ({ source, target })),
     }
   })
   const outputIds = new Set(outputs.map(output => output.id))

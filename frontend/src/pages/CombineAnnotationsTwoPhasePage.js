@@ -93,6 +93,13 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
 
   const classes = useMemo(() => imageClasses(channels, annotations), [channels, annotations])
   const outputs = useMemo(() => terminalChannelClasses(channels, classes, graphs), [channels, classes, graphs])
+  const currentRecipe = useMemo(() => {
+    try {
+      return { recipe: buildTwoPhaseRecipe(channels, classes, graphs, crossThresholds, outputAssignments) }
+    } catch (error) {
+      return { error: error.message }
+    }
+  }, [channels, classes, graphs, crossThresholds, outputAssignments])
   const activeRun = previewRun && previewRun.imageId === imageId && previewRun.classes === classes && previewRun.crossThresholds === crossThresholds && channels.every(({ id }) =>
     graphs[id]?.created === previewRun.graphs[id]?.created && graphs[id]?.edges === previewRun.graphs[id]?.edges) ? previewRun : null
   const completed = activeRun && completedRun?.run === activeRun ? completedRun : null
@@ -130,13 +137,14 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
   }, [preview, selectedImage, imageId, channels])
   const openPreview = () => {
     setError('')
-    try {
-      if (!preview) {
-        const recipe = buildTwoPhaseRecipe(channels, classes, graphs, crossThresholds, outputAssignments)
-        setPreviewRun({ imageId, channels, classes, graphs, crossThresholds, outputAssignments, recipe })
-      }
-      setPreviewOpen(true)
-    } catch (error) { setError(error.message) }
+    if (!currentRecipe.recipe) {
+      setError(currentRecipe.error)
+      return
+    }
+    if (!preview) {
+      setPreviewRun({ imageId, channels, classes, graphs, crossThresholds, outputAssignments, recipe: currentRecipe.recipe })
+    }
+    setPreviewOpen(true)
   }
   const loadRecipe = async recipe => {
     const restored = restoreTwoPhaseRecipe(recipe, channels, classes)
@@ -182,7 +190,7 @@ export default function CombineAnnotationsTwoPhasePage({ onApplyMergedLayer }) {
       {(loadingImages || loadingAnnotations) && <Stack direction="row" spacing={1} alignItems="center"><CircularProgress size={18} /><Typography variant="body2">Loading image classes…</Typography></Stack>}
       {!imageId && !loadingImages && <Typography color="text.secondary">Select an image to begin.</Typography>}
       {imageId && !loadingAnnotations && channels.length > 0 && <>
-        <TwoPhaseRecipeControls key={imageId} apiUrl={API_BASE_URL} imageId={imageId} recipe={preview?.recipe}
+        <TwoPhaseRecipeControls key={imageId} apiUrl={API_BASE_URL} imageId={imageId} recipe={preview?.recipe} applyRecipe={currentRecipe.recipe}
           onLoad={loadRecipe} onApplied={applied} onBusy={setSaving} />
         <Box component="fieldset" disabled={saving} sx={{ border: 0, m: 0, p: 0, minWidth: 0 }}>
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap role="group" aria-label="Active channel">
