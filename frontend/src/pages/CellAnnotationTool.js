@@ -142,6 +142,9 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
   const [batchChannelGroups, setBatchChannelGroups] = useState([])
   const [batchLoadError, setBatchLoadError] = useState('')
   const batchLoadVersion = useRef(0)
+  const batchPollingRef = useRef(null)
+
+  useEffect(() => () => batchPollingRef.current?.abort(), [])
 
   const fileKey = (file) => `${file.name}-${file.size}-${file.lastModified}`
   // State for fine tuning
@@ -1437,6 +1440,7 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
   }
 
   async function handleBatchDetect() {
+    if (batchPollingRef.current) return
     if (!batchImageSetId) return alert('Please select an image set.')
 
     const detectionRows = batchDetectionSettings.filter(r => batchSelectedRowIds.includes(r.id))
@@ -1447,6 +1451,8 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
     setIsLoading(true)
     setLoadingMessage('Starting batch detection...')
 
+    const controller = new AbortController()
+    batchPollingRef.current = controller
     try {
       const batchImages = imageSets.find(s => s.id === batchImageSetId)?.images || []
       const payload = {
@@ -1470,6 +1476,7 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
         credentials: 'include',
+        signal: controller.signal,
       })
 
       if (!startRes.ok) {
@@ -1478,28 +1485,52 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
       }
       const started = await startRes.json()
       const jobId = started.job_id
+      if (typeof jobId !== 'string' || !jobId) throw new Error('The server did not return a batch job ID.')
+      const progressUrl = `${API_BASE_URL}/batch-detect/progress/${encodeURIComponent(jobId)}`
+      const normalPollDelay = 500
+      let pollDelay = normalPollDelay
+      let lastProgressMessage = ''
       let data = null
       while (true) {
-        await new Promise(resolve => setTimeout(resolve, 500))
-        const progressRes = await fetch(`${API_BASE_URL}/batch-detect/progress/${jobId}`, { credentials: 'include' })
-        if (!progressRes.ok) throw new Error('Unable to read batch detection progress')
-        const progress = await progressRes.json()
+        await new Promise(resolve => setTimeout(resolve, pollDelay))
+        if (controller.signal.aborted) return
+
+        let progress
+        try {
+          const progressRes = await fetch(progressUrl, {
+            credentials: 'include', cache: 'no-store', signal: controller.signal,
+          })
+          if (progressRes.ok) progress = await progressRes.json()
+        } catch {
+          // A failed status request says nothing about the outcome of the job.
+        }
+        if (controller.signal.aborted) return
+        if (!['queued', 'running', 'complete', 'failed'].includes(progress?.status)
+          || (progress.status === 'complete' && !progress.result)) {
+          pollDelay = Math.min(pollDelay * 2, 10000)
+          const placeholder = 'Batch progress unavailable. Still checking…'
+          setLoadingMessage(lastProgressMessage ? `${lastProgressMessage}\n${placeholder}` : placeholder)
+          continue
+        }
+
+        if (progress.status === 'complete') {
+          data = progress.result
+          break
+        }
+        if (progress.status === 'failed') throw new Error(progress.error || 'Batch detection failed')
+
+        pollDelay = normalPollDelay
         const total = progress.total || batchImages.length
         const current = progress.current || 0
         const imageLabel = progress.current_image || 'current image'
         const channelModel = progress.current_channel && progress.current_model
           ? `Channel ${progress.current_channel} · ${progress.current_model} · detection row ${progress.current_row || 0}/${progress.total_rows || 0}`
           : 'Preparing detection'
-        setLoadingMessage(
+        lastProgressMessage =
           `Processing image ${Math.min(current, total)}/${total}: ${imageLabel}\n` +
           `${channelModel}\n` +
-          `${progress.current_detections || 0} detections found · ${progress.failed || 0} images failed`,
-        )
-        if (progress.status === 'complete') {
-          data = progress.result
-          break
-        }
-        if (progress.status === 'failed') throw new Error(progress.error || 'Batch detection failed')
+          `${progress.current_detections || 0} detections found · ${progress.failed || 0} images failed`
+        setLoadingMessage(lastProgressMessage)
       }
 
       // Batch drafts may differ from the sidebar row they originated from.
@@ -1526,11 +1557,15 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
         await renderAnnotations(imageID, selectedChannelId)
       }
     } catch (err) {
+      if (controller.signal.aborted) return
       console.error(err)
       alert(`Batch detection error: ${err.message}`)
     } finally {
-      setIsLoading(false)
-      setLoadingMessage('Processing...')
+      batchPollingRef.current = null
+      if (!controller.signal.aborted) {
+        setIsLoading(false)
+        setLoadingMessage('Processing...')
+      }
     }
   }
 
