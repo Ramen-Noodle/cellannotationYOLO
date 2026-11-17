@@ -640,6 +640,8 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
   function buildChannelRow(channel) {
     return {
       id: channel.id,
+      imageId: channel.image_id,
+      tiffView: channel.has_tiff_view ? { low: channel.p_low, high: channel.p_high } : null,
       channelName: channel.name,
       orderIndex: channel.order_index,
       channelUrl: `${API_BASE_URL}${channel.url}?t=${new Date().getTime()}`,
@@ -2352,6 +2354,10 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
     ? channels.filter(c => visibleChannelIds.has(c.id)).map(c => ({ id: c.id, src: c.channelUrl, color: c.channelColor }))
     : (selectedChannelId && visibleChannelIds.has(selectedChannelId) ? [{ id: selectedChannelId, src: imageURL, color: null }] : []),
   [mergedActive, mergedLayer, overlayChannels, channels, visibleChannelIds, selectedChannelId, imageURL])
+  const tiffView = !mergedActive && channels.length === 1 && channels[0].imageId === imageID
+    && canvasLayers.length === 1 && channels[0].tiffView
+    ? { ...channels[0].tiffView, channelId: channels[0].id, revision: channels[0].channelUrl }
+    : null
 
   useEffect(() => {
     console.log(detectionSettings)
@@ -3261,7 +3267,7 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
             )}
           </Box>
           <Box sx={{ flexGrow: 1, display: 'flex', justifyContent: 'center', bgcolor: '#111' }}>
-            <ImageCanvas layers={canvasLayers} readOnly={!!importedPreview || !!mergedActive} boxes={mergedActive ? mergedLayer.boxes : importedPreview && importedPreview.imageId === imageID
+            <ImageCanvas layers={canvasLayers} tiffView={tiffView} readOnly={!!importedPreview || !!mergedActive} boxes={mergedActive ? mergedLayer.boxes : importedPreview && importedPreview.imageId === imageID
               ? visibleImportedBoxes(importedPreview.boxes, overlayChannels, visibleChannelIds, selectedChannelId)
               : visibleBoxes} onAddBox={handleAddBox}
               onRemoveBox={handleRemoveBox} isCropping={isCropping && !mergedActive} onCrop={handleCrop}

@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect } from 'react'
 import { API_BASE_URL } from '../apiConfig'
+import useTiffView from '../utils/useTiffView'
 
 const TILE_SIZE = 2048
 const LARGE_IMAGE_THRESHOLD = 16000
@@ -21,7 +22,7 @@ function tintToCanvas(source, color, width, height) {
   return c
 }
 
-export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCropping,
+export default function ImageCanvas({ layers, tiffView, boxes, onAddBox, onRemoveBox, isCropping,
     onCrop, currentClass, classes, imageSize, brightness, contrast, scale, onScaleChange, showLabels = true, currentSet, readOnly = false, viewportSize, initialOffset }) {
   const canvasRef = useRef(null)
   const imagesRef = useRef({})       // layerId -> loaded Image (non-tiled)
@@ -117,6 +118,7 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
   const [canDraw, setCanDraw] = useState(false)
 
   const isTiled = imageSize && (imageSize.width > LARGE_IMAGE_THRESHOLD || imageSize.height > LARGE_IMAGE_THRESHOLD)
+  const rawView = useTiffView(isTiled ? null : tiffView, imageSize?.width, imageSize?.height, brightness, contrast)
 
   // A stable, content-derived key so the load effect only re-runs when a
   // layer's src or color actually changes, not on every parent re-render
@@ -198,7 +200,7 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
       if (drawRequestRef.current) cancelAnimationFrame(drawRequestRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scale, offset, visibleBoxes, currentBox, classes, brightness, contrast, windowSize, viewportSize, imageSize, layerLoadVersion, layersKey, showLabels])
+  }, [scale, offset, visibleBoxes, currentBox, classes, brightness, contrast, windowSize, viewportSize, imageSize, layerLoadVersion, layersKey, showLabels, rawView])
 
   const getLabelTextColor = (hex) => {
     const r = parseInt(hex.slice(1, 3), 16)
@@ -304,9 +306,11 @@ export default function ImageCanvas({ layers, boxes, onAddBox, onRemoveBox, isCr
     ctx.scale(scale, scale)
 
     // apply filters
-    ctx.filter = `brightness(${100 + +brightness}%) contrast(${100 + +contrast}%)`
+    ctx.filter = rawView ? 'none' : `brightness(${100 + +brightness}%) contrast(${100 + +contrast}%)`
 
-    if (isTiled) {
+    if (rawView) {
+      ctx.drawImage(rawView.canvas, 0, 0)
+    } else if (isTiled) {
       drawTiledLayers(ctx, canvas)
     } else {
       drawImageLayers(ctx)

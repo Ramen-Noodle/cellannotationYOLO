@@ -51,7 +51,7 @@ Image.MAX_IMAGE_PIXELS = None
 
 data_folder = os.path.join(os.getcwd(), 'data')
 app = Flask(__name__, static_folder=data_folder, static_url_path='/static')
-CORS(app, supports_credentials=True, expose_headers=['Content-Disposition'])  # This will allow all domains to access your API
+CORS(app, supports_credentials=True, expose_headers=['Content-Disposition', 'X-Tiff-Bits'])
 
 app.secret_key = os.getenv('SECRET_KEY') or token_hex(32)
 
@@ -1322,7 +1322,63 @@ def load_channels():
     if not image_record:
         return jsonify({"error": "Image record not found or unauthorized"}), 404
 
-    return jsonify([c.to_dict() for c in image_record.channels])
+    return jsonify([
+        {**channel.to_dict(), 'has_tiff_view': tiff_view_source(image_record, channel) is not None}
+        for channel in image_record.channels
+    ])
+
+
+def tiff_view_source(image_record, channel):
+    if (len(image_record.channels) != 1 or channel.original_extension not in ('.tif', '.tiff')
+            or not image_record.width or not image_record.height
+            or image_record.width * image_record.height > 2048 ** 2):
+        return None
+    original = os.path.join(data_folder, channel.original_path)
+    normalized = os.path.join(data_folder, channel.normalized_path)
+    try:
+        # Cropping overwrites the PNG and leaves the original TIFF intact.
+        # Keep showing that PNG so the original cannot undo the visible crop.
+        created = channel.created_at.replace(tzinfo=datetime.timezone.utc).timestamp()
+        if os.path.getmtime(normalized) > created or os.path.getsize(original) > 16 * 1024 ** 2:
+            return None
+    except OSError:
+        return None
+    return original
+
+
+@app.route('/tiff-view/<channel_id>', methods=['GET'])
+def tiff_view(channel_id):
+    if not g.user:
+        return jsonify({'error': 'No active session'}), 401
+    channel = Channel.query.join(ImageRecord).filter(
+        Channel.id == channel_id, ImageRecord.user_id == g.user.id
+    ).first()
+    if not channel:
+        return jsonify({'error': 'Channel not found'}), 404
+
+    image = channel.image_record
+    original = tiff_view_source(image, channel)
+    if original is None:
+        return jsonify({'error': 'TIFF view is unavailable'}), 404
+    try:
+        with tifffile.TiffFile(original) as tiff:
+            series = tiff.series[0]
+            expected_shape = (image.height, image.width)
+            matches_shape = series.shape == expected_shape or tuple(n for n in series.shape if n != 1) == expected_shape
+            if (not matches_shape or series.dtype.kind != 'u' or series.dtype.itemsize not in (1, 2)
+                    or tiff.pages[0].photometric != tifffile.PHOTOMETRIC.MINISBLACK):
+                return jsonify({'error': 'Unsupported TIFF for direct viewing'}), 415
+            pixels = series.asarray().reshape(expected_shape)
+    except (OSError, ValueError, RuntimeError, IndexError):
+        return jsonify({'error': 'Could not decode TIFF for direct viewing'}), 415
+    return app.response_class(
+        pixels.astype('<u2', copy=False).tobytes(),
+        mimetype='application/octet-stream',
+        headers={
+            'Cache-Control': 'private, no-store',
+            'X-Tiff-Bits': str(8 * pixels.dtype.itemsize),
+        },
+    )
 
 
 @app.route('/update-channel', methods=['POST'])
