@@ -1,6 +1,5 @@
 import sys
 import csv
-import json
 import re
 from difflib import SequenceMatcher
 from annotation_export import annotation_rows, yolo_line, serialize_annotations, channel_label, normalized_box, confidence_value
@@ -861,9 +860,9 @@ def _export_image_stem(image_record):
 
 
 def _image_export(image_record, user_id, label_format, include_confidence, filename_stem=None):
-    """Build text files plus lossless row metadata from authoritative database boxes."""
+    """Build annotation text files from authoritative database boxes."""
     filename_stem = filename_stem or _export_image_stem(image_record)
-    files, runs, combined = {}, [], []
+    files, combined = {}, []
     for channel in image_record.channels:
         channel_token = channel_label(channel)
         records = Annotation.query.filter_by(channel_id=channel.id, user_id=user_id).all()
@@ -880,45 +879,19 @@ def _image_export(image_record, user_id, label_format, include_confidence, filen
                     row['confidence'] = None
             filename = (f'{filename_stem}_{channel_token}_run{run_number}.txt'
                         if label_format == 'number' else f'{filename_stem}.txt')
-            line_numbers = []
             lines = []
             for row in rows:
                 class_idx = row['class_id']
                 class_name = labels[class_idx]['name'] if 0 <= class_idx < len(labels) else f'class{class_idx}'
                 label = f'{class_name}_{sublabel}' if sublabel else class_name
                 if label_format == 'name':
-                    # Keep the channel visible in the TXT, not only in metadata.
                     combined.append(f'{channel_token} ' + yolo_line(row, label, include_confidence))
-                    line_numbers.append(len(combined))
                 else:
                     lines.append(f'{channel_token} ' + yolo_line(row, include_confidence=include_confidence))
-                    line_numbers.append(len(lines))
             if label_format == 'number':
                 files[filename] = '\n'.join(lines)
-            runs.append({
-                'annotation_id': record.id, 'channel_id': channel.id,
-                'channel_name': channel.name, 'channel_order': channel.order_index,
-                'channel_label': channel_token,
-                'detection_setting_id': setting.id if setting else None,
-                'model_id': model.id if model else None, 'model_name': model.name if model else None,
-                'class_mapping': labels, 'settings': params,
-                'file': filename, 'line_numbers': line_numbers, 'annotations': rows,
-            })
     if label_format == 'name':
         files[f'{filename_stem}.txt'] = '\n'.join(combined)
-    metadata = {
-        'schema_version': 2, 'image_id': image_record.id,
-        'image_name': image_record.base_channel.name if image_record.base_channel else None,
-        'width': image_record.width, 'height': image_record.height,
-        'coordinates': 'normalized_center_x_center_y_width_height',
-        'columns': ['channel', 'class', 'center_x', 'center_y', 'width', 'height']
-                   + (['confidence'] if include_confidence else []),
-        'label_format': label_format, 'missing_confidence': None,
-        'channels': [{'id': c.id, 'name': c.name, 'order': c.order_index,
-                      'label': channel_label(c)} for c in image_record.channels],
-        'runs': runs,
-    }
-    files[f'{image_record.id}.metadata.json'] = json.dumps(metadata, indent=2, allow_nan=False)
     return files
 
 
@@ -937,14 +910,7 @@ def _merged_layer_export(image_record, user_id, label_format, include_confidence
         key=lambda key: int(key[1:]),
     )
     names = sorted({box.get('name') or box.get('output_node_id') or 'Class 0' for box in boxes})
-    class_mapping = [
-        {'id': index, 'name': name, 'color': next(
-            (box.get('color') for box in boxes if (box.get('name') or box.get('output_node_id') or 'Class 0') == name),
-            '#ffffff'
-        )}
-        for index, name in enumerate(names)
-    ]
-    class_ids = {entry['name']: entry['id'] for entry in class_mapping}
+    class_ids = {name: index for index, name in enumerate(names)}
     rows = []
     for box in boxes:
         name = box.get('name') or box.get('output_node_id') or 'Class 0'
@@ -965,27 +931,7 @@ def _merged_layer_export(image_record, user_id, label_format, include_confidence
             line += ' ' + inputs.getvalue().removesuffix('\r\n')
         lines.append(line)
     filename = f'{filename_stem}_merged.txt'
-    metadata = {
-        'schema_version': 3 if input_channels else 2,
-        'image_id': image_record.id,
-        'image_name': image_record.base_channel.name if image_record.base_channel else None,
-        'width': image_record.width,
-        'height': image_record.height,
-        'coordinates': 'normalized_center_x_center_y_width_height',
-        'columns': ['class', 'center_x', 'center_y', 'width', 'height']
-                   + (['confidence'] if include_confidence else [])
-                   + (['channel_inputs'] if input_channels else []),
-        'label_format': label_format,
-        'missing_confidence': None,
-        'layer': 'merged',
-        'class_mapping': class_mapping,
-    }
-    if input_channels:
-        metadata['channel_input_order'] = input_channels
-    return {
-        filename: '\n'.join(lines),
-        f'{image_record.id}_merged.metadata.json': json.dumps(metadata, indent=2, allow_nan=False),
-    }
+    return {filename: '\n'.join(lines)}
 
 
 @app.route('/export-annotations', methods=['POST'])

@@ -92,16 +92,15 @@ or build time, so restart the dev server or rebuild the frontend after changing 
 ## Annotation export contract
 
 Exports from the React/backend application now return a ZIP for both individual
-images and image sets. Each image includes a `<image-id>.metadata.json` sidecar.
+images and image sets. Downloads contain only annotation TXT files.
 Text filenames use the original image name: `<image-name>.txt` in class-name mode,
 `<image-name>_C1_run1.txt` (channel and run number) in class-number mode, and
 `<image-name>_merged.txt` for merged layers. Duplicate image names in an image-set
-export receive numeric suffixes (`_2`, `_3`, etc.). Metadata references the exported
-text filenames and retains the image and annotation IDs.
+export receive numeric suffixes (`_2`, `_3`, etc.).
 
 Every exported TXT row starts with a separate channel column (`C1`, `C2`, `C3`, etc.),
-using the UI channel order plus one. Metadata maps these labels to channel names
-and IDs; a number does not imply an RGB color or fluorophore. Text boxes are
+using the UI channel order plus one. A number does not imply an RGB color or
+fluorophore. Text boxes are
 normalized `center_x center_y width height` relative to the
 full image dimensions, including after manual saves and ROI masking. Database
 annotation JSON is authoritative; historical TXT files are not read by export.
@@ -109,10 +108,7 @@ Boxes crossing image edges are clipped; invalid/non-finite or entirely external
 boxes cause an error rather than silently corrupting the output.
 
 Class-number mode produces one TXT per detection record, with model-local class
-IDs. Class-name mode combines records in one TXT. The sidecar maps each record to
-its text filename and one-based line numbers and includes channel ID/name/order,
-model ID/name, the model's class mapping, detection settings, image dimensions,
-and normalized annotations with their detected/manual origin. Do not infer
+IDs. Class-name mode combines records in one TXT. Do not infer
 biological channel identity from class names or assume that class IDs have the
 same meaning across models. Empty records and images are retained in exports.
 
@@ -123,8 +119,7 @@ For example: `C2 neuron 0.120000 0.480000 0.040000 0.160000 0.750000`.
 This channel-aware format is an analysis export, not a YOLO training label.
 Class-number mode retains model-local numeric class IDs in the second column.
 Internal saved annotation files and the training workflow do not add a channel column.
-Metadata always retains available confidence as a JSON number or null. Legacy
-100 sentinels are unknown. StarDist's old synthetic 1.0 is also exported as unknown;
+Legacy 100 sentinels are unknown. StarDist's old synthetic 1.0 is also exported as unknown;
 this change does not claim to recover per-instance probabilities or change inference.
 
 Regression tests (no model weights or ML runtime required):

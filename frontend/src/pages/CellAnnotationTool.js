@@ -1211,14 +1211,14 @@ export default function CellAnnotationTool({ appliedMergedLayers = {}, onApplyMe
       const a = document.createElement('a')
       a.href = url
 
-      // All exports include annotation text plus per-image metadata in a ZIP.
+      // All exports include annotation text files in a ZIP.
       // Use the server's download name when the response header is available.
       const disposition = res.headers.get('Content-Disposition') || ''
       const filenameMatch = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/)
       const baseName = isImageSet
         ? (imageSets.find(s => s.id === exportImageSetId)?.name || 'image_set')
         : (imageList.find(img => img.id === exportImageId)?.name || imageName).replace(/\.[^.]+$/, '')
-      const fallbackExtension = 'zip' // Includes per-image metadata for every export
+      const fallbackExtension = 'zip'
       a.download = filenameMatch ? decodeURIComponent(filenameMatch[1]) : `${baseName}.${fallbackExtension}`
 
       document.body.appendChild(a)
