@@ -849,13 +849,25 @@ def save_color():
 
 # *----------* Data Download Endpoints *----------* #
     
-def _image_export(image_record, user_id, label_format, include_confidence):
+def _export_image_stem(image_record):
+    """Use the uploaded image name, without paths or generated channel suffixes."""
+    channel = image_record.base_channel
+    name = channel.name if channel else None
+    if name and re.search(r'_c\d+_orig\.[^.]+$', channel.original_path or ''):
+        name = re.sub(r' \(C\d+\)$', '', name)
+    name = (name or 'image').replace('\\', '/').rsplit('/', 1)[-1]
+    name = ''.join(char for char in name if ord(char) >= 32).strip()
+    return name if name and name not in ('.', '..') else 'image'
+
+
+def _image_export(image_record, user_id, label_format, include_confidence, filename_stem=None):
     """Build text files plus lossless row metadata from authoritative database boxes."""
+    filename_stem = filename_stem or _export_image_stem(image_record)
     files, runs, combined = {}, [], []
     for channel in image_record.channels:
         channel_token = channel_label(channel)
         records = Annotation.query.filter_by(channel_id=channel.id, user_id=user_id).all()
-        for record in records:
+        for run_number, record in enumerate(records, 1):
             setting = record.detection_setting
             model = db.session.get(Weights, setting.weights_id) if setting else None
             labels = model.label_set.labels if model and model.label_set else []
@@ -866,7 +878,8 @@ def _image_export(image_record, user_id, label_format, include_confidence):
             if model and 'stardist' in model.name.lower():
                 for row in rows:
                     row['confidence'] = None
-            filename = f'{image_record.id}_{channel_token}_{record.id}.txt' if label_format == 'number' else f'{image_record.id}.txt'
+            filename = (f'{filename_stem}_{channel_token}_run{run_number}.txt'
+                        if label_format == 'number' else f'{filename_stem}.txt')
             line_numbers = []
             lines = []
             for row in rows:
@@ -892,7 +905,7 @@ def _image_export(image_record, user_id, label_format, include_confidence):
                 'file': filename, 'line_numbers': line_numbers, 'annotations': rows,
             })
     if label_format == 'name':
-        files[f'{image_record.id}.txt'] = '\n'.join(combined)
+        files[f'{filename_stem}.txt'] = '\n'.join(combined)
     metadata = {
         'schema_version': 2, 'image_id': image_record.id,
         'image_name': image_record.base_channel.name if image_record.base_channel else None,
@@ -909,8 +922,9 @@ def _image_export(image_record, user_id, label_format, include_confidence):
     return files
 
 
-def _merged_layer_export(image_record, user_id, label_format, include_confidence):
+def _merged_layer_export(image_record, user_id, label_format, include_confidence, filename_stem=None):
     """Build an export package from the image's persisted merged layer."""
+    filename_stem = filename_stem or _export_image_stem(image_record)
     layer = MergedLayer.query.filter_by(image_id=image_record.id, user_id=user_id).first()
     if layer is None:
         raise ValueError(f'No merged layer exists for image {image_record.id}')
@@ -950,7 +964,7 @@ def _merged_layer_export(image_record, user_id, label_format, include_confidence
             csv.writer(inputs).writerow(box.get(channel, '') for channel in input_channels)
             line += ' ' + inputs.getvalue().removesuffix('\r\n')
         lines.append(line)
-    filename = f'{image_record.id}_merged.txt'
+    filename = f'{filename_stem}_merged.txt'
     metadata = {
         'schema_version': 3 if input_channels else 2,
         'image_id': image_record.id,
@@ -1004,10 +1018,17 @@ def export_annotations():
         if not images:
             return jsonify({'error': 'No images found'}), 404
         buffer = io.BytesIO()
+        used_stems = set()
         with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
             for image in images:
+                original_stem = _export_image_stem(image)
+                filename_stem, suffix = original_stem, 2
+                while filename_stem.casefold() in used_stems:
+                    filename_stem = f'{original_stem}_{suffix}'
+                    suffix += 1
+                used_stems.add(filename_stem.casefold())
                 exporter = _merged_layer_export if layer == 'merged' else _image_export
-                for filename, contents in exporter(image, g.user.id, label_format, include_confidence).items():
+                for filename, contents in exporter(image, g.user.id, label_format, include_confidence, filename_stem).items():
                     archive.writestr(filename, contents)
         buffer.seek(0)
         return send_file(buffer, mimetype='application/zip', as_attachment=True,

@@ -93,8 +93,11 @@ or build time, so restart the dev server or rebuild the frontend after changing 
 
 Exports from the React/backend application now return a ZIP for both individual
 images and image sets. Each image includes a `<image-id>.metadata.json` sidecar.
-Text filenames use stable image/annotation IDs to avoid collisions between images,
-channels, or settings with identical names; human-readable names are in metadata.
+Text filenames use the original image name: `<image-name>.txt` in class-name mode,
+`<image-name>_C1_run1.txt` (channel and run number) in class-number mode, and
+`<image-name>_merged.txt` for merged layers. Duplicate image names in an image-set
+export receive numeric suffixes (`_2`, `_3`, etc.). Metadata references the exported
+text filenames and retains the image and annotation IDs.
 
 Every exported TXT row starts with a separate channel column (`C1`, `C2`, `C3`, etc.),
 using the UI channel order plus one. Metadata maps these labels to channel names
